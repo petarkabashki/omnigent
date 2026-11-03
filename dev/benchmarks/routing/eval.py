@@ -297,17 +297,36 @@ def independent_difference_interval(
 def bootstrap_cost_ratio(
     pairs: Sequence[tuple[float, float]], resamples: int = 2000, seed: int = 0
 ) -> tuple[float, float, float]:
-    """Ratio of total router cost to total baseline cost, with a percentile bootstrap CI."""
+    """Geometric-mean router/baseline cost ratio with a 95% bootstrap CI.
 
-    def ratio(sample: Sequence[tuple[float, float]]) -> float:
-        baseline_total = sum(baseline for baseline, _ in sample)
-        return sum(router for _, router in sample) / baseline_total if baseline_total else math.inf
-
+    Each pair is ``(baseline_usd, router_usd)`` for one task. Tasks are resampled
+    whole, and the mean is taken on per-task log ratios because run cost is
+    heavy-tailed.
+    """
+    if any(baseline <= 0 or router <= 0 for baseline, router in pairs):
+        raise ValueError("billed cost must be positive for every paired run")
+    log_ratios = [math.log(router / baseline) for baseline, router in pairs]
     generator = random.Random(seed)
     draws = sorted(
-        ratio([pairs[generator.randrange(len(pairs))] for _ in pairs]) for _ in range(resamples)
+        statistics.fmean(log_ratios[generator.randrange(len(log_ratios))] for _ in log_ratios)
+        for _ in range(resamples)
     )
-    return (ratio(pairs), draws[int(0.025 * resamples)], draws[int(0.975 * resamples) - 1])
+    return (
+        math.exp(statistics.fmean(log_ratios)),
+        math.exp(draws[int(0.025 * resamples)]),
+        math.exp(draws[int(0.975 * resamples) - 1]),
+    )
+
+
+def tasks_for_cost_bound(
+    tasks: int, ratio: float, ratio_high: float, cost_limit: float
+) -> int | None:
+    """Tasks needed for the CI's upper bound to reach ``cost_limit``, scaling as 1/sqrt(n)."""
+    headroom = math.log(cost_limit) - math.log(ratio)
+    half_width = math.log(ratio_high) - math.log(ratio)
+    if headroom <= 0:
+        return None
+    return max(tasks, math.ceil(tasks * (half_width / headroom) ** 2 - 1e-9))
 
 
 def cusum_alarm(
@@ -345,6 +364,8 @@ class OfflineVerdict:
     cost_ratio: float
     cost_ratio_low: float
     cost_ratio_high: float
+    binding: str | None = None
+    tasks_needed: int | None = None
 
 
 def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
@@ -374,16 +395,25 @@ def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
     ratio, ratio_low, ratio_high = bootstrap_cost_ratio(
         [(float(arms["baseline"]["usd"]), float(arms["router"]["usd"])) for arms in paired]
     )
+    # The most lenient cost limit the success result qualifies for, if any.
+    if low > 0:
+        cost_limit: float | None = 1 + MAX_COST_INCREASE
+    elif low >= -NON_INFERIORITY_MARGIN:
+        cost_limit = 1 - MIN_COST_SAVING
+    else:
+        cost_limit = None
+    binding = tasks_needed = None
     if len(paired) < MIN_PAIRED_TASKS:
         verdict = "insufficient"
-    elif (low > 0 and ratio_high <= 1 + MAX_COST_INCREASE) or (
-        low >= -NON_INFERIORITY_MARGIN and ratio_high <= 1 - MIN_COST_SAVING
-    ):
+    elif cost_limit is not None and ratio_high <= cost_limit:
         verdict = "promote"
     elif high < -NON_INFERIORITY_MARGIN:
         verdict = "reject"
     else:
         verdict = "not_separated"
+        if cost_limit is not None and ratio < cost_limit:
+            binding = "cost"
+            tasks_needed = tasks_for_cost_bound(len(paired), ratio, ratio_high, cost_limit)
     return OfflineVerdict(
         verdict,
         len(paired),
@@ -395,6 +425,8 @@ def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
         ratio,
         ratio_low,
         ratio_high,
+        binding,
+        tasks_needed,
     )
 
 

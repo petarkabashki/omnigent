@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 
 import pytest
@@ -15,6 +16,7 @@ from dev.benchmarks.routing.eval import (
     main,
     offline_verdict,
     paired_difference_interval,
+    tasks_for_cost_bound,
     wilson_interval,
 )
 
@@ -208,6 +210,39 @@ def test_offline_verdict_ignores_unpaired_tasks() -> None:
         {"task_id": "x", "arm": "router", "passed": True, "usd": 1},
     ]
     assert offline_verdict(rows).pairs == 300
+
+
+def _noisy_cost_replay(tasks: int, seed: int) -> list[dict]:
+    generator = random.Random(seed)
+    rows = []
+    for task in range(tasks):
+        baseline_usd = math.exp(generator.gauss(0, 1.5))
+        router_usd = baseline_usd * math.exp(generator.gauss(math.log(0.8), 1.0))
+        rows.append({"task_id": task, "arm": "baseline", "passed": True, "usd": baseline_usd})
+        rows.append({"task_id": task, "arm": "router", "passed": True, "usd": router_usd})
+    return rows
+
+
+def test_cost_binding_reports_tasks_needed_and_that_n_suffices() -> None:
+    result = offline_verdict(_noisy_cost_replay(300, seed=5))
+    assert result.verdict == "not_separated"
+    assert result.cost_ratio < 0.85 < result.cost_ratio_high
+    assert result.binding == "cost"
+    assert result.tasks_needed is not None and result.tasks_needed > 300
+    larger = offline_verdict(_noisy_cost_replay(2 * result.tasks_needed, seed=6))
+    assert larger.verdict == "promote"
+
+
+def test_tasks_for_cost_bound() -> None:
+    assert tasks_for_cost_bound(300, 0.8, 0.8 * math.exp(0.1), 0.8 * math.exp(0.05)) == 1200
+    assert tasks_for_cost_bound(300, 0.9, 0.95, 0.85) is None
+
+
+def test_cost_ratio_rejects_non_positive_cost() -> None:
+    rows = _replay(300, 0.8, 0.7, 1.0)
+    rows[1]["usd"] = 0
+    with pytest.raises(ValueError):
+        offline_verdict(rows)
 
 
 def _arm_rows(arm: str, total: int, overridden: int, **fields) -> list[DecisionRow]:
