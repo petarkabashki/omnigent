@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import yaml
+
 from omnigent.session_alias_client import ALIAS_PATTERN
+from omnigent.spec.parser import _FRONTMATTER_RE
 
 _logger = logging.getLogger(__name__)
 
@@ -43,6 +46,22 @@ def _find_role_file(directory: Path, alias: str) -> Path | None:
     return None
 
 
+def split_role_file(text: str) -> tuple[dict[str, object], str]:
+    """Split optional YAML front matter from a role file's Markdown body.
+
+    Unreadable front matter is dropped with a warning; the body still loads.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return {}, text
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        _logger.warning("Ignoring unreadable role front matter: %s", exc)
+        meta = None
+    return (meta if isinstance(meta, dict) else {}), match.group(2)
+
+
 def load_role_instructions(
     alias: str | None, workspace: str | None, *, home: Path | None = None
 ) -> str | None:
@@ -64,8 +83,11 @@ def load_role_instructions(
         except OSError as exc:
             _logger.warning("Could not read role instructions in %s: %s", directory, exc)
             continue
-        text = raw.decode("utf-8", errors="replace").strip()
+        meta, body = split_role_file(raw.decode("utf-8", errors="replace"))
+        text = body.strip()
         if not text:
             return None
-        return f"## Role: {alias}\n\nRole instructions from {path}:\n\n{text}"
+        description = meta.get("description")
+        summary = f" ({description.strip()})" if isinstance(description, str) else ""
+        return f"## Role: {alias}{summary}\n\nRole instructions from {path}:\n\n{text}"
     return None

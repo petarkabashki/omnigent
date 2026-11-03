@@ -47,3 +47,19 @@ def test_role_file_is_truncated(tmp_path: Path) -> None:
     _write_role(tmp_path, "Big.md", "x" * (MAX_ROLE_FILE_BYTES + 100))
     text = load_role_instructions("Big", str(tmp_path), home=tmp_path / "h")
     assert text is not None and text.count("x") == MAX_ROLE_FILE_BYTES
+
+
+def test_front_matter_description_heads_the_role(tmp_path: Path) -> None:
+    _write_role(
+        tmp_path, "Bench.md", "---\ndescription: Evals and verification\n---\nRun evals.\n"
+    )
+    text = load_role_instructions("Bench", str(tmp_path), home=tmp_path / "h")
+    assert text is not None
+    assert text.startswith("## Role: Bench (Evals and verification)\n")
+    assert text.endswith("Run evals.") and "description:" not in text
+
+
+def test_unreadable_front_matter_keeps_the_body(tmp_path: Path) -> None:
+    _write_role(tmp_path, "Bench.md", "---\n: [unclosed\n---\nRun evals.\n")
+    text = load_role_instructions("Bench", str(tmp_path), home=tmp_path / "h")
+    assert text is not None and text.startswith("## Role: Bench\n") and text.endswith("Run evals.")
