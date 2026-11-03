@@ -364,16 +364,32 @@ class OfflineVerdict:
     cost_ratio: float
     cost_ratio_low: float
     cost_ratio_high: float
+    total_cost_ratio: float
+    max_task_cost_ratio: float
+    share_tasks_over_2x: float
     binding: str | None = None
     tasks_needed: int | None = None
+
+
+@dataclass(frozen=True)
+class CostRoute:
+    """A success condition with its geomean-CI limit and total-$ guard."""
+
+    name: str
+    geomean_limit: float
+    total_limit: float
+
+
+SUCCESS_ROUTE = CostRoute("success", 1 + MAX_COST_INCREASE, 1 + MAX_COST_INCREASE)
+CHEAPER_ROUTE = CostRoute("cheaper", 1 - MIN_COST_SAVING, 1.0)
 
 
 def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
     """Apply the promotion bar to paired replay results.
 
-    Each replay row is ``{task_id, arm: baseline|router, passed, usd}``. Cost bounds
-    use the upper end of the bootstrap CI, so a promotion never rests on a cost
-    saving the data cannot separate from noise.
+    Each replay row is ``{task_id, arm: baseline|router, passed, usd}``. A route
+    promotes when the geomean cost CI's upper bound meets its limit and the total-$
+    ratio point estimate meets its guard.
     """
     by_task: dict[str, dict[str, dict[str, Any]]] = {}
     for result in replay:
@@ -383,50 +399,64 @@ def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
         raise ValueError("no task has both a baseline and a router result")
     both = only_router = only_baseline = neither = 0
     for arms in paired:
-        router_passed, baseline_passed = (
-            bool(arms["router"]["passed"]),
-            bool(arms["baseline"]["passed"]),
-        )
+        router_passed = bool(arms["router"]["passed"])
+        baseline_passed = bool(arms["baseline"]["passed"])
         both += router_passed and baseline_passed
         only_router += router_passed and not baseline_passed
         only_baseline += baseline_passed and not router_passed
         neither += not (router_passed or baseline_passed)
     delta, low, high = paired_difference_interval(both, only_router, only_baseline, neither)
-    ratio, ratio_low, ratio_high = bootstrap_cost_ratio(
-        [(float(arms["baseline"]["usd"]), float(arms["router"]["usd"])) for arms in paired]
-    )
-    # The most lenient cost limit the success result qualifies for, if any.
+    cost_pairs = [
+        (float(arms["baseline"]["usd"]), float(arms["router"]["usd"])) for arms in paired
+    ]
+    ratio, ratio_low, ratio_high = bootstrap_cost_ratio(cost_pairs)
+    total_ratio = sum(router for _, router in cost_pairs) / sum(base for base, _ in cost_pairs)
+    task_ratios = [router / baseline for baseline, router in cost_pairs]
+
+    routes = []
     if low > 0:
-        cost_limit: float | None = 1 + MAX_COST_INCREASE
-    elif low >= -NON_INFERIORITY_MARGIN:
-        cost_limit = 1 - MIN_COST_SAVING
-    else:
-        cost_limit = None
+        routes.append(SUCCESS_ROUTE)
+    if low >= -NON_INFERIORITY_MARGIN:
+        routes.append(CHEAPER_ROUTE)
     binding = tasks_needed = None
     if len(paired) < MIN_PAIRED_TASKS:
         verdict = "insufficient"
-    elif cost_limit is not None and ratio_high <= cost_limit:
+    elif any(
+        ratio_high <= route.geomean_limit and total_ratio <= route.total_limit for route in routes
+    ):
         verdict = "promote"
     elif high < -NON_INFERIORITY_MARGIN:
         verdict = "reject"
     else:
         verdict = "not_separated"
-        if cost_limit is not None and ratio < cost_limit:
+        more_tasks_help = [
+            route
+            for route in routes
+            if ratio < route.geomean_limit and total_ratio <= route.total_limit
+        ]
+        if more_tasks_help:
             binding = "cost"
-            tasks_needed = tasks_for_cost_bound(len(paired), ratio, ratio_high, cost_limit)
+            tasks_needed = tasks_for_cost_bound(
+                len(paired), ratio, ratio_high, more_tasks_help[0].geomean_limit
+            )
+        elif any(ratio < route.geomean_limit for route in routes):
+            binding = "total_cost"
     return OfflineVerdict(
-        verdict,
-        len(paired),
-        only_router,
-        only_baseline,
-        delta,
-        low,
-        high,
-        ratio,
-        ratio_low,
-        ratio_high,
-        binding,
-        tasks_needed,
+        verdict=verdict,
+        pairs=len(paired),
+        discordant_router_only=only_router,
+        discordant_baseline_only=only_baseline,
+        success_delta=delta,
+        success_low=low,
+        success_high=high,
+        cost_ratio=ratio,
+        cost_ratio_low=ratio_low,
+        cost_ratio_high=ratio_high,
+        total_cost_ratio=total_ratio,
+        max_task_cost_ratio=max(task_ratios),
+        share_tasks_over_2x=sum(task > 2 for task in task_ratios) / len(task_ratios),
+        binding=binding,
+        tasks_needed=tasks_needed,
     )
 
 

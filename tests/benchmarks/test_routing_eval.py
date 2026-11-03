@@ -202,6 +202,7 @@ def test_offline_verdict_applies_promotion_bar(tasks, router_pass, router_usd, v
     result = offline_verdict(_replay(tasks, router_pass, 0.70, router_usd))
     assert result.verdict == verdict
     assert result.pairs == tasks
+    assert result.total_cost_ratio == pytest.approx((router_usd + 0.05) / 1.05, rel=0.05)
 
 
 def test_offline_verdict_ignores_unpaired_tasks() -> None:
@@ -216,8 +217,8 @@ def _noisy_cost_replay(tasks: int, seed: int) -> list[dict]:
     generator = random.Random(seed)
     rows = []
     for task in range(tasks):
-        baseline_usd = math.exp(generator.gauss(0, 1.5))
-        router_usd = baseline_usd * math.exp(generator.gauss(math.log(0.8), 1.0))
+        baseline_usd = math.exp(generator.gauss(0, 0.2))
+        router_usd = baseline_usd * math.exp(generator.gauss(math.log(0.82), 0.6))
         rows.append({"task_id": task, "arm": "baseline", "passed": True, "usd": baseline_usd})
         rows.append({"task_id": task, "arm": "router", "passed": True, "usd": router_usd})
     return rows
@@ -227,10 +228,31 @@ def test_cost_binding_reports_tasks_needed_and_that_n_suffices() -> None:
     result = offline_verdict(_noisy_cost_replay(300, seed=5))
     assert result.verdict == "not_separated"
     assert result.cost_ratio < 0.85 < result.cost_ratio_high
+    assert result.total_cost_ratio <= 1.0
     assert result.binding == "cost"
     assert result.tasks_needed is not None and result.tasks_needed > 300
     larger = offline_verdict(_noisy_cost_replay(2 * result.tasks_needed, seed=6))
     assert larger.verdict == "promote"
+
+
+def _blowup_replay(tasks: int) -> list[dict]:
+    rows = []
+    for task in range(tasks):
+        router_usd = 20.0 if task % 50 == 0 else 0.6 + (task % 7) * 0.01
+        rows.append({"task_id": task, "arm": "baseline", "passed": True, "usd": 1.0})
+        rows.append({"task_id": task, "arm": "router", "passed": True, "usd": router_usd})
+    return rows
+
+
+def test_total_cost_guard_blocks_occasional_blowups() -> None:
+    result = offline_verdict(_blowup_replay(300))
+    assert result.cost_ratio_high < 0.85
+    assert result.total_cost_ratio > 1.0
+    assert result.verdict == "not_separated"
+    assert result.binding == "total_cost"
+    assert result.tasks_needed is None
+    assert result.max_task_cost_ratio == pytest.approx(20.0)
+    assert result.share_tasks_over_2x == pytest.approx(6 / 300)
 
 
 def test_tasks_for_cost_bound() -> None:
