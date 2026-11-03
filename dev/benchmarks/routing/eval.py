@@ -23,7 +23,7 @@ import math
 import random
 import statistics
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -160,8 +160,15 @@ def _attach_outcomes(rows: dict[str, DecisionRow], outcomes: Iterable[dict[str, 
             row.success = has_accept or checks[row.decision_id][1]
 
 
-def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
-    """Per-site counts that every verdict must report alongside it."""
+def coverage_by_site(
+    rows: Sequence[DecisionRow], preflight: Sequence[Mapping[str, Any]] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Per-site counts that every verdict must report alongside it.
+
+    ``qualified`` comes from ``replay preflight`` output and stays None until one has
+    run, so an unmeasured count never reads as zero.
+    """
+    statuses = None if preflight is None else {row["task_id"]: row["status"] for row in preflight}
     report: dict[str, dict[str, Any]] = {}
     for row in rows:
         site = report.setdefault(
@@ -169,6 +176,7 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
             {
                 "decisions": 0,
                 "with_check": 0,
+                "qualified": None if statuses is None else 0,
                 "with_success_label": 0,
                 "overridden": 0,
                 "pinned": 0,
@@ -187,6 +195,8 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
         site["offline_eligible"] += row.offline_eligible
         site["dropped"] += row.dropped
         site["check_errors"] += row.check_errors
+        if statuses is not None:
+            site["qualified"] += statuses.get(row.decision_id) == "qualified"
     for site in report.values():
         site["check_coverage"] = site["with_check"] / site["decisions"]
     return report
@@ -512,6 +522,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = commands.add_parser(name)
         command.add_argument("--decisions", type=Path, required=True)
         command.add_argument("--outcomes", type=Path)
+        if name == "dataset":
+            command.add_argument("--preflight", type=Path)
         if name == "estimate":
             command.add_argument("--router-backend", default="smart")
             command.add_argument("--tasks", type=int, default=MIN_PAIRED_TASKS)
@@ -525,7 +537,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             read_jsonl(args.decisions), read_jsonl(args.outcomes) if args.outcomes else ()
         )
         if args.command == "dataset":
-            result = coverage_by_site(rows)
+            preflight = read_jsonl(args.preflight) if args.preflight else None
+            result = coverage_by_site(rows, preflight)
         elif args.command == "estimate":
             result = estimate_offline_cost(rows, args.router_backend, args.tasks)
         else:

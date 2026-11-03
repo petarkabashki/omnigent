@@ -128,6 +128,19 @@ def test_coverage_counts_dropped_oversized_records() -> None:
     assert coverage_by_site(rows)["session_create"]["dropped"] == 1
 
 
+def test_coverage_reports_qualified_beside_with_check() -> None:
+    rows = build_dataset(
+        [_decision(name, check_ref="sha256:c") for name in ("good", "vacuous", "unrun")]
+    )
+    preflight = [
+        {"task_id": "good", "status": "qualified"},
+        {"task_id": "vacuous", "status": "vacuous"},
+    ]
+    assert coverage_by_site(rows)["session_create"]["qualified"] is None
+    site = coverage_by_site(rows, preflight)["session_create"]
+    assert (site["with_check"], site["qualified"]) == (3, 1)
+
+
 def test_estimate_prices_router_arm_by_observed_model_cost() -> None:
     decisions = [
         _decision("a", decision={"model": "big"}, actual={"model": "big"}),
@@ -313,3 +326,8 @@ def test_cli_dataset(tmp_path, capsys) -> None:
     decisions.write_text("\n".join(json.dumps(_decision(f"d{i}")) for i in range(3)) + "\n")
     assert main(["dataset", "--decisions", str(decisions)]) == 0
     assert json.loads(capsys.readouterr().out)["session_create"]["decisions"] == 3
+    preflight = tmp_path / "preflight.jsonl"
+    preflight.write_text(json.dumps({"task_id": "d0", "status": "qualified"}) + "\n")
+    arguments = ["dataset", "--decisions", str(decisions), "--preflight", str(preflight)]
+    assert main(arguments) == 0
+    assert json.loads(capsys.readouterr().out)["session_create"]["qualified"] == 1
