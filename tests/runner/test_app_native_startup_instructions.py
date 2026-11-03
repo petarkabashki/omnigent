@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from omnigent.runner.app import ResolvedSpec, _native_startup_raw_instructions_from_spec
+from omnigent.runner.native.orchestration import (
+    ResolvedSpec,
+    _native_startup_raw_instructions_from_spec,
+)
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 
 
@@ -62,3 +65,44 @@ def test_native_startup_raw_instructions_from_spec_never_returns_stripped_form()
     """The original resolved text is preserved verbatim, not the stripped form."""
     padded = "  Keep leading/trailing whitespace exactly.  "
     assert _native_startup_raw_instructions_from_spec(_spec(padded)) == padded
+
+
+def test_native_startup_instructions_append_role_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aliased session's role file layers after the author instructions."""
+    from omnigent.runner.session_init_protocol import (
+        RunnerSessionInitEnvelope,
+        RunnerSessionInitSnapshot,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    roles = tmp_path / "ws" / ".omnigent" / "roles"
+    roles.mkdir(parents=True)
+    (roles / "Architect.md").write_text("Own the server design.\n")
+
+    def init(labels: dict[str, str]) -> RunnerSessionInitEnvelope:
+        return RunnerSessionInitEnvelope(
+            protocol_version=2,
+            server_version="test",
+            session_id="s1",
+            agent_id="a1",
+            snapshot=RunnerSessionInitSnapshot(
+                created_at=0, updated_at=0, workspace=str(tmp_path / "ws"), labels=labels
+            ),
+        )
+
+    composed = _native_startup_raw_instructions_from_spec(
+        _spec("Be concise."), init({"omnigent.alias": "Architect"})
+    )
+    assert composed is not None
+    assert composed.startswith("Be concise.\n\n## Role: Architect\n")
+    assert composed.endswith("Own the server design.")
+    # No alias, or a spec without instructions, still behaves as before.
+    assert _native_startup_raw_instructions_from_spec(_spec("Be concise."), init({})) == (
+        "Be concise."
+    )
+    role_only = _native_startup_raw_instructions_from_spec(
+        _spec(None), init({"omnigent.alias": "architect"})
+    )
+    assert role_only is not None and role_only.startswith("## Role: architect\n")

@@ -2776,6 +2776,7 @@ async def _auto_create_pi_terminal(
     server_client: httpx.AsyncClient | None,
     agent_spec: AgentSpec | ResolvedSpec | None = None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
+    session_init: RunnerSessionInitEnvelope | None = None,
 ) -> SessionResourceView:
     """
     Auto-create a Pi terminal for a pi-native session.
@@ -2894,7 +2895,7 @@ async def _auto_create_pi_terminal(
         workspace=launch_config.workspace,
         server_client=server_client,
     )
-    raw_instructions = _native_startup_raw_instructions_from_spec(agent_spec)
+    raw_instructions = _native_startup_raw_instructions_from_spec(agent_spec, session_init)
     instructions_path = write_agent_instructions(bridge_dir, raw_instructions)
     pi_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     context_files = True
@@ -4172,6 +4173,7 @@ async def _auto_create_devin_terminal(
     server_client: httpx.AsyncClient | None,
     ensure_comment_relay: _EnsureCommentRelay | None = None,
     agent_spec: AgentSpec | ResolvedSpec | None = None,
+    session_init: RunnerSessionInitEnvelope | None = None,
 ) -> SessionResourceView:
     """Auto-create the Devin TUI terminal for a devin-native session.
 
@@ -4220,7 +4222,7 @@ async def _auto_create_devin_terminal(
     # would not be session-scoped — a home-directory workspace Devin reads from
     # every cwd, or one another agent's live rule already owns — the instructions
     # ride the first message instead, which is weaker but stays in this session.
-    raw_instructions = _native_startup_raw_instructions_from_spec(agent_spec)
+    raw_instructions = _native_startup_raw_instructions_from_spec(agent_spec, session_init)
     rule_is_live = write_devin_agent_rule(workspace_path, raw_instructions, session_id=session_id)
     if raw_instructions and not rule_is_live:
         write_agent_instructions_preamble(bridge_dir, raw_instructions)
@@ -5784,7 +5786,7 @@ async def _auto_create_codex_terminal(
         "\n\n".join(
             x
             for x in [
-                _native_startup_raw_instructions_from_spec(agent_spec),
+                _native_startup_raw_instructions_from_spec(agent_spec, session_init),
                 _codex_routing_note,
             ]
             if x
@@ -7734,6 +7736,7 @@ def _opencode_session_instructions_from_spec(
 
 def _native_startup_raw_instructions_from_spec(
     agent_spec: AgentSpec | ResolvedSpec | None,
+    session_init: RunnerSessionInitEnvelope | None = None,
 ) -> str | None:
     """Read raw author instructions for a native harness's startup-additive channel.
 
@@ -7748,15 +7751,22 @@ def _native_startup_raw_instructions_from_spec(
 
     :param agent_spec: Agent spec object, or a resolved wrapper carrying a
         ``spec`` attribute. ``None`` means no spec was available.
-    :returns: The original resolved instructions text, or ``None`` when
-        absent/whitespace-only.
+    :param session_init: The session snapshot; an aliased session appends its
+        role file (see :mod:`omnigent.runtime.role_instructions`).
+    :returns: The author instructions followed by any role instructions, or
+        ``None`` when both are absent/whitespace-only.
     """
     from omnigent.runtime.prompt import raw_author_instructions
+    from omnigent.runtime.role_instructions import load_role_instructions
+    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
 
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
-    if spec is None:
-        return None
-    return raw_author_instructions(spec)
+    author = raw_author_instructions(spec) if spec is not None else None
+    role = None
+    if session_init is not None:
+        snapshot = session_init.snapshot
+        role = load_role_instructions(snapshot.labels.get(ALIAS_LABEL_KEY), snapshot.workspace)
+    return "\n\n".join(part for part in (author, role) if part) or None
 
 
 def _cursor_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:
@@ -9820,7 +9830,10 @@ async def _auto_create_claude_terminal(
         subagent_router_dir=subagent_router_dir,
         append_system_prompt="\n\n".join(
             x
-            for x in [_native_startup_raw_instructions_from_spec(agent_spec), routed_spawn_note]
+            for x in [
+                _native_startup_raw_instructions_from_spec(agent_spec, session_init),
+                routed_spawn_note,
+            ]
             if x
         )
         or None,
@@ -10524,6 +10537,7 @@ async def _launch_pi(ctx: NativeLaunchContext) -> SessionResourceView:
         server_client=ctx.server_client,
         agent_spec=ctx.agent_spec,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        session_init=ctx.session_init,
     )
 
 
@@ -10560,6 +10574,7 @@ async def _launch_devin(ctx: NativeLaunchContext) -> SessionResourceView:
         server_client=ctx.server_client,
         ensure_comment_relay=ctx.ensure_comment_relay,
         agent_spec=ctx.agent_spec,
+        session_init=ctx.session_init,
     )
 
 
