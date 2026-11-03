@@ -22,6 +22,8 @@ DEFAULT_AG_FLEET_BIN = "ag-fleet"
 PLACEMENT_TIMEOUT_S = 15.0
 PLACEMENT_SCHEMA_VERSION = 1
 PLACEMENT_REASON_LABEL_KEY = "omnigent.placement_reason"
+# ag-fleet request id, to match a session to ag-fleet's own logs.
+PLACEMENT_REQUEST_ID_LABEL_KEY = "omnigent.placement_request_id"
 DEFAULT_RESERVATION_TTL_S = 120
 MAX_REQUEST_ID_LENGTH = 64
 

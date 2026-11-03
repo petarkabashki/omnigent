@@ -706,7 +706,7 @@ class SysSessionGetInfoTool(Tool):
         return (
             "Return a session's metadata: lifecycle status, title, "
             "agent binding (id/name), runner binding + connectivity, "
-            "host + configured harness readiness, reasoning effort, model, "
+            "host (harness readiness only with include_harnesses), reasoning effort, model, "
             "parent session, workspace, "
             "persisted last-activity time, and outstanding approval "
             "prompts. Global read — any "
@@ -738,6 +738,13 @@ class SysSessionGetInfoTool(Tool):
                                 "from sys_session_list or a prior "
                                 "sys_session_send handle. Omit to "
                                 "describe the calling session itself."
+                            ),
+                        },
+                        "include_harnesses": {
+                            "type": "boolean",
+                            "description": (
+                                "Also return the host's configured_harnesses "
+                                "readiness map (large). Default false."
                             ),
                         },
                     },

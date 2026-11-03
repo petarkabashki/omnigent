@@ -6,7 +6,10 @@ import asyncio
 import json
 
 from omnigent.db.utils import now_epoch
-from omnigent.server.host_placement import PLACEMENT_REASON_LABEL_KEY
+from omnigent.server.host_placement import (
+    PLACEMENT_REASON_LABEL_KEY,
+    PLACEMENT_REQUEST_ID_LABEL_KEY,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.fake_ag_fleet import install_fake_ag_fleet, read_calls
 from tests.server.integration.test_managed_startup_inputs import auth_app as auth_app
@@ -82,6 +85,8 @@ async def test_create_with_host_needs_places_launches_and_releases(
 
     place, release = await _wait_for_calls(tmp_path, 2)
     assert place["args"][place["args"].index("--host") + 1] == "box"
+    request_id = place["args"][place["args"].index("--request-id") + 1]
+    assert row.labels[PLACEMENT_REQUEST_ID_LABEL_KEY] == request_id
     (snapshot_row,) = json.loads(place["stdin"])
     assert snapshot_row["host_id"] == host_id
     assert snapshot_row["configured_harnesses"] == ["claude-sdk"]
@@ -184,4 +189,5 @@ async def test_caller_cannot_forge_placement_reason_label(
     )
     assert created.status_code == 201, created.text
     row = SqlAlchemyConversationStore(db_uri).get_conversation(created.json()["id"])
+    assert row is not None
     assert PLACEMENT_REASON_LABEL_KEY not in row.labels

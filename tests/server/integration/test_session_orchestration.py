@@ -1266,6 +1266,18 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
         in (await _send(auth_client, source, {"id": "py-qwant/Nobody"}))["error"]
     )
 
+    listing = json.loads(
+        await execute_tool(
+            tool_name="sys_session_list",
+            arguments="{}",
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    handles = {row["session_id"]: row["handle"] for row in listing["sessions"]}
+    assert handles[target["id"]] == "py-qwant/Product"
+    assert handles[other["id"]] is None
+
     listed = (await auth_client.get("/v1/sessions/aliases", params={"project": "py-qwant"})).json()
     assert {entry["handle"] for entry in listed["data"]} == {
         "py-qwant/Architect",

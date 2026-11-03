@@ -80,11 +80,13 @@ from omnigent.server.auth import (
 from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     BackgroundTitleRequest,
+    is_role_session_title,
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
 from omnigent.server.host_placement import (
     PLACEMENT_REASON_LABEL_KEY,
+    PLACEMENT_REQUEST_ID_LABEL_KEY,
     PlacementError,
     PlacementRefusedError,
     build_hosts_snapshot,
@@ -789,6 +791,7 @@ def register_core_routes(
             raise OmnigentError(exc.message, code=ErrorCode.INTERNAL_ERROR) from exc
         request.state.placement_scope.reservation_ids.append(placement.reservation_id)
         labels = dict(body.labels)
+        labels[PLACEMENT_REQUEST_ID_LABEL_KEY] = placement.request_id
         if placement.reason:
             labels[PLACEMENT_REASON_LABEL_KEY] = placement.reason[
                 :_PLACEMENT_REASON_LABEL_MAX_CHARS
@@ -1248,7 +1251,8 @@ def register_core_routes(
         inherit_project = (
             source is not None and body.project_id is None and body.parent_session_id is None
         )
-        body.labels.pop(PLACEMENT_REASON_LABEL_KEY, None)  # server-set provenance only
+        for key in (PLACEMENT_REASON_LABEL_KEY, PLACEMENT_REQUEST_ID_LABEL_KEY):
+            body.labels.pop(key, None)  # server-set provenance only
         if body.host_needs is not None and body.host_id is not None:
             raise OmnigentError(
                 "host_needs and host_id are mutually exclusive", code=ErrorCode.INVALID_INPUT
@@ -1534,7 +1538,8 @@ def register_core_routes(
         )
         _reject_reserved_cost_control_label_seed(parsed_metadata.labels)
         _reject_server_reserved_label_seed(parsed_metadata.labels)
-        parsed_metadata.labels.pop(PLACEMENT_REASON_LABEL_KEY, None)
+        for key in (PLACEMENT_REASON_LABEL_KEY, PLACEMENT_REQUEST_ID_LABEL_KEY):
+            parsed_metadata.labels.pop(key, None)
 
         inherited_runner_id: str | None = None
         parent_conv = None
@@ -2977,6 +2982,8 @@ def register_core_routes(
             raise _session_not_found()
         if conv.parent_conversation_id is not None:
             return AutomaticSessionRenameResponse(renamed=False, reason="not_top_level")
+        if is_role_session_title(conv.title):
+            return AutomaticSessionRenameResponse(renamed=False, reason="role_title")
 
         title = " ".join(body.title.split())
         if "\n" in body.title or "\r" in body.title or len(title) < 2:

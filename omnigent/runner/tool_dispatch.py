@@ -5352,6 +5352,10 @@ async def _host_harnesses_or_none(
     return readiness if isinstance(readiness, dict) else None
 
 
+async def _none() -> None:
+    """Awaitable placeholder for a skipped lookup in ``asyncio.gather``."""
+
+
 async def _session_get_info_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -5409,9 +5413,11 @@ async def _session_get_info_via_rest(
     snap_agent_name = _optional_string(snap.get("agent_name"))
     snap_runner_id = _optional_string(snap.get("runner_id"))
     snap_host_id = _optional_string(snap.get("host_id"))
+    # The readiness map is ~50 entries; leave it out unless asked, to keep lookups cheap.
+    include_harnesses = args.get("include_harnesses") is True
     runner_online, configured_harnesses = await asyncio.gather(
         _runner_online_or_none(snap_runner_id, server_client),
-        _host_harnesses_or_none(snap_host_id, server_client),
+        _host_harnesses_or_none(snap_host_id, server_client) if include_harnesses else _none(),
     )
     return json.dumps(
         {
@@ -5432,7 +5438,7 @@ async def _session_get_info_via_rest(
             "runner_id": snap.get("runner_id"),
             "runner_online": runner_online,
             "host_id": snap.get("host_id"),
-            "configured_harnesses": configured_harnesses,
+            **({"configured_harnesses": configured_harnesses} if include_harnesses else {}),
             "parent_session_id": snap.get("parent_session_id"),
             "created_by_session_id": (_string_mapping(snap.get("labels")) or {}).get(
                 CREATED_BY_SESSION_LABEL_KEY
@@ -6592,14 +6598,16 @@ async def _collect_global_sessions(
         [
             {
                 "session_id": r.get("id"),
-                # ``project/Role`` for owner-aliased sessions; pass it to sys_session_message.
-                **({"handle": handles[r.get("id")]} if r.get("id") in handles else {}),
+                # ``project/Role`` for aliased sessions, else null; pass it to sys_session_message.
+                "handle": handles.get(r.get("id")),
                 # Hide the internal ``-native-ui`` wrapper name (e.g.
                 # ``pi-native-ui`` -> ``Pi``) in the global listing too, matching
                 # ``sys_session_get_info``. The server-side ``agent_name`` filter
                 # above still receives the caller's raw argument unchanged.
                 "agent_name": public_agent_name(_optional_string(r.get("agent_name"))),
                 "title": r.get("title"),
+                # Same-titled role sessions exist in every project; workspace tells them apart.
+                "workspace": r.get("workspace"),
                 "status": r.get("status"),
                 "runner_id": r.get("runner_id"),
                 "runner_online": _RUNNER_ONLINE_SIZING_PLACEHOLDER,

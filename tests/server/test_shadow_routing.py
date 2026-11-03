@@ -128,6 +128,21 @@ def test_pinned_dimensions_reports_explicit_fields() -> None:
     assert sr.pinned_dimensions(Body()) == ["harness", "effort", "host"]
 
 
+def test_pinned_ignores_required_agent_and_keeps_managed_host() -> None:
+    from omnigent.server.schemas import SessionCreateRequest
+
+    plain = SessionCreateRequest.model_validate({"agent_id": "a"})
+    assert sr.pinned_dimensions(plain) == []
+    managed = SessionCreateRequest.model_validate(
+        {"agent_id": "a", "host_type": "managed", "host_id": "0123456789abcdef" * 2}
+    )
+    assert sr.pinned_dimensions(managed) == ["host"]
+    needs_only = SessionCreateRequest.model_validate(
+        {"agent_id": "a", "workspace": "/w", "host_needs": ["gpu"]}
+    )
+    assert sr.pinned_dimensions(needs_only) == []
+
+
 class _RaisingBackend:
     name = "boom"
 
@@ -214,7 +229,7 @@ async def test_create_with_shadow_logs_one_record_and_response_is_unchanged(
     record = records[0]
     assert (record["schema_version"], record["site"]) == (1, "session_create")
     assert record["step_id"] == record["session_id"]
-    assert "agent" in record["pinned"] and "model" not in record["pinned"]
+    assert record["pinned"] == []
 
 
 @pytest.mark.asyncio

@@ -7938,8 +7938,10 @@ async def test_session_list_global_sessions_filter_and_connectivity() -> None:
     assert out["sessions"] == [
         {
             "session_id": "s1",
+            "handle": None,
             "agent_name": "researcher",
             "title": "auth",
+            "workspace": None,
             "status": "running",
             "runner_id": "r1",
             "runner_online": True,
@@ -7948,7 +7950,9 @@ async def test_session_list_global_sessions_filter_and_connectivity() -> None:
         },
         {
             "session_id": "s2",
+            "handle": None,
             "agent_name": "researcher",
+            "workspace": None,
             "title": "payments",
             "status": "idle",
             "runner_id": "r1",
@@ -9031,7 +9035,7 @@ async def test_sys_session_get_info_projects_metadata_and_runner_connectivity() 
     ) as server_client:
         output = await execute_tool(
             tool_name="sys_session_get_info",
-            arguments=json.dumps({"session_id": "conv_target"}),
+            arguments=json.dumps({"session_id": "conv_target", "include_harnesses": True}),
             server_client=server_client,
             conversation_id="conv_caller",
         )
@@ -9087,7 +9091,7 @@ async def test_sys_session_get_info_tolerates_host_readiness_failure(
     ) as server_client:
         output = await execute_tool(
             tool_name="sys_session_get_info",
-            arguments=json.dumps({"session_id": "conv_target"}),
+            arguments=json.dumps({"session_id": "conv_target", "include_harnesses": True}),
             server_client=server_client,
             conversation_id="conv_caller",
         )
@@ -9116,7 +9120,7 @@ async def test_sys_session_get_info_reports_null_readiness_without_host() -> Non
     ) as server_client:
         output = await execute_tool(
             tool_name="sys_session_get_info",
-            arguments=json.dumps({"session_id": "conv_target"}),
+            arguments=json.dumps({"session_id": "conv_target", "include_harnesses": True}),
             server_client=server_client,
             conversation_id="conv_caller",
         )

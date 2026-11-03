@@ -668,7 +668,7 @@ def test_session_get_info_schema_has_optional_session_id() -> None:
         s for s in mgr.get_tool_schemas() if s["function"]["name"] == "sys_session_get_info"
     )
     params = schema["function"]["parameters"]
-    assert set(params["properties"]) == {"session_id"}
+    assert set(params["properties"]) == {"session_id", "include_harnesses"}
     # No required fields — session_id is optional by design.
     assert params["required"] == []
 

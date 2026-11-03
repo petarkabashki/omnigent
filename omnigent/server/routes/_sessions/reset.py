@@ -136,7 +136,8 @@ async def run_context_reset(
             )
     if native:
         raise OmnigentError(
-            "reset not supported for this harness yet", code=ErrorCode.RESET_UNSUPPORTED
+            "Reset in place is SDK-only for now; native support is planned.",
+            code=ErrorCode.RESET_UNSUPPORTED,
         )
     running = _reset_in_flight.get(session_id)
     if running is not None:

@@ -244,6 +244,30 @@ async def test_child_session_cannot_be_renamed_via_agent_endpoint(
     generator.assert_not_awaited()
 
 
+@pytest.mark.parametrize("role_title", ["Product", " architect ", "BENCH"])
+async def test_role_session_title_is_not_renamed_via_agent_endpoint(
+    title_app: FastAPI,
+    title_client: httpx.AsyncClient,
+    title_session: Conversation,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    role_title: str,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    store.update_conversation(title_session.id, title=role_title)
+    generator = AsyncMock()
+    monkeypatch.setattr(title_app.state.background_title_coordinator, "_generator", generator)
+    response = await title_client.post(
+        f"/v1/sessions/{title_session.id}/agent-title", json={"title": "Product Session Setup"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"renamed": False, "title": None, "reason": "role_title"}
+    renamed = store.get_conversation(title_session.id)
+    assert renamed is not None
+    assert renamed.title == role_title
+    generator.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "level,expected_status", [(None, 404), (LEVEL_READ, 403), (LEVEL_EDIT, 200)]
 )

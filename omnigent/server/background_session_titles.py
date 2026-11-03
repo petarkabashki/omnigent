@@ -29,6 +29,16 @@ _logger = logging.getLogger(__name__)
 BACKGROUND_SESSION_TITLES_HEADER = "x-omnigent-background-session-titles"
 
 
+# Permanent role sessions are found by title; agents must not rename them.
+# Interim until role records key this on role holding.
+ROLE_SESSION_TITLES = frozenset({"product", "architect", "bench"})
+
+
+def is_role_session_title(title: str | None) -> bool:
+    """Return whether ``title`` names a permanent role session."""
+    return title is not None and title.strip().casefold() in ROLE_SESSION_TITLES
+
+
 def background_session_titles_enabled(headers: Mapping[str, str]) -> bool:
     """Resolve the browser-local title preference from a request header."""
     return headers.get(BACKGROUND_SESSION_TITLES_HEADER, "on").lower() != "off"

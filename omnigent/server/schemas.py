@@ -2686,7 +2686,10 @@ class AutomaticSessionRenameResponse(BaseModel):
 
     renamed: bool
     title: str | None = None
-    reason: Literal["not_top_level", "no_seed", "title_changed", "generation_failed"] | None = None
+    reason: (
+        Literal["not_top_level", "no_seed", "title_changed", "generation_failed", "role_title"]
+        | None
+    ) = None
 
 
 class ResetSessionModelOverrideRequest(BaseModel):

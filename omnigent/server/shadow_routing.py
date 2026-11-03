@@ -77,12 +77,15 @@ class ActualChoice:
 
 
 # Choice dimension -> create-request fields that set it explicitly.
+# ``agent_id`` is required on every create, so only an executor marks the agent as chosen.
 _PIN_FIELDS: Mapping[str, tuple[str, ...]] = {
-    "agent": ("agent_id", "executor"),
+    "agent": ("executor",),
     "harness": ("harness_override",),
     "model": ("model_override",),
     "effort": ("reasoning_effort",),
-    "host": ("host_id", "host_preference"),
+    # Managed creates move ``host_id`` into ``requested_host_id``. ``host_needs`` is a
+    # constraint the router must honour, not a choice, so it is not a pin.
+    "host": ("host_id", "requested_host_id", "host_preference"),
 }
 
 
