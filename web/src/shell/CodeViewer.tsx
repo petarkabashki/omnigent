@@ -947,23 +947,25 @@ export function CodeViewer({
 
   if (isMarkdownEditor) {
     return (
-      <MarkdownRichTextViewer
-        content={content}
-        conversationId={conversationId}
-        path={path}
-        // Cached content counts: a failed refresh must not leave the previous
-        // file's editor mounted (and saving) under this path.
-        isSettled={fileQuery.data !== undefined}
-        truncated={truncated}
-        onDirtyChange={onDirtyChange}
-        comments={comments}
-        activeSelection={activeSelection}
-        onSetActiveSelection={onSetActiveSelection}
-        pendingBodyRef={pendingBodyRef}
-        searchOpen={searchOpen}
-        onSearchHandled={handleSearchHandled}
-        searchInputRef={searchInputRef}
-      />
+      <div className="contents" data-wrap-lines={String(wrapLines)}>
+        <MarkdownRichTextViewer
+          content={content}
+          conversationId={conversationId}
+          path={path}
+          // Cached content counts: a failed refresh must not leave the previous
+          // file's editor mounted (and saving) under this path.
+          isSettled={fileQuery.data !== undefined}
+          truncated={truncated}
+          onDirtyChange={onDirtyChange}
+          comments={comments}
+          activeSelection={activeSelection}
+          onSetActiveSelection={onSetActiveSelection}
+          pendingBodyRef={pendingBodyRef}
+          searchOpen={searchOpen}
+          onSearchHandled={handleSearchHandled}
+          searchInputRef={searchInputRef}
+        />
+      </div>
     );
   }
 
@@ -988,24 +990,26 @@ export function CodeViewer({
   if (isMarkdownOrNotebookPreview) {
     const isNotebook = isNotebookPath(path);
     return (
-      <PreviewWithSearch
-        content={content}
-        path={path}
-        isNotebook={isNotebook}
-        truncated={truncated}
-        searchOpen={searchOpen}
-        onSearchHandled={handleSearchHandled}
-        searchInputRef={searchInputRef}
-        scrollKey={conversationId && path ? `viewer-preview:${conversationId}:${path}` : null}
-        scrollReady={fileQuery.data !== undefined}
-        tocOpen={tocOpen}
-        onTocOpenChange={(open) => !open && onTocToggle?.()}
-        commentHint={
-          !isNotebook && onRequestEditMode
-            ? { conversationId, onSwitchToEdit: onRequestEditMode }
-            : undefined
-        }
-      />
+      <div className="contents" data-wrap-lines={String(wrapLines)}>
+        <PreviewWithSearch
+          content={content}
+          path={path}
+          isNotebook={isNotebook}
+          truncated={truncated}
+          searchOpen={searchOpen}
+          onSearchHandled={handleSearchHandled}
+          searchInputRef={searchInputRef}
+          scrollKey={conversationId && path ? `viewer-preview:${conversationId}:${path}` : null}
+          scrollReady={fileQuery.data !== undefined}
+          tocOpen={tocOpen}
+          onTocOpenChange={(open) => !open && onTocToggle?.()}
+          commentHint={
+            !isNotebook && onRequestEditMode
+              ? { conversationId, onSwitchToEdit: onRequestEditMode }
+              : undefined
+          }
+        />
+      </div>
     );
   }
 

@@ -1825,15 +1825,18 @@ describe("FileViewer view-settings menu", () => {
     expect(await screen.findByTestId("diff-viewer")).toHaveAttribute("data-wrap-lines", "true");
   });
 
-  it.each(["notes.md", "photo.png"])(
-    "omits Wrap lines for %s, which does not open in Monaco",
-    (path) => {
-      render(viewerTree({ open: true, path }));
-      openSettingsMenu();
-      expect(screen.getByRole("menuitem", { name: "Find in file" })).toBeInTheDocument();
-      expect(screen.queryByRole("menuitem", { name: "Wrap lines" })).toBeNull();
-    },
-  );
+  it("offers Wrap lines for rendered Markdown, which wraps code blocks and tables", () => {
+    render(viewerTree({ open: true, path: "notes.md" }));
+    openSettingsMenu();
+    expect(screen.getByRole("menuitem", { name: "Wrap lines" })).toBeInTheDocument();
+  });
+
+  it("omits Wrap lines for photo.png, which has no text to wrap", () => {
+    render(viewerTree({ open: true, path: "photo.png" }));
+    openSettingsMenu();
+    expect(screen.getByRole("menuitem", { name: "Find in file" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Wrap lines" })).toBeNull();
+  });
 
   it("shows deleted files in diff without changing the global preference or fetching missing content", async () => {
     const changed = vi.mocked(useWorkspaceChangedFiles);

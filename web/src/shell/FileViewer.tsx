@@ -1003,6 +1003,17 @@ function FileViewerBody({
       !isVideo &&
       !isModel &&
       !isBinary);
+  // Rendered Markdown/notebook views (rich editor, preview) wrap code blocks and
+  // table cells through the same preference; their source view is Monaco above.
+  const isRenderedTextWrapSurface =
+    !diffViewActive &&
+    viewMode !== "source" &&
+    (isNotebookPath(path) || (lang === "markdown" && !markdownSourceFallback)) &&
+    !isImage &&
+    !isPdf &&
+    !isVideo &&
+    !isModel &&
+    !isBinary;
   // Cmd+F must open find-in-file only while the file viewer is the surface the
   // user is working in. The viewer stays mounted beside the chat, so `open`
   // alone can't tell them apart, and reading `document.activeElement` at
@@ -1337,9 +1348,9 @@ function FileViewerBody({
       onSelect: downloadFile,
     });
   }
-  // One wrap preference covers the source editor and the diff. Other views
-  // (rich Markdown, previews, the Shiki source view) already wrap.
-  if (isMonacoFindSurface && (diffViewActive || !isDeletedFile)) {
+  // One wrap preference covers the source editor, the diff and rendered
+  // Markdown/notebook views. The Shiki source view always wraps.
+  if ((isMonacoFindSurface || isRenderedTextWrapSurface) && (diffViewActive || !isDeletedFile)) {
     settingsMenu.push({
       key: "wrap-lines",
       label: "Wrap lines",
