@@ -1003,6 +1003,7 @@ def create_sessions_router(
         runner_tunnel_tokens=runner_tunnel_tokens,
         register_runner_ingest=register_runner_ingest,
         register_startup_dispatch=register_startup_dispatch,
+        project_store=project_store,
     )
 
     register_permissions_routes(

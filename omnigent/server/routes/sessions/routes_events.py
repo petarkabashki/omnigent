@@ -315,6 +315,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.session_pull_request_store import UnreadablePullRequestsError
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.anon import anon_user_id as _tel_anon_user_id
@@ -847,6 +848,7 @@ def register_events_routes(
     register_runner_ingest: Callable[[Callable[..., Awaitable[EventAckFrame]]], None]
     | None = None,
     register_startup_dispatch: Callable[[StartupDispatch], None] | None = None,
+    project_store: ProjectStore | None = None,
 ) -> None:
     """Register the events, stream, and delete routes on router."""
 
@@ -1198,9 +1200,11 @@ def register_events_routes(
                 permission_store,
                 target_id=session_id,
             )
+            from omnigent.server.session_aliases import session_handle
             from omnigent.server.session_orchestration import orchestration_message
 
-            body = orchestration_message(source.id, body.data.get("message"))
+            sender_handle = await asyncio.to_thread(session_handle, source, project_store, user_id)
+            body = orchestration_message(source.id, body.data.get("message"), sender_handle)
         native_shell_authorized = False
         if (
             body.type == "message"

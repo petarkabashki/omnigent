@@ -13,7 +13,10 @@ class SysSessionMessageTool(Tool):
     @classmethod
     def description(cls) -> str:
         return (
-            "Send work to another session owned by the same user. Requires session "
+            "Send work to another session owned by the same user, by session ID or by "
+            "alias: 'Role' (your project) or 'project/Role' (e.g. 'py-qwant/Architect'). "
+            "Messages you receive start with the sender's handle; reply to it by name. "
+            "Requires session "
             "orchestration enabled and a sending session that is private or shared "
             "read-only, including its side-chat source chain. The receiver "
             "may be shared: its readers will see your message. It uses normal queue/steering "
@@ -33,7 +36,10 @@ class SysSessionMessageTool(Tool):
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "session_id": {"type": "string", "description": "Destination session ID."},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Destination session ID, 'Role' or 'project/Role'.",
+                        },
                         "message": {"type": "string", "minLength": 1, "maxLength": 8000},
                     },
                     "required": ["session_id", "message"],

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from omnigent.stores.conversation_store import CREATED_BY_SESSION_LABEL_KEY
+from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, CREATED_BY_SESSION_LABEL_KEY
 from omnigent.util.json_serialization import json_dumps_transport_safe
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -5360,6 +5360,8 @@ async def _session_get_info_via_rest(
             "created_by_session_id": (_string_mapping(snap.get("labels")) or {}).get(
                 CREATED_BY_SESSION_LABEL_KEY
             ),
+            # Owner-set role name; peers address it as 'Role' or 'project/Role'.
+            "alias": (_string_mapping(snap.get("labels")) or {}).get(ALIAS_LABEL_KEY),
             "sub_agent_name": snap.get("sub_agent_name"),
             "reasoning_effort": snap.get("reasoning_effort"),
             # Effective model: a per-session override wins over the
@@ -6508,10 +6510,13 @@ async def _collect_global_sessions(
     if page.failed:
         return page
     rows = page.rows
+    handles = await _alias_handles(server_client, rows)
     return _DiscoveryPage(
         [
             {
                 "session_id": r.get("id"),
+                # ``project/Role`` for owner-aliased sessions; pass it to sys_session_message.
+                **({"handle": handles[r.get("id")]} if r.get("id") in handles else {}),
                 # Hide the internal ``-native-ui`` wrapper name (e.g.
                 # ``pi-native-ui`` -> ``Pi``) in the global listing too, matching
                 # ``sys_session_get_info``. The server-side ``agent_name`` filter
@@ -6533,6 +6538,24 @@ async def _collect_global_sessions(
         page.has_more,
         page.next_after,
     )
+
+
+async def _alias_handles(
+    server_client: httpx.AsyncClient, rows: list[_JsonObject]
+) -> dict[object, str]:
+    """Map aliased rows' session ids to ``project/Role`` handles; empty on any failure."""
+    if not any((_string_mapping(r.get("labels")) or {}).get(ALIAS_LABEL_KEY) for r in rows):
+        return {}
+    try:
+        resp = await server_client.get("/v1/sessions/aliases", timeout=30.0)
+        entries = resp.json().get("data", []) if resp.status_code == 200 else []
+        return {
+            e["session_id"]: e["handle"]
+            for e in entries
+            if isinstance(e, dict) and e.get("session_id") and e.get("handle")
+        }
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _child_rows_to_entries(

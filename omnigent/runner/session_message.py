@@ -1,6 +1,7 @@
 """Adapt peer messages to the existing session event API."""
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -13,15 +14,28 @@ from omnigent.runner.session_requests import (
     session_host_id,
 )
 
+# ``Role`` or ``project/Role``; anything else that is not a session id is rejected.
+_ALIAS_ADDRESS = re.compile(r"(?:[A-Za-z][A-Za-z0-9._-]*/)?[A-Za-z][A-Za-z0-9_-]{0,31}")
+
 
 async def execute_message_tool(
     args: dict[str, Any], client: httpx.AsyncClient | None, source_id: str | None
 ) -> str:
+    address = args.get("session_id")
     try:
-        target = normalize_session_id(args.get("session_id"))
+        target: str | None = normalize_session_id(address)
     except ValueError:
-        return json.dumps({"error": "Provide a valid session_id (UUID or numeric managed ID)"})
+        target = None  # not an id; resolved as an alias below
     message = args.get("message")
+    if target is None:
+        if not isinstance(address, str) or not _ALIAS_ADDRESS.fullmatch(address):
+            return json.dumps({"error": "Provide a valid session_id (UUID or numeric managed ID)"})
+        if client is None or source_id is None:
+            return json.dumps({"error": "Session messaging requires an authenticated runner"})
+        resolved = await _resolve_alias(client, source_id, address)
+        if "error" in resolved:
+            return json.dumps(resolved)
+        target = resolved["session_id"]
     if not isinstance(message, str) or not message.strip() or len(message) > 8000:
         return json.dumps({"error": "Provide a non-blank message of 1–8000 characters"})
     if client is None or source_id is None:
@@ -69,3 +83,25 @@ async def execute_message_tool(
         return json.dumps(
             {"error": "Delivery could not be confirmed; do not automatically resend"}
         )
+
+
+async def _resolve_alias(
+    client: httpx.AsyncClient, source_id: str, address: str
+) -> dict[str, Any]:
+    """Resolve ``Role`` / ``project/Role`` relative to the sending session's project."""
+    try:
+        response = await client.get(
+            "/v1/sessions/aliases/resolve",
+            params={"address": address},
+            headers={ORCHESTRATION_SOURCE_HEADER: source_id},
+            timeout=30,
+        )
+    except httpx.HTTPError:
+        return {"error": f"Could not resolve {address!r}; check sys_session_list"}
+    if response.is_error:
+        return {"error": f"Could not resolve {address!r}", "detail": response.text[:500]}
+    try:
+        body = response.json()
+        return {"session_id": normalize_session_id(body["session_id"])}
+    except (ValueError, KeyError, TypeError):
+        return {"error": f"Could not resolve {address!r}"}

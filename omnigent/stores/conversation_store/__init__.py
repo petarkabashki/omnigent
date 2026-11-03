@@ -91,6 +91,11 @@ CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY = "omnigent.codex_native.collaboration
 # and the web client mirrors the literal as ``PROJECT_LABEL_KEY``.
 PROJECT_LABEL_KEY = "omni_project"
 
+# Stable, owner-set role name ("Product", "Architect") that other sessions use
+# to address this one as ``Role`` or ``project/Role``. Unique per owner and
+# project among live top-level sessions; written only via the alias endpoint.
+ALIAS_LABEL_KEY = "omnigent.alias"
+
 
 class DailyCostState(TypedDict):
     """Daily cost state record returned by list_daily_cost_states.
@@ -903,6 +908,7 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        has_label: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1012,6 +1018,8 @@ class ConversationStore(ABC):
         :param pinned: When ``True``, only return sessions ``pinned_owner`` has
             pinned (their per-user ``omnigent.pinned.<user>`` label — the
             sidebar's Pinned section). ``False`` (default) disables the filter.
+        :param has_label: When set, restrict to sessions carrying this label
+            key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to
             (their per-user key). ``None`` → the single-user ``local`` sentinel.
             Ignored unless ``pinned`` is ``True``.

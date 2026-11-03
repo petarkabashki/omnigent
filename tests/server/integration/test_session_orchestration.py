@@ -10,7 +10,9 @@ from omnigent.runner.tool_dispatch import execute_tool
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
+    PROJECT_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
 )
@@ -1231,3 +1233,45 @@ async def test_same_host_creation_across_replicas(
         assert worker.parent_conversation_id is None
         assert worker.host_id == host_id and worker.workspace == "/worker"
         assert len(launches) == 1 and launches[0].session_id == worker.id
+
+
+async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
+    source, target, _ = peers
+    assert (
+        await auth_client.put(f"/v1/sessions/{source['id']}/alias", json={"alias": "Architect"})
+    ).status_code == 200
+    named = await auth_client.put(f"/v1/sessions/{target['id']}/alias", json={"alias": "Product"})
+    assert named.json()["handle"] == "Product"
+    other = await _create_session_as(auth_client, "", "alice")
+    taken = await auth_client.put(f"/v1/sessions/{other['id']}/alias", json={"alias": "product"})
+    assert taken.status_code == 409
+    forged = await auth_client.patch(
+        f"/v1/sessions/{other['id']}", json={"labels": {ALIAS_LABEL_KEY: "Product"}}
+    )
+    assert forged.status_code == 400
+
+    assert (await _send(auth_client, source, {"id": "Product"})).get("queued") is True
+    items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
+    assert f"[Message from Architect (session {source['id']})]" in items.text
+
+    store = SqlAlchemyConversationStore(db_uri)
+    for session in (source, target):
+        store.set_labels(session["id"], {PROJECT_LABEL_KEY: "py-qwant"})
+    assert (await _send(auth_client, source, {"id": "py-qwant/Product"})).get("queued") is True
+    items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
+    assert f"[Message from py-qwant/Architect (session {source['id']})]" in items.text
+    assert (
+        "Could not resolve"
+        in (await _send(auth_client, source, {"id": "py-qwant/Nobody"}))["error"]
+    )
+
+    listed = (await auth_client.get("/v1/sessions/aliases", params={"project": "py-qwant"})).json()
+    assert {entry["handle"] for entry in listed["data"]} == {
+        "py-qwant/Architect",
+        "py-qwant/Product",
+    }
+    assert (await auth_client.delete(f"/v1/sessions/{target['id']}/alias")).status_code == 204
+    assert (
+        "Could not resolve"
+        in (await _send(auth_client, source, {"id": "py-qwant/Product"}))["error"]
+    )

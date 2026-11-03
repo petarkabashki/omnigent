@@ -1058,7 +1058,14 @@ def register_core_routes(
                     raise OmnigentError(
                         "The first task must be text", code=ErrorCode.INVALID_INPUT
                     )
-                body.initial_input = orchestration_message(source.id, content[0].get("text"))
+                from omnigent.server.session_aliases import session_handle
+
+                sender_handle = await asyncio.to_thread(
+                    session_handle, source, project_store, user_id
+                )
+                body.initial_input = orchestration_message(
+                    source.id, content[0].get("text"), sender_handle
+                )
             if body.host_type == "external":
                 placement = await asyncio.to_thread(
                     routing_host_session, source, conversation_store
@@ -1594,6 +1601,121 @@ def register_core_routes(
             )
 
         return await asyncio.to_thread(_list_union)
+
+    # ── Session aliases (``Role`` / ``project/Role``) ─────────────
+
+    def _alias_entry(session: Conversation, user_id: str | None) -> dict[str, Any]:
+        from omnigent.server.session_aliases import session_handle, session_project_name
+        from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
+
+        return {
+            "session_id": session.id,
+            "alias": session.labels.get(ALIAS_LABEL_KEY),
+            "project": session_project_name(session, project_store, user_id),
+            "handle": session_handle(session, project_store, user_id),
+            "title": session.title,
+            "host_id": session.host_id,
+        }
+
+    @router.get("/sessions/aliases")
+    async def list_session_aliases(
+        request: Request,
+        project: str | None = Query(default=None),
+        alias: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """List the caller's live aliased sessions, optionally by project name or alias."""
+        from omnigent.server.session_aliases import find_aliased_sessions
+
+        user_id = _require_user(request, auth_provider)
+
+        def _list() -> dict[str, Any]:
+            found = find_aliased_sessions(
+                conversation_store, user_id=user_id, project=project, alias=alias
+            )
+            return {"data": [_alias_entry(session, user_id) for session in found]}
+
+        return await asyncio.to_thread(_list)
+
+    @router.get("/sessions/aliases/resolve")
+    async def resolve_session_alias(
+        request: Request,
+        address: str = Query(...),
+    ) -> dict[str, Any]:
+        """Resolve ``Role``, ``project/Role`` or a UUID to one owned session.
+
+        A bare ``Role`` is relative to the orchestration source's project when
+        a runner sends the source header, otherwise to unfiled sessions.
+        """
+        from omnigent.server.session_aliases import resolve_session_address
+        from omnigent.server.session_orchestration import require_owned_session
+
+        user_id = _require_user(request, auth_provider)
+
+        def _resolve() -> dict[str, Any]:
+            source = None
+            if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
+                source = require_orchestration_source(
+                    request, user_id, conversation_store, permission_store
+                )
+            session_id = resolve_session_address(
+                conversation_store,
+                project_store,
+                address=address,
+                user_id=user_id,
+                source=source,
+            )
+            if permission_store is not None and user_id:
+                session = require_owned_session(
+                    session_id, user_id, conversation_store, permission_store
+                )
+            else:
+                session = conversation_store.get_conversation(session_id)
+                if session is None:
+                    raise _session_not_found()
+            return _alias_entry(session, user_id)
+
+        return await asyncio.to_thread(_resolve)
+
+    @router.put("/sessions/{session_id}/alias")
+    async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
+        """Set the owner-chosen alias, unique within the session's project."""
+        from omnigent.server.session_aliases import set_session_alias
+
+        user_id = _require_user(request, auth_provider)
+        if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
+            raise OmnigentError("Agents cannot set session aliases", code=ErrorCode.FORBIDDEN)
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+        )
+        payload = await request.json()
+        alias = payload.get("alias") if isinstance(payload, dict) else None
+
+        def _set() -> dict[str, Any]:
+            session = conversation_store.get_conversation(session_id)
+            if session is None:
+                raise _session_not_found()
+            set_session_alias(
+                conversation_store, project_store, session=session, user_id=user_id, alias=alias
+            )
+            updated = conversation_store.get_conversation(session.id)
+            assert updated is not None
+            return _alias_entry(updated, user_id)
+
+        return await asyncio.to_thread(_set)
+
+    @router.delete("/sessions/{session_id}/alias", status_code=204)
+    async def delete_session_alias(request: Request, session_id: str) -> Response:
+        """Clear a session's alias."""
+        from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
+
+        user_id = _require_user(request, auth_provider)
+        if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
+            raise OmnigentError("Agents cannot change session aliases", code=ErrorCode.FORBIDDEN)
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+        )
+        await asyncio.to_thread(conversation_store.delete_label, session_id, ALIAS_LABEL_KEY)
+        return Response(status_code=204)
 
     # ── PUT /sessions/{session_id}/read-state ─────────────────────
     #

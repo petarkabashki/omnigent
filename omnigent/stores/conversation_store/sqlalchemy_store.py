@@ -3015,6 +3015,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        has_label: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3077,6 +3078,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             sidebar's Pinned section). ``False`` (default) disables the filter.
             Lets the client enumerate its pinned sessions independent of the
             loaded pagination window.
+        :param has_label: When set, restrict to sessions carrying this label
+            key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to.
             ``None`` → the single-user ``local`` sentinel.
         :param owned_by: When set, restrict to sessions the user owns
@@ -3402,6 +3405,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                         select(SqlConversationLabel.conversation_id).where(
                             SqlConversationLabel.workspace_id == current_workspace_id(),
                             SqlConversationLabel.key == pinned_label_key(pinned_owner),
+                        )
+                    )
+                )
+            if has_label:
+                stmt = stmt.where(
+                    SqlConversation.id.in_(
+                        select(SqlConversationLabel.conversation_id).where(
+                            SqlConversationLabel.workspace_id == current_workspace_id(),
+                            SqlConversationLabel.key == has_label,
                         )
                     )
                 )

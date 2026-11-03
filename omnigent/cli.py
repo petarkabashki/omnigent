@@ -26,7 +26,17 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from importlib import import_module, resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NoReturn, TypeAlias, cast, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    Literal,
+    NoReturn,
+    TypeAlias,
+    TypeVar,
+    cast,
+    get_args,
+)
 
 import click
 import psutil
@@ -7608,6 +7618,147 @@ def _import_item_payload(item: Mapping[str, object]) -> dict[str, object]:
             f"Export contains an invalid {item_type!r} item: {exc}"
         ) from exc
     return {"type": item_type, "data": raw}
+
+
+_AliasResult = TypeVar("_AliasResult")
+
+_SERVER_OPTION_HELP = (
+    "Omnigent server URL. Defaults to the configured server, or a local server already running."
+)
+
+
+@contextlib.contextmanager
+def _session_api_client(server: str | None) -> Iterator[httpx.Client]:
+    """An authenticated client for the configured (or local) Omnigent server."""
+    import httpx
+
+    from omnigent.chat import _remote_headers
+
+    resolved_server = _resolve_attach_server_url(server, _load_effective_config().get("server"))
+    if resolved_server is None:
+        resolved_server = ServerUrl(ensure_local_omnigent_server().url)
+    base_url = resolved_server.api_base
+    with httpx.Client(
+        base_url=base_url,
+        headers=_remote_headers(server_url=base_url, host_id=None, org_id=resolved_server.org_id),
+        timeout=30.0,
+        trust_env=_trust_env_for(base_url),
+    ) as client:
+        yield client
+
+
+def _alias_cli_call(action: Callable[[], _AliasResult]) -> _AliasResult:
+    from omnigent.errors import OmnigentError
+
+    try:
+        return action()
+    except OmnigentError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@session.command("list")
+@click.option("--project", default=None, help="Only roles in this project.")
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def session_list(project: str | None, server: str | None) -> None:
+    """List named role sessions (``project/Role``) you own, on every host.
+
+    \b
+    Examples:
+      omnigent session list
+      omnigent session list --project py-qwant
+    """
+    from omnigent.session_alias_client import list_aliases
+
+    with _session_api_client(server) as client:
+        entries = _alias_cli_call(lambda: list_aliases(client, project))
+    if not entries:
+        click.echo("No named sessions. Name one with: omnigent session alias <Role>")
+        return
+    for entry in sorted(entries, key=lambda e: str(e.get("handle") or "")):
+        host = entry.get("host_id") or "-"
+        title = entry.get("title") or ""
+        click.echo(f"{entry.get('handle')}\t{entry.get('session_id')}\thost={host}\t{title}")
+
+
+@session.command("alias")
+@click.argument("role", required=False)
+@click.option(
+    "--id",
+    "session_id",
+    default=None,
+    metavar="SESSION_ID",
+    help="Session to name. Defaults to the session this pane runs in.",
+)
+@click.option("--clear", is_flag=True, default=False, help="Remove the session's alias.")
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def session_alias(
+    role: str | None, session_id: str | None, clear: bool, server: str | None
+) -> None:
+    """Name a session so others can message it as ``Role`` or ``project/Role``.
+
+    The alias is unique among your live sessions in the session's project.
+
+    \b
+    Examples:
+      omnigent session alias Architect            # inside the session's pane
+      omnigent session alias Product --id conv_abc123
+      omnigent session alias --clear --id conv_abc123
+    """
+    from omnigent.session_alias_client import clear_alias, current_session_id, set_alias
+
+    target = session_id or current_session_id()
+    if not target:
+        raise click.UsageError("Pass --id SESSION_ID (not running inside an Omnigent session).")
+    if clear == bool(role):
+        raise click.UsageError("Pass exactly one of ROLE or --clear.")
+    with _session_api_client(server) as client:
+        if clear:
+            _alias_cli_call(lambda: clear_alias(client, target))
+            click.echo(f"Cleared alias of {target}")
+            return
+        assert role is not None
+        entry = _alias_cli_call(lambda: set_alias(client, target, role))
+    click.echo(f"{entry.get('handle')} -> {entry.get('session_id')}")
+
+
+@session.command("send")
+@click.argument("address")
+@click.argument("message")
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def session_send(address: str, message: str, server: str | None) -> None:
+    """Send MESSAGE to a session by ``project/Role`` or id, as a normal user turn.
+
+    \b
+    Examples:
+      omnigent session send py-qwant/Architect "Review the v2 schema"
+    """
+    from omnigent.session_alias_client import resolve_address, send_message
+
+    with _session_api_client(server) as client:
+        entry = _alias_cli_call(lambda: resolve_address(client, address))
+        _alias_cli_call(lambda: send_message(client, str(entry["session_id"]), message))
+    click.echo(f"Queued for {entry.get('handle') or entry.get('session_id')}")
+
+
+@session.command("open")
+@click.argument("address")
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def session_open(address: str, server: str | None) -> None:
+    """Reattach to a role session by ``project/Role`` (or id) via ``omnigent resume``.
+
+    \b
+    Examples:
+      omnigent session open omnigent/Architect
+    """
+    from omnigent.resume_dispatch import run_resume
+    from omnigent.session_alias_client import resolve_address
+
+    with _session_api_client(server) as client:
+        entry = _alias_cli_call(lambda: resolve_address(client, address))
+    run_resume(
+        target=str(entry["session_id"]),
+        server=_resolve_server_url(server).api_base if server else server,
+    )
 
 
 @session.command("import")

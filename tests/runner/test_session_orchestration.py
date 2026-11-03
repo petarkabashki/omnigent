@@ -441,7 +441,7 @@ async def test_message_destination_accepts_supported_session_ids(spelling):
         "dashed": str(destination),
         "legacy": f"conv_{destination.hex}",
         "managed": "1234567890123456",
-        "invalid": "not-a-session-id",
+        "invalid": "not a session id",
         "query": f"{destination.hex}?unexpected",
         "fragment": f"{destination.hex}#unexpected",
         "unicode": "１２３４",
