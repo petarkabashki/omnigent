@@ -72,6 +72,7 @@ class DecisionRow:
     cost_usd: float | None = None
     override_kinds: list[str] = field(default_factory=list)
     dropped: bool = False
+    check_errors: int = 0
 
     @property
     def offline_eligible(self) -> bool:
@@ -135,11 +136,17 @@ def _attach_outcomes(rows: dict[str, DecisionRow], outcomes: Iterable[dict[str, 
             if event.get("kind") in OVERRIDE_KINDS:
                 row.overridden = True
                 row.override_kinds.append(event["kind"])
+        elif kind == "check_declared":
+            row.check_ref = row.check_ref or event.get("check_ref")
         elif kind == "check":
+            row.check_ref = row.check_ref or event.get("check_ref")
+            # A check that errored gave no answer, so it must not read as a failed step.
+            if event.get("passed") is None:
+                row.check_errors += 1
+                continue
             at = str(event.get("at", ""))
             if row.decision_id not in checks or at >= checks[row.decision_id][0]:
-                checks[row.decision_id] = (at, bool(event.get("passed")))
-            row.check_ref = row.check_ref or event.get("check_ref")
+                checks[row.decision_id] = (at, bool(event["passed"]))
         elif kind == "accept":
             accepted.add(row.decision_id)
         elif kind == "cost":
@@ -168,6 +175,7 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
                 "excluded": 0,
                 "offline_eligible": 0,
                 "dropped": 0,
+                "check_errors": 0,
             },
         )
         site["decisions"] += 1
@@ -178,6 +186,7 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
         site["excluded"] += row.exclusion is not None
         site["offline_eligible"] += row.offline_eligible
         site["dropped"] += row.dropped
+        site["check_errors"] += row.check_errors
     for site in report.values():
         site["check_coverage"] = site["with_check"] / site["decisions"]
     return report
@@ -373,6 +382,8 @@ class OfflineVerdict:
     share_tasks_over_2x: float
     binding: str | None = None
     tasks_needed: int | None = None
+    unscored_baseline: int = 0
+    unscored_router: int = 0
 
 
 @dataclass(frozen=True)
@@ -398,9 +409,13 @@ def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
     by_task: dict[str, dict[str, dict[str, Any]]] = {}
     for result in replay:
         by_task.setdefault(str(result["task_id"]), {})[result["arm"]] = result
-    paired = [arms for arms in by_task.values() if {"baseline", "router"} <= arms.keys()]
+    complete = [arms for arms in by_task.values() if {"baseline", "router"} <= arms.keys()]
+    # A pair with an unanswered arm has nothing to compare; the counts keep the loss visible.
+    paired = [
+        arms for arms in complete if all(arm.get("passed") is not None for arm in arms.values())
+    ]
     if not paired:
-        raise ValueError("no task has both a baseline and a router result")
+        raise ValueError("no task has a scored baseline and router result")
     both = only_router = only_baseline = neither = 0
     for arms in paired:
         router_passed = bool(arms["router"]["passed"])
@@ -461,6 +476,8 @@ def offline_verdict(replay: Sequence[dict[str, Any]]) -> OfflineVerdict:
         share_tasks_over_2x=sum(task > 2 for task in task_ratios) / len(task_ratios),
         binding=binding,
         tasks_needed=tasks_needed,
+        unscored_baseline=sum(arms["baseline"].get("passed") is None for arms in complete),
+        unscored_router=sum(arms["router"].get("passed") is None for arms in complete),
     )
 
 
