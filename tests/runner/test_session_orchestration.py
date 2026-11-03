@@ -441,7 +441,7 @@ async def test_message_destination_accepts_supported_session_ids(spelling):
         "dashed": str(destination),
         "legacy": f"conv_{destination.hex}",
         "managed": "1234567890123456",
-        "invalid": "not a session id",
+        "invalid": "not-a-session-id",
         "query": f"{destination.hex}?unexpected",
         "fragment": f"{destination.hex}#unexpected",
         "unicode": "１２３４",
@@ -475,9 +475,32 @@ async def test_message_destination_accepts_supported_session_ids(spelling):
         assert [str(r.url) for r in requests] == [
             f"http://server/v1/sessions/{expected_id}/events"
         ]
+    elif spelling == "invalid":
+        # Alias-shaped: resolved once, and an unusable answer delivers nothing.
+        assert "error" in result
+        assert [r.url.path for r in requests] == ["/v1/sessions/aliases/resolve"]
     else:
         assert result == {"error": "Provide a valid session_id (UUID or numeric managed ID)"}
         assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("Architect", True),
+        ("py-qwant/Architect", True),
+        ("my project/Bench_2", True),
+        ("not-a-session-id", True),
+        ("abc?unexpected", False),
+        ("Architect#x", False),
+        ("2Architect", False),
+        ("project/", False),
+    ],
+)
+def test_is_alias_address(address, expected):
+    from omnigent.session_alias_client import is_alias_address
+
+    assert is_alias_address(address) is expected
 
 
 @pytest.mark.asyncio

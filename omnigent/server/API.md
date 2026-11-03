@@ -1215,6 +1215,33 @@ which is what policy ASK gates rely on, so the verdict cannot be
 conflated with a generic session event. Any value other than
 `action: "accept"` denies.
 
+### Session Aliases and Peer Messages
+
+A top-level session can carry an owner-set role alias, unique per owner and
+project, so peers address it as `Role` (the sender's project) or
+`project/Role`. A role matches `^[A-Za-z][A-Za-z0-9_-]{0,31}$` and compares
+case-insensitively; an empty project means unfiled sessions.
+
+```
+PUT    /v1/sessions/{id}/alias      {"alias": "Architect"} -> alias entry (409 if taken)
+DELETE /v1/sessions/{id}/alias      -> 204
+GET    /v1/sessions/aliases?project=<name>          -> {"data": [entry, ...]}
+GET    /v1/sessions/aliases/resolve?address=<addr>  -> entry
+POST   /v1/sessions/aliases/resolve {"addresses": [...]} (1-100)
+       -> {"data": [{"address", ...entry} | {"address", "error"}]}  # input order
+```
+
+An entry has `session_id`, `alias` and `handle` (`project/Role`). `POST
+/v1/sessions` with `agent_id` also accepts `"alias"`: it is validated before
+the session exists and set before the response returns. Agents (requests with
+the orchestration source header) and sub-agent creates cannot set aliases.
+
+A `session_message` event's ack adds `message_id`. The receiver sees it in
+the header line `[Message from <handle> (session <id>, message <message_id>)]`,
+so the sender can find the delivered message in the target's history. When the
+target's host is offline or starting, the message is saved and replayed once it
+connects; `queued: true` means accepted, not yet executed.
+
 ### Fork Session
 
 ```

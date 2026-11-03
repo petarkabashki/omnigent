@@ -1,6 +1,7 @@
 """CLI-side calls for role aliases (``Role`` / ``project/Role``) on the Omnigent server."""
 
 import os
+import re
 from typing import Any
 
 import httpx
@@ -10,6 +11,14 @@ from omnigent.errors import ErrorCode, OmnigentError
 # Set by the runner inside harness panes, so ``omnigent session alias Role`` can name
 # the session it runs in.
 _CURRENT_SESSION_ENV_VARS = ("OMNIGENT_SESSION_ID", "OMNIGENT_TERMINAL_LAUNCH_SESSION_ID")
+
+ALIAS_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+
+
+def is_alias_address(address: str) -> bool:
+    """Whether ``address`` has the shape of ``Role`` or ``project/Role``."""
+    _, _, role = address.strip().rpartition("/")
+    return bool(ALIAS_PATTERN.match(role))
 
 
 def current_session_id() -> str | None:

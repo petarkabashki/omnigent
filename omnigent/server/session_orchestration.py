@@ -109,15 +109,21 @@ def require_orchestration_source(
 
 
 def orchestration_message(
-    source_id: str, message: object, sender_handle: str | None = None
+    source_id: str,
+    message: object,
+    sender_handle: str | None = None,
+    *,
+    message_id: str | None = None,
 ) -> SessionStartupInput:
     """Build a text-only task with a display label, not proof of message origin.
 
-    ``sender_handle`` (``project/Role``) lets the receiver reply by name.
+    ``sender_handle`` (``project/Role``) lets the receiver reply by name;
+    ``message_id`` lets the sender find the delivered message in history.
     """
     if not isinstance(message, str) or not message.strip() or len(message) > 8000:
         raise OmnigentError("Provide a message of 1–8000 characters", code=ErrorCode.INVALID_INPUT)
-    sender = f"{sender_handle} (session {source_id})" if sender_handle else f"session {source_id}"
+    origin = f"session {source_id}" + (f", message {message_id}" if message_id else "")
+    sender = f"{sender_handle} ({origin})" if sender_handle else origin
     return SessionStartupInput(
         type="message",
         data={

@@ -225,9 +225,7 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
-    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY as _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
-)
-from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
@@ -236,6 +234,9 @@ from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
     pinned_label_key,
     runner_seen_is_fresh,
+)
+from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY as _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
@@ -1087,6 +1088,22 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+        if body.alias is not None:
+            if orchestration_source is not None or body.parent_session_id is not None:
+                raise OmnigentError(
+                    "Only owner-created top-level sessions can claim an alias",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            from omnigent.server.session_aliases import check_alias_for_new_session
+
+            await asyncio.to_thread(
+                check_alias_for_new_session,
+                conversation_store,
+                project_store,
+                alias=body.alias,
+                project_id=body.project_id,
+                user_id=user_id,
+            )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
             conversation_store,
@@ -1104,6 +1121,11 @@ def register_core_routes(
             project_store=project_store,
             created_by_session_id=source.id if source is not None else None,
         )
+        if body.alias is not None:
+            # Claimed before the response, so the caller never holds an unaddressable id.
+            await asyncio.to_thread(
+                conversation_store.set_labels, resp.id, {ALIAS_LABEL_KEY: body.alias.strip()}
+            )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
         # Without this, the runner doesn't know this session exists
@@ -1606,7 +1628,6 @@ def register_core_routes(
 
     def _alias_entry(session: Conversation, user_id: str | None) -> dict[str, Any]:
         from omnigent.server.session_aliases import session_handle, session_project_name
-        from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
 
         return {
             "session_id": session.id,
@@ -1646,35 +1667,68 @@ def register_core_routes(
         A bare ``Role`` is relative to the orchestration source's project when
         a runner sends the source header, otherwise to unfiled sessions.
         """
-        from omnigent.server.session_aliases import resolve_session_address
-        from omnigent.server.session_orchestration import require_owned_session
-
         user_id = _require_user(request, auth_provider)
 
         def _resolve() -> dict[str, Any]:
-            source = None
-            if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
-                source = require_orchestration_source(
-                    request, user_id, conversation_store, permission_store
-                )
-            session_id = resolve_session_address(
-                conversation_store,
-                project_store,
-                address=address,
-                user_id=user_id,
-                source=source,
-            )
-            if permission_store is not None and user_id:
-                session = require_owned_session(
-                    session_id, user_id, conversation_store, permission_store
-                )
-            else:
-                session = conversation_store.get_conversation(session_id)
-                if session is None:
-                    raise _session_not_found()
-            return _alias_entry(session, user_id)
+            source = _alias_resolution_source(request, user_id)
+            return _resolve_one_alias(address, user_id, source)
 
         return await asyncio.to_thread(_resolve)
+
+    @router.post("/sessions/aliases/resolve")
+    async def resolve_session_aliases(request: Request) -> dict[str, Any]:
+        """Resolve up to 100 addresses; each row carries a session or an ``error``."""
+        user_id = _require_user(request, auth_provider)
+        payload = await request.json()
+        addresses = payload.get("addresses") if isinstance(payload, dict) else None
+        if (
+            not isinstance(addresses, list)
+            or not 0 < len(addresses) <= 100
+            or not all(isinstance(item, str) for item in addresses)
+        ):
+            raise OmnigentError(
+                "Provide 'addresses': a list of 1-100 strings", code=ErrorCode.INVALID_INPUT
+            )
+
+        def _resolve_all() -> dict[str, Any]:
+            source = _alias_resolution_source(request, user_id)
+            rows: list[dict[str, Any]] = []
+            for address in addresses:
+                try:
+                    rows.append(
+                        {"address": address, **_resolve_one_alias(address, user_id, source)}
+                    )
+                except (OmnigentError, HTTPException) as exc:
+                    detail = exc.message if isinstance(exc, OmnigentError) else exc.detail
+                    rows.append({"address": address, "error": str(detail)})
+            return {"data": rows}
+
+        return await asyncio.to_thread(_resolve_all)
+
+    def _alias_resolution_source(request: Request, user_id: str | None) -> Conversation | None:
+        """The orchestration source a bare ``Role`` is relative to, when a runner sends one."""
+        if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is None:
+            return None
+        return require_orchestration_source(request, user_id, conversation_store, permission_store)
+
+    def _resolve_one_alias(
+        address: str, user_id: str | None, source: Conversation | None
+    ) -> dict[str, Any]:
+        from omnigent.server.session_aliases import resolve_session_address
+        from omnigent.server.session_orchestration import require_owned_session
+
+        session_id = resolve_session_address(
+            conversation_store, project_store, address=address, user_id=user_id, source=source
+        )
+        if permission_store is not None and user_id:
+            session = require_owned_session(
+                session_id, user_id, conversation_store, permission_store
+            )
+        else:
+            session = conversation_store.get_conversation(session_id)
+            if session is None:
+                raise _session_not_found()
+        return _alias_entry(session, user_id)
 
     @router.put("/sessions/{session_id}/alias")
     async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
@@ -1706,8 +1760,6 @@ def register_core_routes(
     @router.delete("/sessions/{session_id}/alias", status_code=204)
     async def delete_session_alias(request: Request, session_id: str) -> Response:
         """Clear a session's alias."""
-        from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
-
         user_id = _require_user(request, auth_provider)
         if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
             raise OmnigentError("Agents cannot change session aliases", code=ErrorCode.FORBIDDEN)

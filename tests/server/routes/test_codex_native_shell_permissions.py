@@ -261,7 +261,13 @@ async def test_codex_automated_message_requires_target_ownership_and_stays_model
     messages = [payload for path, payload in runner.post_json_calls if path == _EVENT_PATH]
     assert len(messages) == 1
     assert messages[0]["content"] == [
-        {"type": "input_text", "text": f"[Message from session {source_id}]\n{message}"}
+        {
+            "type": "input_text",
+            "text": (
+                f"[Message from session {source_id}, message {response.json()['message_id']}]"
+                f"\n{message}"
+            ),
+        }
     ]
     assert "authorized_native_shell_command" not in messages[0]
     assert dict(runner.post_headers)[_EVENT_PATH] == {}

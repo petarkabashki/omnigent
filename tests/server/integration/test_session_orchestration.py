@@ -97,7 +97,7 @@ async def test_private_sender_can_message_shared_receiver(
     assert result.get("queued") is True, result
     assert "Please inspect the PR" in json.dumps(captured)
     items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
-    assert f"[Message from session {source['id']}]" in items.text
+    assert f"[Message from session {source['id']}, message {result['message_id']}]" in items.text
     assert '"created_by":"alice"' in items.text
     store = SqlAlchemyConversationStore(db_uri)
     assert store.get_conversation(target["id"]).parent_conversation_id is None
@@ -945,7 +945,7 @@ async def test_startup_queue_admission_and_replay(
         await startup._deliver(auth_app, target["id"], pending[0])
         delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
         assert len(delivered) == 1
-        assert f"[Message from session {source['id']}]" in json.dumps(delivered)
+        assert f"[Message from session {source['id']}, message msg_" in json.dumps(delivered)
         assert store.list_pending_inputs(target["id"]) == []
         assert (
             "shared with edit access cannot"
@@ -1032,7 +1032,7 @@ async def test_peer_message_readdresses_across_replicas(
     )
     delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
     assert len(delivered) == 1
-    assert f"[Message from session {source['id']}]" in json.dumps(delivered)
+    assert f"[Message from session {source['id']}, message msg_" in json.dumps(delivered)
 
 
 @pytest.mark.parametrize("two_replica_stack", ["managed"], indirect=True)
@@ -1252,14 +1252,14 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
 
     assert (await _send(auth_client, source, {"id": "Product"})).get("queued") is True
     items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
-    assert f"[Message from Architect (session {source['id']})]" in items.text
+    assert f"[Message from Architect (session {source['id']}, message msg_" in items.text
 
     store = SqlAlchemyConversationStore(db_uri)
     for session in (source, target):
         store.set_labels(session["id"], {PROJECT_LABEL_KEY: "py-qwant"})
     assert (await _send(auth_client, source, {"id": "py-qwant/Product"})).get("queued") is True
     items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
-    assert f"[Message from py-qwant/Architect (session {source['id']})]" in items.text
+    assert f"[Message from py-qwant/Architect (session {source['id']}, message msg_" in items.text
     assert (
         "Could not resolve"
         in (await _send(auth_client, source, {"id": "py-qwant/Nobody"}))["error"]
@@ -1275,3 +1275,24 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
         "Could not resolve"
         in (await _send(auth_client, source, {"id": "py-qwant/Product"}))["error"]
     )
+
+    claimed = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "alias": "Bench"}
+    )
+    assert claimed.status_code in (200, 201), claimed.text
+    resolved = await auth_client.get("/v1/sessions/aliases/resolve", params={"address": "Bench"})
+    assert resolved.json()["session_id"] == claimed.json()["id"]
+    bulk = await auth_client.post(
+        "/v1/sessions/aliases/resolve",
+        json={"addresses": ["Bench", "py-qwant/Architect", "py-qwant/Nobody"]},
+    )
+    rows = bulk.json()["data"]
+    assert [row.get("session_id") for row in rows[:2]] == [claimed.json()["id"], source["id"]]
+    assert "Nobody" in rows[2]["error"]
+    before = len(store.list_conversations(limit=200).data)
+    for alias in ("bench", "9bad"):
+        refused = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], "alias": alias}
+        )
+        assert refused.status_code in (400, 409), refused.text
+    assert len(store.list_conversations(limit=200).data) == before

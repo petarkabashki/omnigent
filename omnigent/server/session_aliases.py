@@ -1,9 +1,8 @@
 """Owner-set role aliases that address top-level sessions as ``Role`` or ``project/Role``."""
 
-import re
-
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.session_alias_client import ALIAS_PATTERN
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     PROJECT_LABEL_KEY,
@@ -13,7 +12,6 @@ from omnigent.stores.project_store import ProjectStore
 from omnigent.util.session_lifecycle import is_session_closed
 from omnigent.util.uuid import uuid_to_bytes
 
-_ALIAS_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 _PAGE_SIZE = 200
 _MAX_PAGES = 50
 
@@ -21,7 +19,7 @@ _MAX_PAGES = 50
 def validate_alias(alias: object) -> str:
     """Return a trimmed alias or raise ``INVALID_INPUT``."""
     value = alias.strip() if isinstance(alias, str) else ""
-    if not _ALIAS_PATTERN.match(value):
+    if not ALIAS_PATTERN.match(value):
         raise OmnigentError(
             "Alias must start with a letter and use 1–32 letters, digits, '-' or '_'",
             code=ErrorCode.INVALID_INPUT,
@@ -102,14 +100,43 @@ def set_session_alias(
             "Only top-level sessions can have an alias", code=ErrorCode.INVALID_INPUT
         )
     project = session_project_name(session, projects, user_id)
-    holders = find_aliased_sessions(conversations, user_id=user_id, project=project, alias=value)
-    if any(holder.id != session.id for holder in holders):
-        where = f"project {project!r}" if project else "unfiled sessions"
-        raise OmnigentError(
-            f"Alias {value!r} is already used in {where}", code=ErrorCode.ALREADY_EXISTS
-        )
+    _require_alias_free(conversations, user_id, project, value, holder_id=session.id)
     conversations.set_labels(session.id, {ALIAS_LABEL_KEY: value})
     return value
+
+
+def check_alias_for_new_session(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    alias: object,
+    project_id: str | None,
+    user_id: str | None,
+) -> str:
+    """Validate an alias requested at creation, before anything is created."""
+    value = validate_alias(alias)
+    project = ""
+    if project_id and projects is not None:
+        found = projects.get(project_id, user_id=user_id)
+        project = found.name if found is not None else ""
+    _require_alias_free(conversations, user_id, project, value, holder_id=None)
+    return value
+
+
+def _require_alias_free(
+    conversations: ConversationStore,
+    user_id: str | None,
+    project: str,
+    alias: str,
+    *,
+    holder_id: str | None,
+) -> None:
+    holders = find_aliased_sessions(conversations, user_id=user_id, project=project, alias=alias)
+    if any(holder.id != holder_id for holder in holders):
+        where = f"project {project!r}" if project else "unfiled sessions"
+        raise OmnigentError(
+            f"Alias {alias!r} is already used in {where}", code=ErrorCode.ALREADY_EXISTS
+        )
 
 
 def resolve_session_address(

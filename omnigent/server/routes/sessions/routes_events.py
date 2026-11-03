@@ -1086,6 +1086,27 @@ def register_events_routes(
         body: SessionEventInput,
         in_flight: contextlib.ExitStack | None = None,
     ) -> dict[str, bool | str]:
+        """Dispatch one event; a peer message's ack also carries its ``message_id``.
+
+        The id is also in the header line the receiver sees, so a sender can find
+        the delivered message in the target's history.
+        """
+        if body.type != "session_message":
+            return await _dispatch_event(request, session_id, body, in_flight)
+        message_id = f"msg_{secrets.token_hex(16)}"
+        ack = await _dispatch_event(
+            request, session_id, body, in_flight, peer_message_id=message_id
+        )
+        return {**ack, "message_id": message_id}
+
+    async def _dispatch_event(
+        request: Request | _RunnerEventContext | StartupInputContext,
+        session_id: str,
+        body: SessionEventInput,
+        in_flight: contextlib.ExitStack | None = None,
+        *,
+        peer_message_id: str | None = None,
+    ) -> dict[str, bool | str]:
         """
         Submit a session event (input message, tool output,
         approval, or interrupt).
@@ -1204,7 +1225,9 @@ def register_events_routes(
             from omnigent.server.session_orchestration import orchestration_message
 
             sender_handle = await asyncio.to_thread(session_handle, source, project_store, user_id)
-            body = orchestration_message(source.id, body.data.get("message"), sender_handle)
+            body = orchestration_message(
+                source.id, body.data.get("message"), sender_handle, message_id=peer_message_id
+            )
         native_shell_authorized = False
         if (
             body.type == "message"
