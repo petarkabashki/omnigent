@@ -8884,6 +8884,9 @@ class _ClaudeSessionLaunchMetadata:
     external_session_id: str | None = None
     fork_source_external_id: str | None = None
     fork_carry_history: bool = False
+    #: Context resets the session has had; a local resume hint from an older
+    #: epoch predates the latest reset boundary.
+    context_epoch: int = 0
     #: Both routing fields come from ``routing_class_from_snapshot``, so an
     #: auto-harness session always reads as routing-enabled too. Deriving them
     #: separately was the bug: a sub-agent child of a routed parent carries the
@@ -8931,6 +8934,7 @@ def _claude_launch_metadata_from_envelope(
             fork_source if isinstance(fork_source, str) and fork_source else None
         ),
         fork_carry_history=snapshot.labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1",
+        context_epoch=snapshot.context_epoch,
     )
 
 
@@ -8968,6 +8972,7 @@ async def _load_legacy_claude_launch_metadata(
     labels = snapshot.get("labels")
     labels = labels if isinstance(labels, dict) else {}
     fork_source = labels.get(FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY)
+    context_epoch = snapshot.get("context_epoch")
     cost_control_mode = snapshot.get("cost_control_mode_override")
     harness_override = snapshot.get("harness_override")
     routing_class = routing_class_from_snapshot(
@@ -8997,6 +9002,7 @@ async def _load_legacy_claude_launch_metadata(
             fork_source if isinstance(fork_source, str) and fork_source else None
         ),
         fork_carry_history=labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1",
+        context_epoch=context_epoch if isinstance(context_epoch, int) else 0,
     )
     permission_mode = _claude_launch_permission_mode(metadata.terminal_launch_args)
     _logger.info(
@@ -9198,13 +9204,18 @@ async def _auto_create_claude_terminal(
     # "no longer active after /clear" guard. So when the label is exactly that
     # marker, honour it and resume in the session's own isolated dir. The
     # executor spawn_env already resolves the same label, so the two agree.
-    cleared_bridge_id = f"{session_id}-cleared"
+    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+    from omnigent.runner.native.claude_reset import (
+        claude_launch_bridge_id,
+        local_resume_hint_epoch,
+    )
+
     existing_bridge_id = await _claude_native_bridge_id_with_optional_labels(
         server_client=server_client,
         session_id=session_id,
         session_labels=session_init.snapshot.labels if session_init is not None else None,
     )
-    bridge_id = cleared_bridge_id if existing_bridge_id == cleared_bridge_id else session_id
+    bridge_id = claude_launch_bridge_id(session_id, existing_bridge_id)
     # A /clear or /fork replacement inherits its source's bridge id, so a fresh
     # pane for it moves the session to D(bridge_id).
     rekeyed = existing_bridge_id != bridge_id
@@ -9248,6 +9259,7 @@ async def _auto_create_claude_terminal(
     )
 
     _pre_wipe_claude_sid = _read_csid_pre_wipe(_bridge_dir_for_bridge_id(bridge_id))
+    _pre_wipe_hint_epoch = local_resume_hint_epoch(_bridge_dir_for_bridge_id(bridge_id))
     # Resolved once here and reused below (env_spec) so the bridge's own
     # sys_os_* tools and the terminal process see the same sandbox — the
     # agent's declared os_env.sandbox, already overridden by any
@@ -9311,6 +9323,20 @@ async def _auto_create_claude_terminal(
     session_external_id = launch_metadata.external_session_id
     fork_source_external_id = launch_metadata.fork_source_external_id
     fork_carry_history = launch_metadata.fork_carry_history
+    # Hooks of this launch record their Claude id under the current epoch.
+    await asyncio.to_thread(record_launch_epoch, bridge_dir, launch_metadata.context_epoch)
+    if _pre_wipe_claude_sid is not None and _pre_wipe_hint_epoch < launch_metadata.context_epoch:
+        # A context reset happened after that Claude session was recorded.
+        _logger.info(
+            "Claude local resume hint predates the context reset; launching fresh: session=%s",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        _pre_wipe_claude_sid = None
+    if launch_metadata.context_epoch > 0:
+        # A crash can leave fork labels behind a reset; a fork starts at epoch 0.
+        fork_source_external_id = None
+        fork_carry_history = False
 
     # The server GET may miss the external_session_id binding when the
     # reconnect request arrives without a workspace-scoped context (the

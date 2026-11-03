@@ -1553,6 +1553,7 @@ def _build_session_response(
         native_usage_baseline=native_usage_baseline,
         last_task_error=last_task_error,
         external_session_id=conv.external_session_id,
+        context_epoch=conv.context_epoch,
         terminal_launch_args=conv.terminal_launch_args,
         # Replay outstanding approval prompts into the snapshot.
         # The live SSE stream has no buffer, so a prompt emitted

@@ -16,6 +16,7 @@ from omnigent.harnesses.claude_native.bridge import (
     prepare_bridge_dir,
     read_active_session_id,
     record_hook_event,
+    record_launch_epoch,
     write_active_session_id,
 )
 from tests.harnesses.claude_native.forwarder._support import (
@@ -820,8 +821,48 @@ async def test_resume_seen_claude_fork_does_not_create_second_omnigent_fork(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_status", "expected_bodies"),
+    [
+        (
+            422,
+            [{"external_session_id": "sid", "context_epoch": 0}, {"external_session_id": "sid"}],
+        ),
+        (409, [{"external_session_id": "sid", "context_epoch": 0}]),
+    ],
+    ids=["older-server-retries-without-epoch", "stale-epoch-is-not-retried"],
+)
+async def test_mirror_retries_only_when_server_rejects_the_epoch_field(
+    tmp_path: Path, first_status: int, expected_bodies: list[dict[str, str | int]]
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    record_hook_event(bridge_dir, {"hook_event_name": "SessionStart", "session_id": "sid"})
+    record_launch_epoch(bridge_dir, 0)
+    bodies: list[dict[str, str | int]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(first_status if len(bodies) == 1 else 200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        finished = await forwarder._maybe_mirror_external_session_id(
+            client=client, session_id="conv_abc", bridge_dir=bridge_dir
+        )
+
+    assert finished is True
+    assert bodies == expected_bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("launch_epoch", "epoch_fields"),
+    [(None, {}), (2, {"context_epoch": 2})],
+    ids=["unstamped", "stamped"],
+)
 async def test_forwarder_mirrors_external_session_id_after_hook_event(
-    tmp_path: Path,
+    tmp_path: Path, launch_epoch: int | None, epoch_fields: dict[str, int]
 ) -> None:
     """
     Forwarder PATCHes the Omnigent conversation with Claude's session id.
@@ -842,6 +883,8 @@ async def test_forwarder_mirrors_external_session_id_after_hook_event(
             "transcript_path": str(tmp_path / "session.jsonl"),
         },
     )
+    if launch_epoch is not None:
+        record_launch_epoch(bridge_dir, launch_epoch)
     server, thread, base_url = _start_recording_server()
     task = asyncio.create_task(
         forwarder.forward_claude_transcript_to_session(
@@ -874,6 +917,7 @@ async def test_forwarder_mirrors_external_session_id_after_hook_event(
     # against the literal uuid catches it.
     assert patch_request["body"] == {
         "external_session_id": "a1b2c3d4-1234-5678-9abc-def012345678",
+        **epoch_fields,
     }
 
 

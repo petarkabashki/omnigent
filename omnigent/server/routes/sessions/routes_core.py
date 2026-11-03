@@ -4096,6 +4096,15 @@ def register_core_routes(
                 requested_codex_collaboration_mode,
             )
         if body.external_session_id is not None:
+            if body.context_epoch is not None:
+                current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                if current is not None and body.context_epoch < current.context_epoch:
+                    raise OmnigentError(
+                        f"external_session_id {body.external_session_id!r} is from "
+                        f"context epoch {body.context_epoch}; the session is at "
+                        f"{current.context_epoch}",
+                        code=ErrorCode.CONFLICT,
+                    )
             try:
                 await asyncio.to_thread(
                     conversation_store.set_external_session_id,

@@ -4923,6 +4923,44 @@ def test_set_external_session_id_first_call_persists(
     assert fetched.external_session_id == "a1b2c3d4-1234-5678-9abc-def012345678"
 
 
+def test_reset_external_session_id_allows_a_fresh_native_session_after_reset(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conv = conversation_store.create_conversation()
+    conversation_store.set_external_session_id(conv.id, "sid-before-reset")
+
+    assert conversation_store.reset_external_session_id(conv.id, expected="sid-before-reset")
+    updated = conversation_store.set_external_session_id(conv.id, "sid-after-reset")
+
+    from omnigent.stores.conversation_store import ConversationNotFoundError
+
+    assert updated.external_session_id == "sid-after-reset"
+    with pytest.raises(ConversationNotFoundError):
+        conversation_store.reset_external_session_id("0" * 32, expected=None)
+
+
+@pytest.mark.parametrize("expected", ["sid-stale", None])
+def test_reset_external_session_id_keeps_an_id_it_did_not_expect(
+    conversation_store: SqlAlchemyConversationStore, expected: str | None
+) -> None:
+    conv = conversation_store.create_conversation()
+    conversation_store.set_external_session_id(conv.id, "sid-current")
+
+    assert not conversation_store.reset_external_session_id(conv.id, expected=expected)
+
+    fetched = conversation_store.get_conversation(conv.id)
+    assert fetched is not None
+    assert fetched.external_session_id == "sid-current"
+
+
+def test_reset_external_session_id_with_nothing_recorded_is_clear(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conv = conversation_store.create_conversation()
+
+    assert conversation_store.reset_external_session_id(conv.id, expected=None)
+
+
 def test_set_external_session_id_same_value_is_idempotent(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

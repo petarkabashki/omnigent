@@ -42,6 +42,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_claude_session_id,
     read_hook_events_from_offset,
     read_hook_events_since_with_position,
+    read_launch_epoch,
     read_message_deltas_from_offset,
     read_pane_signals,
     read_seen_claude_session_ids,
@@ -4084,6 +4085,7 @@ async def _maybe_mirror_external_session_id(
             client,
             session_id=session_id,
             external_session_id=claude_sid,
+            context_epoch=read_launch_epoch(bridge_dir),
         )
     except httpx.HTTPStatusError as exc:
         # 4xx means the server rejected the write outright (e.g.
@@ -7052,6 +7054,7 @@ async def _patch_external_session_id(
     *,
     session_id: str,
     external_session_id: str,
+    context_epoch: int | None = None,
 ) -> None:
     """
     PATCH the Omnigent conversation row with the Claude-native session id.
@@ -7067,13 +7070,20 @@ async def _patch_external_session_id(
     :param external_session_id: Runtime-native session id captured
         from a Claude hook event,
         e.g. ``"a1b2c3d4-1234-5678-9abc-def012345678"``.
+    :param context_epoch: The launch's context epoch, so the server can refuse
+        an id from before a context reset; ``None`` when no launch stamped one.
     :returns: None.
     :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
     """
-    resp = await client.patch(
-        f"/v1/sessions/{session_id}",
-        json={"external_session_id": external_session_id},
-    )
+    fields: dict[str, str | int] = {"external_session_id": external_session_id}
+    if context_epoch is not None:
+        fields["context_epoch"] = context_epoch
+    resp = await client.patch(f"/v1/sessions/{session_id}", json=fields)
+    # An older server rejects the unknown field; losing the id would be worse.
+    if resp.status_code == 422 and context_epoch is not None:
+        resp = await client.patch(
+            f"/v1/sessions/{session_id}", json={"external_session_id": external_session_id}
+        )
     resp.raise_for_status()
 
 

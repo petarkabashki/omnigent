@@ -2066,6 +2066,23 @@ class ConversationStore(ABC):
         """
         ...
 
+    def reset_external_session_id(self, conversation_id: str, *, expected: str | None) -> bool:
+        """
+        Clear the runtime-native session id if it still is ``expected``.
+
+        The one sanctioned overwrite: a context reset relaunches the native
+        harness on a fresh vendor session, whose hook then records the new id
+        through :meth:`set_external_session_id`.
+
+        :param conversation_id: Conversation to update, e.g. ``"conv_abc123"``.
+        :param expected: The id the caller read, e.g. ``"a1b2c3d4-..."``, or
+            ``None`` when it read none.
+        :returns: ``True`` when the id is now clear, ``False`` when another
+            writer changed it and it was left alone.
+        :raises ConversationNotFoundError: If the conversation does not exist.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot reset external_session_id")
+
     @abstractmethod
     def create_session_with_agent(
         self,

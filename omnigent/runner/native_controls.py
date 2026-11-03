@@ -38,12 +38,14 @@ from omnigent.runner.native import (
     _AUTO_OPENCODE_SERVERS,
     _SESSION_METADATA_PARAMS,
     _auto_create_opencode_terminal,
+    _cancel_auto_forwarder_task,
     _claude_native_bridge_id_for_session,
     _codex_native_model_from_spec,
     _CodexNativeModelOptionsNotReady,
     _opencode_model_options_from_catalog,
     _opencode_model_ref,
 )
+from omnigent.runner.native.claude_reset import ClaudeNativeReset, claude_launch_bridge_id
 from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE, SessionResourceRegistry
 from omnigent.spec.types import AgentSpec
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -293,6 +295,7 @@ class _HandleOpencodeNativeCostPopupFn(Protocol):
 class NativeControls:
     """Native-harness control handlers the runner app's event dispatch calls."""
 
+    claude_native_reset: ClaudeNativeReset
     codex_native_model_options: Callable[[str], Coroutine[Any, Any, list[_JsonObject]]]
     handle_claude_native_btw_dismiss: Callable[[str], Coroutine[Any, Any, Response]]
     handle_claude_native_clear: Callable[[str], Coroutine[Any, Any, Response]]
@@ -342,6 +345,7 @@ def build_native_controls(
     _claude_model_options_rows: dict[str, tuple[float, list[dict[str, object]]]],
     _codex_native_bridge_state_for_session: _CodexNativeBridgeStateForSessionFn,
     _codex_native_bridge_state_and_dir_for_session: _CodexNativeBridgeStateAndDirForSessionFn,
+    _claude_terminal_ensure_locks: dict[str, asyncio.Lock],
     _codex_terminal_ensure_locks: dict[str, asyncio.Lock],
     _ensure_comment_relay_started: _EnsureCommentRelayStartedFn,
     _ensure_native_terminal_for_turn: Callable[[str, str | None], Coroutine[Any, Any, None]],
@@ -1858,6 +1862,38 @@ def build_native_controls(
     async def _handle_claude_native_clear(conv_id: str) -> Response:
         return await _inject_claude_native_slash(conv_id, command="/clear", action="clear")
 
+    async def _stop_claude_native_pane(conv_id: str) -> None:
+        from omnigent.entities.session_resources import terminal_resource_id
+        from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
+
+        # The caller holds the session's Claude ensure lock.
+        terminal_id = terminal_resource_id("claude", "main")
+        existing = None
+        try:
+            existing = await resource_registry.get_terminal_resource(conv_id, terminal_id)
+            if existing is not None:
+                await resource_registry.close_terminal(conv_id, terminal_id)
+        finally:
+            await _cancel_auto_forwarder_task(conv_id)
+        if existing is not None:
+            _publish_terminal_deleted_event(
+                conversation_id=conv_id,
+                terminal_name="claude",
+                session_key="main",
+                publish_event=_publish_event,
+            )
+
+    async def _claude_native_reset_bridge_dir(conv_id: str) -> Path:
+        from omnigent.harnesses.claude_native.bridge import bridge_dir_for_bridge_id
+
+        labelled = await _claude_native_bridge_id_for_session(
+            server_client=server_client, session_id=conv_id
+        )
+        return bridge_dir_for_bridge_id(claude_launch_bridge_id(conv_id, labelled))
+
+    async def _relaunch_claude_native_pane(conv_id: str) -> None:
+        await _ensure_native_terminal_for_turn(conv_id, "claude-native")
+
     async def _inject_codex_native_slash(conv_id: str, *, command: str, action: str) -> Response:
         registry = resource_registry.terminal_registry
         instance = registry.get(conv_id, "codex", "main") if registry is not None else None
@@ -2479,6 +2515,14 @@ def build_native_controls(
         return Response(status_code=204)
 
     return NativeControls(
+        claude_native_reset=ClaudeNativeReset(
+            stop_pane=_stop_claude_native_pane,
+            bridge_dir_for_session=_claude_native_reset_bridge_dir,
+            relaunch=_relaunch_claude_native_pane,
+            ensure_lock_for_session=lambda conv_id: _claude_terminal_ensure_locks.setdefault(
+                conv_id, asyncio.Lock()
+            ),
+        ),
         codex_native_model_options=_codex_native_model_options,
         handle_claude_native_btw_dismiss=_handle_claude_native_btw_dismiss,
         handle_claude_native_clear=_handle_claude_native_clear,

@@ -72,6 +72,26 @@ def test_native_string_summary_content_survives_resume() -> None:
     assert summary["message"]["content"] == "summary retained across cold resume"
 
 
+def test_context_reset_drops_every_record_before_it() -> None:
+    records = _records(
+        [{"type": "message", "role": "user", "content": "before the reset"}],
+        [
+            {"id": "reset", "type": "context_reset", "epoch": 1},
+            {
+                "id": uuid.uuid5(uuid.NAMESPACE_URL, "after-reset").hex,
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "after the reset"}],
+            },
+        ],
+    )
+
+    contents = [record.get("message", {}).get("content") for record in records]
+    assert "before the reset" not in json.dumps(contents)
+    assert "after the reset" in json.dumps(contents)
+    assert records[0]["parentUuid"] is None
+
+
 def test_structured_user_message_is_not_promoted_to_summary() -> None:
     records = _records(
         [

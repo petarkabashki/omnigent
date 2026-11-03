@@ -4,7 +4,8 @@ The session id, items and children stay; a ``context_reset`` boundary item
 starts a new context epoch. The runner checks and drops its caches
 (``prepare``), the server persists the boundary, then the runner drops any
 history cached meanwhile and releases the harness (``commit``), and the server
-publishes ``session.reset``.
+publishes ``session.reset``. A native session also loses its vendor session id,
+so the relaunch starts a new vendor conversation.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ from omnigent.server.schemas import (
     SessionResetEvent,
 )
 from omnigent.stores import ConversationStore
+from omnigent.stores.conversation_store import (
+    FORK_CARRY_HISTORY_LABEL_KEY,
+    FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -52,6 +57,11 @@ _STOP_WAIT_S = 10.0
 _STOP_POLL_S = 0.2
 #: Forward budget for reset controls; ``commit`` releases the harness process.
 RESET_FORWARD_TIMEOUT_S = 30.0
+
+#: Native harnesses whose runner relaunches the terminal on a fresh vendor session.
+IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native"})
+#: Labels that make a native launch resume or rebuild the pre-reset transcript.
+_NATIVE_RESUME_LABEL_KEYS = (FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY, FORK_CARRY_HISTORY_LABEL_KEY)
 
 RunnerForward = Callable[[dict[str, Any]], Awaitable[Any]]
 
@@ -98,7 +108,7 @@ async def run_context_reset(
     interrupt: Callable[[], Awaitable[None]],
     forward: RunnerForward,
     wake: Callable[[], Awaitable[bool]],
-    native: bool,
+    native_harness: str | None,
     publish: Callable[[dict[str, Any]], object],
     dispatching: Callable[[], bool] = lambda: False,
     created_by: str | None = None,
@@ -112,7 +122,8 @@ async def run_context_reset(
     :param interrupt: Stops the running turn.
     :param forward: POSTs a control event to the runner; ``None`` when unbound.
     :param wake: Relaunches a sleeping runner; ``True`` when one is bound after.
-    :param native: Whether a native terminal harness drives the session.
+    :param native_harness: The native terminal harness driving the session,
+        e.g. ``"claude-native"``, or ``None`` for an SDK harness.
     :param publish: Publishes an SSE payload on the session stream.
     :param dispatching: Whether a message dispatch is still in flight here.
     :returns: The new epoch and boundary item id.
@@ -134,10 +145,14 @@ async def run_context_reset(
                 epoch=existing.data.epoch,  # type: ignore[union-attr]
                 boundary_item_id=existing.id,
             )
-    if native:
+    if native_harness is not None and native_harness not in IN_PLACE_RESET_NATIVE_HARNESSES:
         raise OmnigentError(
             "Reset in place is SDK-only for now; native support is planned.",
             code=ErrorCode.RESET_UNSUPPORTED,
+        )
+    if native_harness is not None and isinstance(reset.summary, ResetSummaryText):
+        raise _unsupported(
+            f"summary text is not supported for {native_harness} yet; use summary 'none'"
         )
     running = _reset_in_flight.get(session_id)
     if running is not None:
@@ -164,6 +179,7 @@ async def run_context_reset(
             publish=publish,
             dispatching=dispatching,
             created_by=created_by,
+            native_harness=native_harness,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -195,6 +211,7 @@ async def _reset_in_place(
     publish: Callable[[dict[str, Any]], object],
     dispatching: Callable[[], bool],
     created_by: str | None,
+    native_harness: str | None,
 ) -> ResetSessionResponse:
     # A message that passed the input gate before the reset registered may
     # still be on its way to the runner; let it land so the busy check sees it.
@@ -209,7 +226,18 @@ async def _reset_in_place(
         await drop_server_pending()
         while pending_inputs.resolve_oldest(session_id) is not None:
             pass
-    runner_reached = await _forward_reset(reset, forward, wake, conv)
+    runner_reached = await _forward_reset(reset, forward, wake, conv, native_harness)
+    # Ahead of the boundary, so a conflict leaves no epoch that resumes the old chat.
+    if native_harness is not None and not await asyncio.to_thread(
+        _clear_native_session_id, conversation_store, session_id
+    ):
+        if runner_reached:
+            # ``prepare`` stopped the pane; relaunch it on the id that won.
+            await _commit_reset(session_id, forward, native_harness)
+        raise OmnigentError(
+            "The session's native session id changed during the reset; retry.",
+            code=ErrorCode.CONFLICT,
+        )
     summary = reset.summary.text if isinstance(reset.summary, ResetSummaryText) else None
     item = await asyncio.to_thread(
         conversation_store.append_context_reset,
@@ -220,8 +248,13 @@ async def _reset_in_place(
         stable_id=stable_id,
         created_by=created_by,
     )
+    if native_harness is not None:
+        # Before ``commit``: the runner relaunches from this cleared state. An
+        # unreached runner's local resume hint and labels left by a crash here
+        # predate the new epoch, so the next launch ignores them.
+        await asyncio.to_thread(_delete_native_resume_labels, conversation_store, session_id)
     if runner_reached:
-        await _commit_reset(session_id, forward)
+        await _commit_reset(session_id, forward, native_harness)
     epoch = item.data.epoch  # type: ignore[union-attr]
     publish(
         SessionResetEvent(
@@ -233,6 +266,23 @@ async def _reset_in_place(
         ).model_dump()
     )
     return ResetSessionResponse(session_id=session_id, epoch=epoch, boundary_item_id=item.id)
+
+
+def _clear_native_session_id(conversation_store: ConversationStore, session_id: str) -> bool:
+    """Clear the vendor session id; ``False`` when another writer changed it.
+
+    Read here rather than at the request's start: the pane is stopped by now,
+    so a first hook that landed meanwhile is still the pre-reset session's id.
+    """
+    current = conversation_store.get_conversation(session_id)
+    expected = current.external_session_id if current is not None else None
+    return conversation_store.reset_external_session_id(session_id, expected=expected)
+
+
+def _delete_native_resume_labels(conversation_store: ConversationStore, session_id: str) -> None:
+    """Drop the fork labels so the relaunch does not rebuild the pre-reset chat."""
+    for key in _NATIVE_RESUME_LABEL_KEYS:
+        conversation_store.delete_label(session_id, key)
 
 
 async def _wait_until(done: Callable[[], bool], busy_message: str) -> None:
@@ -265,9 +315,10 @@ async def _forward_reset(
     forward: RunnerForward,
     wake: Callable[[], Awaitable[bool]],
     conv: Conversation,
+    native_harness: str | None = None,
 ) -> bool:
     """Ask the runner to check and drop its caches; ``False`` when none is bound."""
-    event = {"type": "reset", "phase": "prepare", "pending": reset.pending}
+    event = _reset_event("prepare", native_harness) | {"pending": reset.pending}
     result = await forward(event)
     if result is None and conv.runner_id is None:
         # No runner bound: nothing caches history, the next launch reads the boundary.
@@ -295,13 +346,23 @@ async def _forward_reset(
     )
 
 
-async def _commit_reset(session_id: str, forward: RunnerForward) -> None:
+def _reset_event(phase: str, native_harness: str | None) -> dict[str, Any]:
+    """Build a reset control; it names a native harness so the runner need not guess."""
+    event: dict[str, Any] = {"type": "reset", "phase": phase}
+    if native_harness is not None:
+        event["harness"] = native_harness
+    return event
+
+
+async def _commit_reset(
+    session_id: str, forward: RunnerForward, native_harness: str | None = None
+) -> None:
     """Drop history a turn cached before the boundary landed, and release the harness.
 
-    The boundary is already persisted, so a failure here is logged, not raised:
+    A failure here is logged, not raised: the caller's outcome is already settled,
     the ``prepare`` step dropped the caches and new input stayed gated since.
     """
-    result = await forward({"type": "reset", "phase": "commit"})
+    result = await forward(_reset_event("commit", native_harness))
     if result is None or result.status_code != 200:
         _logger.warning(
             "Runner did not confirm the context reset commit for %s (status %s)",

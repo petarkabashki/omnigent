@@ -1399,6 +1399,7 @@ def create_runner_app(
     ] = {}
     _recovery_turn_ids: dict[str, set[str]] = {}
     _session_init_envelopes: dict[str, tuple[float, RunnerSessionInitEnvelope]] = {}
+    app.state.session_init_envelopes = _session_init_envelopes
     # session_id → canonical reasoning effort, seeded from the session-init
     # snapshot and updated by ``effort_change``. In-process harnesses learn the
     # effort only from the forwarded turn body, which is built field by field.
@@ -8044,6 +8045,7 @@ def create_runner_app(
     _resolve_conversation_id = _resource_routes.resolve_conversation_id
 
     _native_controls = build_native_controls(
+        _claude_terminal_ensure_locks=_claude_terminal_ensure_locks,
         _active_turns=_active_turns,
         _background_tasks=_background_tasks,
         _begin_turn_slot=_begin_turn_slot,
@@ -8232,16 +8234,47 @@ def create_runner_app(
         _instruction_delivery_warned.pop(session_id, None)
         _session_sub_agent_resolved.pop(session_id, None)
 
+    async def _context_reset_harness_name(conversation_id: str, fields: dict[str, Any]) -> str:
+        """Return the session's harness for a reset, resolving the spec when uncached.
+
+        A current server names the harness in the body; a runner that has not
+        cached the spec yet (e.g. just woken) must not treat a native session as SDK.
+        """
+        named = fields.get("harness")
+        if isinstance(named, str) and named:
+            return canonicalize_harness(named) or named
+        cached = _session_harness_name(conversation_id)
+        if cached is not None:
+            return cached
+        try:
+            await _resolve_session_spec_entry(conversation_id)
+        except OmnigentError:
+            _logger.debug(
+                "context reset: could not resolve the spec for %s",
+                conversation_id,
+                extra={"session_id": conversation_id},
+            )
+        return _session_harness_name(conversation_id) or ""
+
+    def _drop_session_context_caches(conversation_id: str) -> None:
+        """Forget the cached history and the init snapshot with its pre-reset resume state."""
+        _session_histories.pop(conversation_id, None)
+        _session_init_envelopes.pop(conversation_id, None)
+
     async def _handle_session_context_reset(conversation_id: str, body: Any) -> Response:
         """Drop the runner's context for a session so the next turn starts at the boundary.
 
         ``prepare`` checks for buffered input and drops the caches; the server
         then writes the ``context_reset`` item and sends ``commit``, which drops
         history a turn cached meanwhile and releases the harness process. A
-        body without ``phase`` does both. Native terminal harnesses are refused.
+        body without ``phase`` does both. A claude-native session also stops its
+        pane in ``prepare`` and relaunches it fresh in ``commit``; other native
+        terminal harnesses are refused.
         """
-        harness = _session_harness_name(conversation_id) or ""
-        if harness.endswith("-native"):
+        fields = body if isinstance(body, dict) else {}
+        harness = await _context_reset_harness_name(conversation_id, fields)
+        native_reset = _native_controls.claude_native_reset if harness == "claude-native" else None
+        if harness.endswith("-native") and native_reset is None:
             return JSONResponse(
                 status_code=409,
                 content={
@@ -8249,13 +8282,14 @@ def create_runner_app(
                     "detail": f"reset is not supported for the {harness} harness yet",
                 },
             )
-        fields = body if isinstance(body, dict) else {}
         phase = fields.get("phase")
         lock = _session_reset_locks.setdefault(conversation_id, asyncio.Lock())
         if phase == "commit":
             async with lock:
-                _session_histories.pop(conversation_id, None)
+                _drop_session_context_caches(conversation_id)
                 await _invalidate_session_agent_state(conversation_id)
+                if native_reset is not None:
+                    await native_reset.commit(conversation_id)
             return JSONResponse(status_code=200, content={"reset": True, "phase": "commit"})
         if lock.locked():
             return JSONResponse(
@@ -8274,9 +8308,13 @@ def create_runner_app(
                     },
                 )
             _session_message_buffers.pop(conversation_id, None)
-            _session_histories.pop(conversation_id, None)
+            _drop_session_context_caches(conversation_id)
+            if native_reset is not None:
+                await native_reset.prepare(conversation_id)
             if phase != "prepare":
                 await _invalidate_session_agent_state(conversation_id)
+                if native_reset is not None:
+                    await native_reset.commit(conversation_id)
         return JSONResponse(
             status_code=200, content={"reset": True, "dropped_buffered": len(buffered)}
         )

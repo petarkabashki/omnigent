@@ -2390,6 +2390,8 @@ class SessionResponse(BaseModel):
         conversation wraps, e.g. a Claude Code session uuid for
         ``omnigent claude`` sessions. ``None`` for regular
         AP-only conversations. Populated by the wrapper bridge.
+    :param context_epoch: Number of context resets this session has had;
+        ``0`` when it was never reset.
     :param terminal_launch_args: Pass-through CLI args the native
         terminal wrapper (claude / codex) was launched with, e.g.
         ``["--dangerously-skip-permissions"]``. ``None`` for
@@ -2506,6 +2508,7 @@ class SessionResponse(BaseModel):
     native_usage_baseline: NativeUsageBaseline | None = None
     last_task_error: dict[str, str] | None = None
     external_session_id: str | None = None
+    context_epoch: int = 0
     terminal_launch_args: list[str] | None = None
     pending_elicitations: list[dict[str, Any]] = Field(default_factory=list)
     # Durable startup inputs plus ordinary native inputs awaiting a receipt.
@@ -2616,6 +2619,9 @@ class UpdateSessionRequest(BaseModel):
         writes; the server rejects attempts to overwrite an
         already-set different value with ``invalid_input`` to
         surface programmer errors. ``None`` leaves unchanged.
+    :param context_epoch: The session's context epoch when the wrapper
+        launched. An ``external_session_id`` from an older epoch is
+        refused with ``conflict``: a context reset ended that launch.
     :param terminal_launch_args: Per-session native-terminal
         pass-through args, e.g. ``["--dangerously-skip-permissions"]``.
         Updating this field requires session ownership.
@@ -2664,6 +2670,7 @@ class UpdateSessionRequest(BaseModel):
     subagent_routing_override: str | None = None
     share_workspace_files: bool | None = None
     external_session_id: str | None = None
+    context_epoch: int | None = None
     terminal_launch_args: list[str] | None = None
     archived: bool | None = None
     delete_worktree: bool = False

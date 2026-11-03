@@ -29,6 +29,7 @@ class RunnerSessionInitSnapshot(BaseModel):  # type: ignore[explicit-any]  # Pyd
     cost_control_mode_override: str | None = None
     terminal_launch_args: list[str] | None = None
     external_session_id: str | None = None
+    context_epoch: int = 0
     parent_session_id: str | None = None
     root_session_id: str | None = None
     inference_config: dict[str, object] | None = None
@@ -89,6 +90,7 @@ def build_runner_session_init_payload(
             cost_control_mode_override=conversation.cost_control_mode_override,
             terminal_launch_args=conversation.terminal_launch_args,
             external_session_id=conversation.external_session_id,
+            context_epoch=conversation.context_epoch,
             parent_session_id=conversation.parent_conversation_id,
             root_session_id=conversation.root_conversation_id,
             inference_config=snapshot_runtime_config(conversation.inference_snapshot),

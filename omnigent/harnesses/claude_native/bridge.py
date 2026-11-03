@@ -264,6 +264,8 @@ _SERVER_FILE = "server.json"
 _MCP_SOCKET_PREFIX = "mcp-"
 _MCP_SOCKET_SUFFIX = ".sock"
 _STATE_FILE = "state.json"
+#: Holds the session's context epoch at the last runner launch.
+_LAUNCH_EPOCH_FILE = "launch_epoch"
 _HOOKS_FILE = "hooks.jsonl"
 OBSERVER_HOOK_STDERR_FILE = "observer_hook.stderr"
 _RECENT_LOCAL_COMMAND_LINE_LIMIT = 200
@@ -1910,6 +1912,7 @@ def prepare_bridge_dir(
         for filename in (
             _SERVER_FILE,
             _STATE_FILE,
+            _LAUNCH_EPOCH_FILE,
             _HOOKS_FILE,
             OBSERVER_HOOK_STDERR_FILE,
             _TOOL_RELAY_FILE,
@@ -3192,6 +3195,42 @@ def read_claude_session_id(bridge_dir: Path) -> str | None:
     if not isinstance(raw, str) or not raw:
         return None
     return raw
+
+
+def clear_claude_session_state(bridge_dir: Path) -> None:
+    """
+    Forget the Claude session the hooks recorded, so no launch resumes it.
+
+    Removes the per-launch state file that :func:`read_claude_session_id`
+    reads; :func:`prepare_bridge_dir` removes the same file on every launch.
+
+    :param bridge_dir: Bridge directory path.
+    """
+    with contextlib.suppress(FileNotFoundError):
+        (bridge_dir / _STATE_FILE).unlink()
+
+
+def record_launch_epoch(bridge_dir: Path, epoch: int) -> None:
+    """
+    Stamp the bridge dir with the context epoch this launch runs in.
+
+    :param bridge_dir: Bridge directory path.
+    :param epoch: The session's ``context_epoch`` at launch, e.g. ``0``.
+    """
+    (bridge_dir / _LAUNCH_EPOCH_FILE).write_text(str(epoch), encoding="utf-8")
+
+
+def read_launch_epoch(bridge_dir: Path) -> int | None:
+    """
+    Return the context epoch this bridge dir's launch was stamped with.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: The stamped epoch, or ``None`` when no launch stamped one.
+    """
+    try:
+        return int((bridge_dir / _LAUNCH_EPOCH_FILE).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def read_seen_claude_session_ids(bridge_dir: Path) -> set[str]:

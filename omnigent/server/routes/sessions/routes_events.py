@@ -2237,6 +2237,7 @@ def register_events_routes(
 
             from omnigent.server.routes import sessions as _sessions_facade
 
+            reset_native_agent = _native_coding_agent_for_session(reset_conv)
             reset_result = await run_context_reset(
                 session_id=session_id,
                 conv=reset_conv,
@@ -2250,7 +2251,9 @@ def register_events_routes(
                     session_id, runner_router, event, timeout_s=RESET_FORWARD_TIMEOUT_S
                 ),
                 wake=_wake,
-                native=_is_native_terminal_session(reset_conv),
+                native_harness=(
+                    reset_native_agent.harness if reset_native_agent is not None else None
+                ),
                 publish=lambda payload: _sessions_facade.session_stream.publish(
                     session_id, payload
                 ),

@@ -151,3 +151,23 @@ async def test_message_is_refused_while_a_reset_is_in_flight(client: httpx.Async
 
     assert resp.status_code == 409, resp.text
     assert "reset_in_progress" in resp.text
+
+
+async def test_external_session_id_from_before_a_reset_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    sid, [reset], _ = await _reset_twice(client, 200, {})
+    assert reset.status_code == 200, reset.text
+
+    stale = await client.patch(
+        f"/v1/sessions/{sid}", json={"external_session_id": "sid-old", "context_epoch": 0}
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["error"]["code"] == "conflict"
+    assert (await client.get(f"/v1/sessions/{sid}")).json()["external_session_id"] is None
+
+    current = await client.patch(
+        f"/v1/sessions/{sid}", json={"external_session_id": "sid-new", "context_epoch": 1}
+    )
+    assert current.status_code == 200, current.text
+    assert current.json()["external_session_id"] == "sid-new"

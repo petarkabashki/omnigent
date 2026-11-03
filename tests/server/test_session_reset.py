@@ -13,6 +13,10 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.routes._sessions import reset as reset_module
 from omnigent.server.routes._sessions.reset import is_reset_in_flight, run_context_reset
 from omnigent.server.schemas import ResetSessionRequest
+from omnigent.stores.conversation_store import (
+    FORK_CARRY_HISTORY_LABEL_KEY,
+    FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -27,6 +31,33 @@ class _Forwarded:
 class _Store:
     items: dict[str, ConversationItem] = field(default_factory=dict)
     epoch: int = 0
+    #: Native resume-state writes and runner forwards, in call order.
+    log: list[str] = field(default_factory=list)
+    external_session_id: str | None = "sid-old"
+    #: Written after the reset reads the id, ahead of its compare-and-clear.
+    racing_external_session_id: str | None = None
+
+    def get_conversation(self, conversation_id: str) -> Conversation:
+        return Conversation(
+            id=conversation_id,
+            created_at=1,
+            updated_at=1,
+            root_conversation_id=conversation_id,
+            external_session_id=self.external_session_id,
+        )
+
+    def reset_external_session_id(self, conversation_id: str, *, expected: str | None) -> bool:
+        if self.racing_external_session_id is not None:
+            self.external_session_id = self.racing_external_session_id
+        if self.external_session_id != expected:
+            self.log.append("keep external_session_id")
+            return False
+        self.external_session_id = None
+        self.log.append("clear external_session_id")
+        return True
+
+    def delete_label(self, conversation_id: str, key: str) -> None:
+        self.log.append(f"delete {key}")
 
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         return self.items.get(item_id)
@@ -55,7 +86,7 @@ class _Harness:
         default_factory=lambda: list[_Forwarded | None]([_Forwarded(200), _Forwarded(200)])
     )
     wake_result: bool = False
-    native: bool = False
+    native_harness: str | None = None
     runner_id: str | None = "runner_1"
     host_id: str | None = None
     store: _Store = field(default_factory=_Store)
@@ -66,6 +97,8 @@ class _Harness:
     dispatching: bool = False
     items_seen_by_forward: list[int] = field(default_factory=list)
     forward_gate: asyncio.Event | None = None
+    #: Recorded by a hook while the runner handles ``prepare``.
+    id_landing_during_prepare: str | None = None
 
     async def run(self, **request: Any) -> Any:
         async def has_pending() -> bool:
@@ -80,7 +113,10 @@ class _Harness:
 
         async def forward(event: dict[str, Any]) -> _Forwarded | None:
             self.forwarded.append(event)
+            self.store.log.append(f"forward {event['phase']}")
             self.items_seen_by_forward.append(len(self.store.items))
+            if event["phase"] == "prepare" and self.id_landing_during_prepare is not None:
+                self.store.external_session_id = self.id_landing_during_prepare
             if self.forward_gate is not None:
                 await self.forward_gate.wait()
             return self.runner_results.pop(0) if self.runner_results else None
@@ -106,7 +142,7 @@ class _Harness:
             interrupt=interrupt,
             forward=forward,
             wake=wake,
-            native=self.native,
+            native_harness=self.native_harness,
             publish=self.published.append,
             dispatching=lambda: self.dispatching,
         )
@@ -193,7 +229,12 @@ async def test_failed_commit_keeps_the_persisted_boundary() -> None:
     [
         (_Harness(status="running"), {}, ErrorCode.SESSION_BUSY),
         (_Harness(server_pending=True), {}, ErrorCode.PENDING_INPUTS),
-        (_Harness(native=True), {}, ErrorCode.RESET_UNSUPPORTED),
+        (_Harness(native_harness="codex-native"), {}, ErrorCode.RESET_UNSUPPORTED),
+        (
+            _Harness(native_harness="claude-native"),
+            {"summary": {"text": "carried"}},
+            ErrorCode.INVALID_INPUT,
+        ),
         (_Harness(runner_results=[_Forwarded(204)]), {}, ErrorCode.RESET_UNSUPPORTED),
         (
             _Harness(runner_results=[_Forwarded(409, '{"error": "pending_inputs"}')]),
@@ -212,6 +253,104 @@ async def test_reset_refusals_persist_nothing(
     assert harness.store.items == {}
     assert harness.published == []
     assert not is_reset_in_flight("conv_1")
+
+
+async def test_other_native_harnesses_keep_the_planned_refusal() -> None:
+    with pytest.raises(OmnigentError) as caught:
+        await _Harness(native_harness="pi-native").run()
+
+    assert caught.value.code == ErrorCode.RESET_UNSUPPORTED
+    assert "native support is planned" in str(caught.value)
+
+
+async def test_claude_native_reset_clears_resume_state_before_the_relaunch() -> None:
+    harness = _Harness(native_harness="claude-native")
+
+    result = await harness.run()
+
+    assert result.epoch == 1
+    # The runner's commit relaunches Claude, so it must find no id to --resume.
+    assert harness.store.log == [
+        "forward prepare",
+        "clear external_session_id",
+        f"delete {FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY}",
+        f"delete {FORK_CARRY_HISTORY_LABEL_KEY}",
+        "forward commit",
+    ]
+    # Both phases name the harness, so a runner without the spec cached still
+    # takes the claude-native path.
+    assert harness.forwarded == [
+        {**_PREPARE, "harness": "claude-native"},
+        {**_COMMIT, "harness": "claude-native"},
+    ]
+    assert harness.published[0]["type"] == "session.reset"
+
+
+async def test_claude_native_reset_without_a_bound_runner_still_clears_resume_state() -> None:
+    # The epoch the boundary raises makes the next launch skip the stale local hint.
+    harness = _Harness(
+        native_harness="claude-native", runner_id=None, host_id="host_1", runner_results=[None]
+    )
+
+    result = await harness.run()
+
+    assert result.epoch == 1
+    assert harness.store.log == [
+        "forward prepare",
+        "clear external_session_id",
+        f"delete {FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY}",
+        f"delete {FORK_CARRY_HISTORY_LABEL_KEY}",
+    ]
+
+
+async def test_claude_native_reset_clears_an_id_recorded_during_prepare() -> None:
+    harness = _Harness(native_harness="claude-native")
+    harness.store.external_session_id = None
+    harness.id_landing_during_prepare = "sid-from-the-stopped-pane"
+
+    await harness.run()
+
+    assert harness.store.external_session_id is None
+
+
+@pytest.mark.parametrize(
+    ("bound", "expected_log"),
+    [
+        pytest.param(
+            True,
+            ["forward prepare", "keep external_session_id", "forward commit"],
+            id="runner-relaunches-on-the-winning-id",
+        ),
+        pytest.param(False, ["forward prepare", "keep external_session_id"], id="no-runner"),
+    ],
+)
+async def test_claude_native_reset_conflict_persists_no_boundary(
+    bound: bool, expected_log: list[str]
+) -> None:
+    harness = _Harness(
+        native_harness="claude-native",
+        runner_id="runner_1" if bound else None,
+        host_id=None if bound else "host_1",
+        runner_results=[_Forwarded(200), _Forwarded(200)] if bound else [None],
+        store=_Store(racing_external_session_id="sid-winner"),
+    )
+
+    assert await _error_code(harness) == ErrorCode.CONFLICT
+
+    assert harness.store.log == expected_log
+    assert harness.store.external_session_id == "sid-winner"
+    assert harness.store.items == {}
+    assert harness.published == []
+    assert not is_reset_in_flight("conv_1")
+
+
+async def test_sdk_reset_keeps_the_external_session_id() -> None:
+    harness = _Harness()
+
+    await harness.run()
+
+    assert harness.store.log == ["forward prepare", "forward commit"]
+    assert harness.store.external_session_id == "sid-old"
 
 
 async def test_stop_running_interrupts_first() -> None:

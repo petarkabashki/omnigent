@@ -4979,6 +4979,41 @@ class SqlAlchemyConversationStore(ConversationStore):
         )
         return _to_conversation(ap_row, meta, labels)
 
+    def reset_external_session_id(self, conversation_id: str, *, expected: str | None) -> bool:
+        """
+        Clear the runtime-native session id if it still is ``expected``.
+
+        See :meth:`ConversationStore.reset_external_session_id`.
+
+        :param conversation_id: Conversation to update, e.g. ``"conv_abc123"``.
+        :param expected: The id the caller read, or ``None`` when it read none.
+        :returns: ``True`` when the id is now clear, ``False`` on a mismatch.
+        :raises ConversationNotFoundError: If no conversation row exists.
+        """
+
+        def compare_and_clear(session: Session) -> bool:
+            meta_query = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                meta_query = meta_query.with_for_update()
+            meta = session.scalar(meta_query)
+            if meta is None:
+                raise ConversationNotFoundError(
+                    f"conversation {conversation_id!r} does not exist",
+                )
+            if meta.external_session_id != expected:
+                return False
+            meta.external_session_id = None
+            return True
+
+        return run_write_transaction(
+            self._session_immediate,
+            "reset_external_session_id_after_context_reset",
+            compare_and_clear,
+        )
+
     def create_session_with_agent(
         self,
         *,

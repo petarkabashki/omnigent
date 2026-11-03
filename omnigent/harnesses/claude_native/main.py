@@ -5977,6 +5977,13 @@ def _claude_transcript_records_from_session_items(
         ):
             continue
         previous_item = item
+        # A context reset starts a new epoch: nothing before it is model context.
+        if item.get("type") == "context_reset":
+            records.clear()
+            parent_uuid = None
+            tool_parent_by_call_id.clear()
+            snapshot_item_ids.clear()
+            continue
         # Compaction items carry the post-compaction context. Replace
         # all prior records with the compacted messages so the
         # reconstructed transcript reflects the compacted state.

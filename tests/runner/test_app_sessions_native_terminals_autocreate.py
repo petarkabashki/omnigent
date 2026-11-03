@@ -37,6 +37,7 @@ from omnigent.harnesses.claude_native.bridge import (
     bridge_dir_for_bridge_id,
     prepare_bridge_dir,
     read_permission_hook_config,
+    record_launch_epoch,
 )
 from omnigent.harnesses.claude_native.main import claude_tool_env_file
 from omnigent.harnesses.codex_native.bridge import (
@@ -70,6 +71,7 @@ from omnigent.runner.app import (
     _publish_terminal_pending,
     _terminal_lookup_miss_log_state,
 )
+from omnigent.runner.native.claude_reset import local_resume_hint_epoch
 from omnigent.runner.native.orchestration import _build_pi_native_args
 from omnigent.runner.resource_registry import (
     CLAUDE_NATIVE_TERMINAL_ROLE,
@@ -3290,13 +3292,25 @@ async def test_auto_create_claude_terminal_resumes_in_place_when_the_registry_ch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_transcript", ["missing", "unreadable", "available"])
+@pytest.mark.parametrize(
+    ("source_transcript", "context_epoch"),
+    [
+        ("missing", 0),
+        ("unreadable", 0),
+        ("available", 0),
+        pytest.param("available", 1, id="labels-left-behind-a-reset"),
+    ],
+)
 async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
     source_transcript: str,
+    context_epoch: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fork rebuilds missing local history and resumes it in the chosen directory."""
+    """A fork rebuilds missing local history and resumes it in the chosen directory.
+
+    Fork labels a crash left behind a context reset do not clone the old chat.
+    """
     from unittest.mock import AsyncMock
 
     from omnigent.harnesses.claude_native import main as claude_native
@@ -3391,6 +3405,7 @@ async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
                     created_at=0,
                     updated_at=0,
                     workspace=str(workspace),
+                    context_epoch=context_epoch,
                     labels={
                         "omnigent.fork.source_external_session_id": source_uuid,
                         "omnigent.fork.carry_history": "1",
@@ -3404,6 +3419,13 @@ async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
 
     spec = captured["spec"]
     assert spec.os_env.cwd == str(workspace)
+    if context_epoch > 0:
+        assert "--resume" not in spec.args
+        assert "--fork-session" not in spec.args
+        assert patched_ids == []
+        assert history_requests == []
+        assert not claude_native._claude_project_dir_for_cwd(workspace).exists()
+        return
     assert "--resume" in spec.args
     resume_id = spec.args[spec.args.index("--resume") + 1]
     assert resume_id != source_uuid
@@ -3420,11 +3442,28 @@ async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stamped_epoch", "server_epoch", "has_hint", "resumes"),
+    [
+        pytest.param(None, 0, True, True, id="never-reset"),
+        pytest.param(1, 1, True, True, id="hint-from-current-epoch"),
+        pytest.param(0, 1, True, False, id="hint-predates-reset"),
+        pytest.param(None, 1, True, False, id="unstamped-hint-after-reset"),
+        pytest.param(0, 1, False, False, id="reset-wiped-the-hint"),
+    ],
+)
 async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_bridge_sid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stamped_epoch: int | None,
+    server_epoch: int,
+    has_hint: bool,
+    resumes: bool,
 ) -> None:
     """Fallback fires when server GET omits external_session_id but local bridge has it.
+
+    A hint recorded before the session's latest context reset is ignored, so a
+    reset the runner never saw does not resume the pre-reset Claude chat.
 
     Simulates the workspace-scope miss (ES-2065116): the server snapshot
     returns no external_session_id, but the bridge state.json from the
@@ -3446,9 +3485,12 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
     prior_claude_sid = "3d10247d-c3c0-4689-8cbd-862d7453bf70"
     pre_bridge_dir = bridge_dir_for_bridge_id(session_id)
     pre_bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (pre_bridge_dir / "state.json").write_text(
-        json.dumps({"claude_session_id": prior_claude_sid}), encoding="utf-8"
-    )
+    if has_hint:
+        (pre_bridge_dir / "state.json").write_text(
+            json.dumps({"claude_session_id": prior_claude_sid}), encoding="utf-8"
+        )
+    if stamped_epoch is not None:
+        record_launch_epoch(pre_bridge_dir, stamped_epoch)
 
     synth_calls: list[str] = []
 
@@ -3498,7 +3540,7 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
             # Session snapshot has no external_session_id (workspace-scope miss).
             class _SnapResponse(NullServerClient._Response):
                 def json(self) -> dict[str, Any]:
-                    return {}
+                    return {"context_epoch": server_epoch}
 
             return _SnapResponse()
 
@@ -3515,7 +3557,8 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
             resource_role: str | None = None,
             parent_os_env: Any = None,
         ) -> SessionResourceView:
-            del terminal_name, session_key, spec
+            del terminal_name, session_key
+            launched_specs.append(spec)
             return SessionResourceView(
                 id="terminal_claude_main",
                 type="terminal",
@@ -3524,6 +3567,7 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
                 metadata={"terminal_name": "claude", "session_key": "main", "running": True},
             )
 
+    launched_specs: list[Any] = []
     await _auto_create_claude_terminal(
         session_id,
         _FakeResourceRegistry(),
@@ -3533,8 +3577,15 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
 
     await asyncio.sleep(0)
 
+    assert local_resume_hint_epoch(bridge_dir_for_bridge_id(session_id)) == server_epoch
+    launch_args = repr(launched_specs[0])
+    if not resumes:
+        assert synth_calls == []
+        assert "--resume" not in launch_args
+        return
     # The fallback must have fired: synthesis is called with the local bridge
     # sid, not skipped (which would leave the user with no context).
+    assert "--resume" in launch_args
     assert synth_calls == [prior_claude_sid], (
         f"Expected synthesis with prior claude sid {prior_claude_sid!r}; "
         f"got {synth_calls!r}. The fallback may be reading the bridge dir "

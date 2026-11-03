@@ -600,7 +600,8 @@
                   "not_top_level",
                   "no_seed",
                   "title_changed",
-                  "generation_failed"
+                  "generation_failed",
+                  "role_title"
                 ],
                 "type": "string"
               },
@@ -1603,6 +1604,82 @@
         "title": "CompletedEvent",
         "type": "object"
       },
+      "ContextResetData": {
+        "description": "Data payload for a context-reset boundary item (`type=\"context_reset\"`).\n\nModel input for the next turn starts after this item: items before it\nstay in the store (and in the UI) but are no longer replayed. Listed in\n`NON_CONTENT_ITEM_TYPES` so history filters skip the item itself.",
+        "properties": {
+          "engine_change": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audit record of an engine switch, `None` when unchanged.",
+            "title": "Engine Change"
+          },
+          "epoch": {
+            "description": "1-based reset counter for the conversation, e.g. `3`.",
+            "format": "int64",
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "last_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last item (inclusive) before the boundary, or `None` when the conversation had no items, e.g. `\"msg_abc123\"`.",
+            "title": "Last Item Id"
+          },
+          "previous_external_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The vendor session id cleared by the reset, for native harnesses; `None` otherwise.",
+            "title": "Previous External Session Id"
+          },
+          "reason": {
+            "default": "user",
+            "description": "Who asked for the reset.",
+            "enum": [
+              "user",
+              "agent",
+              "api"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional carry-over text replayed as a synthetic user/assistant pair, or `None` for a clean reset.",
+            "title": "Summary"
+          }
+        },
+        "required": [
+          "epoch"
+        ],
+        "title": "ContextResetData",
+        "type": "object"
+      },
       "ConversationDeleted": {
         "description": "Confirmation payload returned after deleting a conversation.",
         "properties": {
@@ -1670,6 +1747,9 @@
               },
               {
                 "$ref": "#/components/schemas/CompactionData"
+              },
+              {
+                "$ref": "#/components/schemas/ContextResetData"
               },
               {
                 "$ref": "#/components/schemas/NativeToolData"
@@ -5407,6 +5487,116 @@
         "title": "ResetSessionModelOverrideResponse",
         "type": "object"
       },
+      "ResetSessionRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST /v1/sessions/{id}/reset` and of the `reset` session event.",
+        "properties": {
+          "children": {
+            "const": "keep",
+            "default": "keep",
+            "description": "Only `\"keep\"`; closing children is not supported yet.",
+            "title": "Children",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Repeating a key returns the first result.",
+            "title": "Idempotency Key"
+          },
+          "pending": {
+            "default": "reject",
+            "description": "`\"reject\"` returns 409 while input is queued; `\"drop\"` discards it. `\"carry\"` is not supported yet.",
+            "enum": [
+              "reject",
+              "drop",
+              "carry"
+            ],
+            "title": "Pending",
+            "type": "string"
+          },
+          "stop_running": {
+            "default": false,
+            "description": "Interrupt a running turn first instead of returning 409.",
+            "title": "Stop Running",
+            "type": "boolean"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/ResetSummaryText"
+              }
+            ],
+            "default": "none",
+            "description": "`\"none\"` for a clean reset, or `{\"text\": ...}` to carry a summary. `\"auto\"` is accepted by the schema but refused until generated summaries are supported.",
+            "title": "Summary"
+          }
+        },
+        "title": "ResetSessionRequest",
+        "type": "object"
+      },
+      "ResetSessionResponse": {
+        "description": "Result of a context reset: the same session, now at `epoch`.",
+        "properties": {
+          "boundary_item_id": {
+            "title": "Boundary Item Id",
+            "type": "string"
+          },
+          "epoch": {
+            "format": "int64",
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "relaunched": {
+            "default": false,
+            "title": "Relaunched",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "epoch",
+          "boundary_item_id"
+        ],
+        "title": "ResetSessionResponse",
+        "type": "object"
+      },
+      "ResetSummaryText": {
+        "additionalProperties": false,
+        "description": "Caller-supplied carry-over text for a context reset.",
+        "properties": {
+          "text": {
+            "maxLength": 64000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "ResetSummaryText",
+        "type": "object"
+      },
       "ResourceEventData": {
         "description": "Data payload for a persisted resource lifecycle event.\n\nThese items are written to the conversation store when a\nsession resource is created or deleted, so reconnecting\nclients can discover resource history without replaying the\nlive SSE stream.  The agent loop filters them out of the\nLLM's message context (they are metadata, not conversation\ncontent).",
         "properties": {
@@ -8566,6 +8756,13 @@
             "description": "Per-shell detail for the running tally above, so a reload can restore each shell's description/command. `None` when none are tracked (or when an older runner reported only the count).",
             "title": "Background Tasks"
           },
+          "context_epoch": {
+            "default": 0,
+            "description": "Number of context resets this session has had; `0` when it was never reset.",
+            "format": "int64",
+            "title": "Context Epoch",
+            "type": "integer"
+          },
           "context_window": {
             "anyOf": [
               {
@@ -10562,6 +10759,19 @@
             ],
             "description": "Codex-native collaboration-mode string. `\"plan\"` enters Plan mode and `\"default\"` returns to Default mode for subsequent Codex turns. Only valid for sessions stamped with the codex-native wrapper label. Omitted leaves unchanged.",
             "title": "Collaboration Mode"
+          },
+          "context_epoch": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's context epoch when the wrapper launched. An `external_session_id` from an older epoch is refused with `conflict`: a context reset ended that launch.",
+            "title": "Context Epoch"
           },
           "cost_control_mode_override": {
             "anyOf": [
@@ -14459,6 +14669,141 @@
         ]
       }
     },
+    "/v1/sessions/aliases": {
+      "get": {
+        "description": "List the caller's live aliased sessions, optionally by project name or alias.",
+        "operationId": "list_session_aliases_v1_sessions_aliases_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "alias",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Alias"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Session Aliases V1 Sessions Aliases Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Session Aliases",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/aliases/resolve": {
+      "get": {
+        "description": "Resolve `Role`, `project/Role` or a UUID to one owned session.\n\nA bare `Role` is relative to the orchestration source's project when\na runner sends the source header, otherwise to unfiled sessions.",
+        "operationId": "resolve_session_alias_v1_sessions_aliases_resolve_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "title": "Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Session Alias V1 Sessions Aliases Resolve Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Session Alias",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "description": "Resolve up to 100 addresses; each row carries a session or an `error`.",
+        "operationId": "resolve_session_aliases_v1_sessions_aliases_resolve_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Session Aliases V1 Sessions Aliases Resolve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Resolve Session Aliases",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/projects": {
       "get": {
         "description": "Return the caller's project summaries in their preferred display order.\n\nDual-reads both project representations and unions them by name:\n- **First-class projects** (`project_store`) \u2014 carry an `id` and\n  appear even when empty (the whole point of the first-class entity).\n- **Legacy label-projects** (implicit `omni_project` label) \u2014 exist\n  while at least one owned session carries the label; `id` is\n  `None` until such a project is promoted to first-class.\n\nA name present in both sources collapses to one entry that keeps the\nfirst-class `id`. Filing is owner-only, so both halves are scoped to\nthe caller (label-projects to their owned sessions, first-class to\ntheir owned rows) \u2014 a project shared to them but owned by another user\ndoes not surface as one of their own folders.\n\n**Returns:** Project summaries in custom order, or alphabetical order by default.",
@@ -15101,6 +15446,85 @@
         "summary": "Update Mcp Server",
         "tags": [
           "session_mcp_servers"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/alias": {
+      "delete": {
+        "description": "Clear a session's alias.",
+        "operationId": "delete_session_alias_v1_sessions__session_id__alias_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Session Alias",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "put": {
+        "description": "Set the owner-chosen alias, unique within the session's project.",
+        "operationId": "put_session_alias_v1_sessions__session_id__alias_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Session Alias V1 Sessions  Session Id  Alias Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Session Alias",
+        "tags": [
+          "sessions"
         ]
       }
     },
@@ -16702,6 +17126,59 @@
           }
         },
         "summary": "Put Read State",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/reset": {
+      "post": {
+        "description": "Reset the session's model context in place, keeping its id and items.\n\nSugar over the `reset` session event. Requires owner access.",
+        "operationId": "post_session_reset_v1_sessions__session_id__reset_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Session Reset",
         "tags": [
           "sessions"
         ]

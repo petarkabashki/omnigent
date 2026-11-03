@@ -411,14 +411,17 @@ async def _spec_resolver_returning(spec: AgentSpec) -> Any:
 
 
 async def _build_app_for_spec(
-    spec: AgentSpec, *, terminal_registry: TerminalRegistry | None = None
+    spec: AgentSpec,
+    *,
+    terminal_registry: TerminalRegistry | None = None,
+    server_client: NullServerClient | None = None,
 ) -> tuple[FastAPI, _FakeProcessManager]:
     """Build the real runner app with an idle harness and one fixed agent spec."""
     pm = _FakeProcessManager(_ScriptedHarnessClient([]))
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
         spec_resolver=await _spec_resolver_returning(spec),
-        server_client=NullServerClient(),  # type: ignore[arg-type]
+        server_client=server_client or NullServerClient(),  # type: ignore[arg-type]
         terminal_registry=terminal_registry,
     )
     return app, pm
