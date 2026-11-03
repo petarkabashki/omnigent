@@ -117,6 +117,17 @@ def test_coverage_and_eligibility() -> None:
     assert next(row for row in rows if row.decision_id == "pinned").pinned == ["model"]
 
 
+def test_coverage_counts_dropped_oversized_records() -> None:
+    stub = {
+        "decision_id": "big",
+        "session_id": "s-big",
+        "backend": "rules",
+        "truncated": "dropped",
+    }
+    rows = build_dataset([stub, _decision("d1")])
+    assert coverage_by_site(rows)["session_create"]["dropped"] == 1
+
+
 def test_estimate_prices_router_arm_by_observed_model_cost() -> None:
     decisions = [
         _decision("a", decision={"model": "big"}, actual={"model": "big"}),

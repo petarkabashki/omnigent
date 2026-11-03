@@ -71,6 +71,7 @@ class DecisionRow:
     success: bool | None = None
     cost_usd: float | None = None
     override_kinds: list[str] = field(default_factory=list)
+    dropped: bool = False
 
     @property
     def offline_eligible(self) -> bool:
@@ -117,6 +118,7 @@ def build_dataset(
                 check_ref=record.get("check_ref"),
             )
         row.proposals[record.get("backend", "unknown")] = record.get("decision") or {}
+        row.dropped = row.dropped or record.get("truncated") == "dropped"
     _attach_outcomes(rows, outcomes)
     return list(rows.values())
 
@@ -165,6 +167,7 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
                 "pinned": 0,
                 "excluded": 0,
                 "offline_eligible": 0,
+                "dropped": 0,
             },
         )
         site["decisions"] += 1
@@ -174,6 +177,7 @@ def coverage_by_site(rows: Sequence[DecisionRow]) -> dict[str, dict[str, Any]]:
         site["pinned"] += bool(row.pinned)
         site["excluded"] += row.exclusion is not None
         site["offline_eligible"] += row.offline_eligible
+        site["dropped"] += row.dropped
     for site in report.values():
         site["check_coverage"] = site["with_check"] / site["decisions"]
     return report
