@@ -10,6 +10,7 @@
 # Uses your real ~/.omnigent state (sessions in chat.db). The database is backed
 # up once per day before the server starts, since this build may migrate it.
 # Ctrl-C (or quitting Electron) stops the server and host started here.
+# The shadow router log is on (rules backend, free); set OMNIGENT_ROUTER_SHADOW= to turn it off.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -h | --help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -91,7 +92,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 step "Starting server on ${server_url} (log: ${log_dir}/server.log)"
-uv run --no-sync omnigent server --port "$port" >"${log_dir}/server.log" 2>&1 &
+OMNIGENT_ROUTER_SHADOW="${OMNIGENT_ROUTER_SHADOW-rules}" \
+    uv run --no-sync omnigent server --port "$port" >"${log_dir}/server.log" 2>&1 &
 pids+=($!)
 
 for _ in $(seq 1 120); do
