@@ -3329,6 +3329,61 @@ async def _send_to_existing_session(
     )
 
 
+def _is_already_exists(resp: httpx.Response) -> bool:
+    """True when a server error body carries ``error.code == 'already_exists'``."""
+    try:
+        error = resp.json().get("error")
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(error, dict) and error.get("code") == "already_exists"
+
+
+def _validate_session_create_fields(
+    args: dict[str, object], placement: str, has_config_path: bool
+) -> str | None:
+    """
+    Validate the ``harness``, ``executor``, ``alias``, ``host_id`` and ``workspace`` args.
+
+    ``harness`` needs ``agent_id`` mode; ``alias`` is top-level only, so it
+    needs an independent placement; ``host_id`` and ``workspace`` belong
+    together and exist only for ``placement='host'``.
+
+    :param args: Tool arguments from the model.
+    :param placement: Validated placement, e.g. ``"host"``.
+    :param has_config_path: Whether the call uses ``config_path`` mode.
+    :returns: An error message, or ``None`` when the fields are valid.
+    """
+    from omnigent.session_alias_client import ALIAS_PATTERN
+
+    def text(key: str) -> str | None:
+        value = args.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    for key in ("harness", "executor", "alias", "host_id", "workspace"):
+        if args.get(key) is not None and text(key) is None:
+            return f"'{key}' must be a nonempty string"
+    if text("harness") and has_config_path:
+        return "'harness' requires 'agent_id'; set the harness in the uploaded config instead"
+    if text("executor") and has_config_path:
+        return "'executor' requires 'agent_id'; set the executor in the uploaded config instead"
+    alias = text("alias")
+    if alias is not None:
+        if placement == "child":
+            return (
+                "'alias' requires an independent placement (same_host, host or managed); "
+                "child sessions cannot have aliases"
+            )
+        if not ALIAS_PATTERN.match(alias):
+            return "'alias' must match ^[A-Za-z][A-Za-z0-9_-]{0,31}$"
+    host_fields = [key for key in ("host_id", "workspace") if text(key) is not None]
+    if placement == "host":
+        if len(host_fields) != 2:
+            return "placement='host' requires both 'host_id' and 'workspace'"
+    elif host_fields:
+        return "'host_id' and 'workspace' require placement='host'"
+    return None
+
+
 def _build_session_create_body(
     agent_id: str,
     conversation_id: str,
@@ -3336,6 +3391,7 @@ def _build_session_create_body(
     message: object,
     model: object = None,
     reasoning_effort: object = None,
+    harness: object = None,
 ) -> _JsonObject:
     """
     Build the JSON ``POST /v1/sessions`` body for ``sys_session_create``.
@@ -3362,6 +3418,8 @@ def _build_session_create_body(
         written as ``model_override`` on the session.
     :param reasoning_effort: Optional reasoning level, e.g. ``"high"``;
         written as ``reasoning_effort`` on the session.
+    :param harness: Optional harness override, e.g. ``"pi"``; written as
+        ``harness_override`` on the session.
     :returns: The JSON request body.
     """
     body: _JsonObject = {
@@ -3374,6 +3432,8 @@ def _build_session_create_body(
         body["model_override"] = model
     if isinstance(reasoning_effort, str) and reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
+    if isinstance(harness, str) and harness.strip():
+        body["harness_override"] = harness.strip()
     if isinstance(message, str) and message:
         body["initial_items"] = [
             {
@@ -3514,10 +3574,13 @@ async def _execute_session_create(
             }
         )
     placement = args.get("placement", "child")
-    if placement not in ("child", "same_host", "managed"):
-        return json.dumps({"error": "placement must be child, same_host or managed"})
+    if placement not in ("child", "same_host", "host", "managed"):
+        return json.dumps({"error": "placement must be child, same_host, host or managed"})
     if placement != "child" and has_config_path:
         return json.dumps({"error": "Independent sessions require agent_id"})
+    create_fields_error = _validate_session_create_fields(args, placement, has_config_path)
+    if create_fields_error is not None:
+        return json.dumps({"error": create_fields_error})
     message = args.get("message")
     profile_fields = ("sandbox_provider", "sandbox_profile_id", "sandbox_profile_revision")
     selection = {key: args[key] for key in profile_fields if args.get(key) is not None}
@@ -3559,13 +3622,17 @@ async def _execute_session_create(
         message,
         model=args.get("model"),
         reasoning_effort=args.get("reasoning_effort"),
+        harness=args.get("harness"),
     )
+    if isinstance(args.get("executor"), str) and args["executor"].strip():
+        body["executor"] = args["executor"].strip()
     headers: dict[str, str] = {}
     if placement != "child":
         from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 
         body.pop("parent_session_id")
-        # The server derives the same host/workspace from this bound source.
+        # same_host: the server derives host/workspace from this bound source;
+        # host: they are sent explicitly below.
         headers[ORCHESTRATION_SOURCE_HEADER] = conversation_id
         if placement == "managed":
             body["host_type"] = "managed"
@@ -3575,6 +3642,11 @@ async def _execute_session_create(
                 body["initial_input"] = initial_items[0]
         else:
             body.pop("initial_items", None)
+        if placement == "host":
+            body["host_id"] = str(args["host_id"]).strip()
+            body["workspace"] = str(args["workspace"]).strip()
+        if args.get("alias") is not None:
+            body["alias"] = str(args["alias"]).strip()
     unconfirmed_creation = {
         "error": "Session creation could not be confirmed; "
         "inspect your sessions before creating another. Use sys_session_list's sessions "
@@ -3620,10 +3692,12 @@ async def _execute_session_create(
         return json.dumps({"error": f"sys_session_create failed: {exc}"})
     if placement != "child" and (resp.status_code >= 500 or resp.status_code in (408, 429)):
         return json.dumps(unconfirmed_creation)
-    if placement == "same_host":
+    if placement in ("same_host", "host"):
         from omnigent.runner.session_requests import is_wrong_replica
 
         # Host loss can be reported before persistence or during the later launch.
+        if resp.status_code == 409 and _is_already_exists(resp):
+            return json.dumps({"error": "alias_taken", "detail": resp.text[:500]})
         if is_wrong_replica(resp) or resp.status_code == 409:
             return json.dumps(unconfirmed_creation)
     if placement != "child" and resp.status_code in (404, 405):
@@ -3664,7 +3738,10 @@ async def _execute_session_create(
             "agent_id": data.get("agent_id") or agent_id,
             "title": data.get("title") or args.get("title"),
         }
-        if placement == "same_host" and args.get("message"):
+        alias = data.get("alias") or body.get("alias")
+        if alias:
+            handle["alias"] = alias
+        if placement in ("same_host", "host") and args.get("message"):
             from omnigent.runner.session_message import execute_message_tool
 
             initial_message = json.loads(

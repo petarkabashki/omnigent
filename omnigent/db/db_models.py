@@ -649,6 +649,10 @@ class SqlConversationMetadata(OmnigentBase):
     host_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     sub_agent_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     task_summary: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Number of context resets applied to the conversation.
+    context_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     external_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     session_state: Mapped[str | None] = mapped_column(_MYSQL_BLOB_TEXT, nullable=True)
     session_usage: Mapped[str | None] = mapped_column(_MYSQL_BLOB_TEXT, nullable=True)
@@ -989,8 +993,8 @@ class SqlConversationItem(ConversationBase):
             text("position DESC"),
         ),
         CheckConstraint(
-            "type IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)",
-            name="ck_conversation_items_type",
+            "type IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)",
+            name="ck_conversation_items_item_type",
         ),
         CheckConstraint("status IN (1, 2, 3, 4)", name="ck_conversation_items_status"),
     )

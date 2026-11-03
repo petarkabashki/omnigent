@@ -60,6 +60,7 @@ from omnigent.entities import (
 )
 from omnigent.entities.conversation import (
     ITEM_TYPE_TO_DATA_CLS,
+    SERVER_CONTROLLED_ITEM_TYPES,
     parse_item_data,
 )
 from omnigent.entities.permission import SessionPermission
@@ -3419,6 +3420,11 @@ def _parse_external_conversation_item(
     if not isinstance(item_type, str) or item_type not in ITEM_TYPE_TO_DATA_CLS:
         raise OmnigentError(
             "external_conversation_item requires known data.item_type",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if item_type in SERVER_CONTROLLED_ITEM_TYPES:
+        raise OmnigentError(
+            f"external_conversation_item cannot write {item_type!r} items",
             code=ErrorCode.INVALID_INPUT,
         )
     item_data = body.data.get("item_data")
@@ -10762,6 +10768,7 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     from omnigent.stores.conversation_store import (
         ALIAS_LABEL_KEY,
         CREATED_BY_SESSION_LABEL_KEY,
+        EXECUTOR_LABEL_KEY,
         SCHEDULED_TASK_ORIGIN_LABEL_KEY,
         SCHEDULED_TASK_WORKTREE_SOURCE_LABEL_KEY,
         SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -10776,6 +10783,7 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
         SCHEDULED_TASK_ORIGIN_LABEL_KEY,
         SCHEDULED_TASK_WORKTREE_SOURCE_LABEL_KEY,
         CREATED_BY_SESSION_LABEL_KEY,
+        EXECUTOR_LABEL_KEY,
     ):
         if key in labels:
             raise OmnigentError(

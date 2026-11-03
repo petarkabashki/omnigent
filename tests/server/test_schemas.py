@@ -1292,3 +1292,18 @@ def test_session_response_status_rejects_unknown_value() -> None:
 
     with pytest.raises(ValidationError):
         SessionResponse(id="conv_x", agent_id="ag_x", status="launching", created_at=0)
+
+
+@pytest.mark.parametrize("model_name", ["SessionCreateRequest", "SessionCreateMetadata"])
+def test_session_create_role_params_fold_into_labels(model_name: str) -> None:
+    """``role_params`` become ``omnigent.role_param.<name>`` labels on both create paths."""
+    from omnigent.server import schemas
+
+    model = getattr(schemas, model_name)
+    base: dict[str, Any] = {"agent_id": "ag_x"} if model_name == "SessionCreateRequest" else {}
+    created = model.model_validate(
+        {**base, "labels": {"keep": "1"}, "role_params": {"repo": "omnigent"}}
+    )
+    assert created.labels == {"keep": "1", "omnigent.role_param.repo": "omnigent"}
+    with pytest.raises(ValidationError, match="invalid role_params name"):
+        model.model_validate({**base, "role_params": {"bad name": "x"}})

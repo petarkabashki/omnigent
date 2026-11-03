@@ -1100,6 +1100,7 @@ _ITEM_TYPES: frozenset[str] = frozenset(
         "slash_command",
         "terminal_command",
         "routing_decision",
+        "context_reset",
     }
 )
 
@@ -1413,6 +1414,8 @@ def extract_search_text(item: NewConversationItem) -> str:
     if item.type == "compaction":
         assert isinstance(item.data, CompactionData)
         return item.data.summary
+    if item.type == "context_reset":
+        return item.data.summary or ""  # type: ignore[union-attr]
     if item.type == "native_tool":
         # Native tool items are opaque provider dicts — no
         # meaningful text to index for search.

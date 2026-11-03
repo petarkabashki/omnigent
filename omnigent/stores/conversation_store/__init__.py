@@ -4,12 +4,13 @@ import hashlib
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from omnigent.entities import (
     Agent,
+    ContextResetData,
     Conversation,
     ConversationItem,
     NewConversationItem,
@@ -95,6 +96,9 @@ PROJECT_LABEL_KEY = "omni_project"
 # to address this one as ``Role`` or ``project/Role``. Unique per owner and
 # project among live top-level sessions; written only via the alias endpoint.
 ALIAS_LABEL_KEY = "omnigent.alias"
+
+# Name of the executor profile a session was created with, so Bench can score it.
+EXECUTOR_LABEL_KEY = "omnigent.executor"
 
 
 class DailyCostState(TypedDict):
@@ -506,6 +510,10 @@ class ConversationStore(ABC):
     ) -> bool:
         """Compare-and-set delivery state; None discards a canceled, unsent input."""
         raise NotImplementedError
+
+    def count_running_sessions_by_host(self, host_ids: Sequence[str]) -> dict[str, int]:  # noqa: ARG002
+        """Count sessions mid-turn, waiting, or holding a fresh runner, keyed by host id."""
+        return {}
 
     def list_host_conversation_ids(
         self,
@@ -1230,6 +1238,67 @@ class ConversationStore(ABC):
             missing or its title changed before this call.
         """
         ...
+
+    @abstractmethod
+    def advance_context_epoch(self, conversation_id: str, epoch: int) -> bool:
+        """Raise the conversation's ``context_epoch`` to ``epoch`` if it is lower.
+
+        :param conversation_id: Conversation to update.
+        :param epoch: The epoch a just-appended ``context_reset`` item carries.
+        :returns: ``True`` when the counter moved, ``False`` when it was
+            already at or past ``epoch`` or the row is missing.
+        """
+        ...
+
+    def append_context_reset(
+        self,
+        conversation_id: str,
+        *,
+        response_id: str,
+        summary: str | None = None,
+        reason: str = "user",
+        stable_id: str | None = None,
+        created_by: str | None = None,
+    ) -> ConversationItem:
+        """Append a ``context_reset`` boundary item and advance the epoch.
+
+        The item is written before the counter, so a crash between the two
+        leaves a boundary the next reset numbers past. A repeated ``stable_id``
+        returns the stored boundary without starting another epoch.
+
+        :param conversation_id: Conversation to reset.
+        :param response_id: Response id recorded on the item, e.g. ``"reset_ab12"``.
+        :param summary: Carry-over text, or ``None`` for a clean reset.
+        :param reason: ``"user"``, ``"agent"`` or ``"api"``.
+        :param stable_id: Deterministic item id derived from an idempotency key.
+        :param created_by: Human actor who asked for the reset.
+        :returns: The boundary item (``deduplicated`` when it already existed).
+        :raises ConversationNotFoundError: If the conversation does not exist.
+        """
+        if stable_id is not None:
+            existing = self.get_item(conversation_id, stable_id)
+            if existing is not None and existing.type == "context_reset":
+                return existing.model_copy(update={"deduplicated": True})
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            raise ConversationNotFoundError(conversation_id)
+        latest = self.list_items(conversation_id, order="desc", limit=1).data
+        epoch = conversation.context_epoch + 1
+        boundary = NewConversationItem(
+            type="context_reset",
+            response_id=response_id,
+            created_by=created_by,
+            stable_id=stable_id,
+            data=ContextResetData(
+                epoch=epoch,
+                last_item_id=latest[0].id if latest else None,
+                summary=summary,
+                reason=reason,  # type: ignore[arg-type]
+            ),
+        )
+        [item] = self.append(conversation_id, [boundary])
+        self.advance_context_epoch(conversation_id, epoch)
+        return item
 
     @abstractmethod
     def set_task_summary(

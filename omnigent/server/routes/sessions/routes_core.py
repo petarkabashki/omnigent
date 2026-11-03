@@ -8,8 +8,9 @@ import dataclasses
 import json
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from fastapi import (
@@ -82,6 +83,14 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.bundles import agent_needs_own_copy, copy_agent_bundle, validate_agent_bundle
 from omnigent.server.creation_logging import creation_metadata, creation_stage, session_created
+from omnigent.server.host_placement import (
+    PLACEMENT_REASON_LABEL_KEY,
+    PlacementError,
+    PlacementRefusedError,
+    build_hosts_snapshot,
+    place_host,
+    release_reservation,
+)
 from omnigent.server.host_registry import HostLaunchResult, HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
 from omnigent.server.routes._auth_helpers import (
@@ -221,11 +230,13 @@ from omnigent.server.schemas import (
     UpdateSessionRequest,
 )
 from omnigent.server.session_orchestration import require_orchestration_source
+from omnigent.server.shadow_routing import shadow_route_created_session
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
+    EXECUTOR_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
@@ -413,6 +424,67 @@ def _unsupported_model_detail(result: _RunnerForwardResult | None) -> str | None
         return None
     detail = _runner_reply_field(result.body, "detail")
     return detail if isinstance(detail, str) and detail else "This terminal cannot use that model."
+
+
+_PLACEMENT_REASON_LABEL_MAX_CHARS = 500
+# custom-lint: disable-next=workspace-scoped-cache -- holds task objects
+_release_tasks: set[asyncio.Task[bool]] = set()
+
+
+class _PlacementScope:
+    """Reservations taken during one create request, released when it ends."""
+
+    def __init__(self) -> None:
+        self.reservation_ids: list[str] = []
+
+
+async def _placement_release_scope(request: Request) -> AsyncIterator[None]:
+    """Release placement reservations in the background once the create finishes."""
+    scope = _PlacementScope()
+    request.state.placement_scope = scope
+    try:
+        yield
+    finally:
+        for reservation_id in scope.reservation_ids:
+            task = asyncio.create_task(release_reservation(reservation_id))
+            _release_tasks.add(task)
+            task.add_done_callback(_release_tasks.discard)
+
+
+def _role_lookup_workspace(body: Any) -> str | None:
+    """Workspace to probe for role files on the server; none for managed (remote) workspaces."""
+    return None if body.host_type == "managed" else body.workspace
+
+
+async def _fill_agent_id_from_executor(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return ``payload`` with the executor profile's ``agent_id`` when none was sent.
+
+    Lets ``{"executor": ...}`` (or a role whose file names one) create a session
+    on the legacy shape, where ``agent_id`` is otherwise required.
+    """
+    name = payload.get("executor")
+    alias = payload.get("alias")
+    if (
+        not isinstance(name, str)
+        and isinstance(alias, str)
+        and not payload.get("parent_session_id")
+    ):
+        from omnigent.runtime.role_instructions import role_executor_name
+
+        workspace = payload.get("workspace")
+        name = await asyncio.to_thread(
+            role_executor_name,
+            alias.strip(),
+            workspace
+            if isinstance(workspace, str) and payload.get("host_type") != "managed"
+            else None,
+        )
+    if not isinstance(name, str) or not name.strip():
+        return payload
+    from omnigent.executor_profiles import get_executor_profile
+
+    profile = await asyncio.to_thread(get_executor_profile, name.strip())
+    return {**payload, "agent_id": profile.agent_id} if profile.agent_id else payload
 
 
 def register_core_routes(
@@ -669,6 +741,66 @@ def register_core_routes(
             startup=getattr(request.app.state, "startup_inputs", None),
         )
 
+    async def _place_session_host(
+        request: Request,
+        body: Any,
+        user_id: str | None,
+        orchestration_source: str | None,
+    ) -> Any:
+        """
+        Choose the session's host with ag-fleet and return the body targeting it.
+
+        The reservation is registered on the request's placement scope, which
+        releases it in the background when the create ends.
+
+        :param request: The create request.
+        :param body: Validated create body with ``host_needs`` set and no ``host_id``.
+        :param user_id: Authenticated caller, or ``None`` when auth is disabled.
+        :param orchestration_source: Orchestration source header, unsupported here.
+        :returns: A copy of ``body`` with ``host_id`` and the placement-reason label set.
+        :raises OmnigentError: On a bad combination, a refusal, or a placement failure.
+        """
+        if body.workspace is None:
+            raise OmnigentError("host_needs requires workspace", code=ErrorCode.INVALID_INPUT)
+        if body.host_type == "managed" or orchestration_source is not None:
+            raise OmnigentError(
+                "host_needs applies only to external-host sessions created directly",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        host_store = getattr(request.app.state, "host_store", None)
+        if host_store is None:
+            raise OmnigentError("Host placement needs a host store", code=ErrorCode.INTERNAL_ERROR)
+        hosts = await asyncio.to_thread(host_store.list_hosts, user_id or "local")
+        running = await asyncio.to_thread(
+            conversation_store.count_running_sessions_by_host, [host.host_id for host in hosts]
+        )
+        try:
+            placement = await place_host(
+                needs=body.host_needs,
+                snapshot=build_hosts_snapshot(hosts, running),
+                request_id=uuid4().hex,
+                host=body.host_preference,
+            )
+        except PlacementRefusedError as exc:
+            raise OmnigentError(
+                f"placement refused ({exc.code}): {exc.reason}", code=ErrorCode.CONFLICT
+            ) from exc
+        except PlacementError as exc:
+            raise OmnigentError(exc.message, code=ErrorCode.INTERNAL_ERROR) from exc
+        request.state.placement_scope.reservation_ids.append(placement.reservation_id)
+        labels = dict(body.labels)
+        if placement.reason:
+            labels[PLACEMENT_REASON_LABEL_KEY] = placement.reason[
+                :_PLACEMENT_REASON_LABEL_MAX_CHARS
+            ]
+        return type(body).model_validate(
+            {
+                **body.model_dump(exclude_unset=True),
+                "host_id": placement.host_id,
+                "labels": labels,
+            }
+        )
+
     async def _check_requested_host_id(
         request: Request, requested_host_id: str, user_id: str | None
     ) -> None:
@@ -897,7 +1029,11 @@ def register_core_routes(
         status_code=201,
         response_model=None,
         include_in_schema=False,
-        dependencies=[Depends(require_json_content_type), Depends(require_trusted_origin)],
+        dependencies=[
+            Depends(require_json_content_type),
+            Depends(require_trusted_origin),
+            Depends(_placement_release_scope),
+        ],
     )
     async def create_orchestrated_session(
         request: Request,
@@ -923,6 +1059,7 @@ def register_core_routes(
         dependencies=[
             Depends(require_json_or_multipart_content_type),
             Depends(require_trusted_origin),
+            Depends(_placement_release_scope),
         ],
     )
     async def create_session(
@@ -981,6 +1118,8 @@ def register_core_routes(
                 if isinstance(payload, dict) and payload.get("project_id") is not None
                 else SessionCreateRequest
             )
+            if isinstance(payload, dict) and not payload.get("agent_id"):
+                payload = await _fill_agent_id_from_executor(payload)
             body = create_model.model_validate(payload)
         except json.JSONDecodeError as exc:
             raise HTTPException(
@@ -1067,7 +1206,10 @@ def register_core_routes(
                 body.initial_input = orchestration_message(
                     source.id, content[0].get("text"), sender_handle
                 )
-            if body.host_type == "external":
+            if body.host_type == "external" and body.host_id is not None:
+                if body.workspace is None:
+                    raise OmnigentError("host_id requires workspace", code=ErrorCode.INVALID_INPUT)
+            elif body.host_type == "external":
                 placement = await asyncio.to_thread(
                     routing_host_session, source, conversation_store
                 )
@@ -1088,14 +1230,47 @@ def register_core_routes(
                         "Sender host/workspace is invalid for independent creation",
                         code=ErrorCode.INVALID_INPUT,
                     ) from exc
+        executor_name = body.executor
+        if executor_name is None and body.alias is not None and body.parent_session_id is None:
+            from omnigent.runtime.role_instructions import role_executor_name
+
+            executor_name = await asyncio.to_thread(
+                role_executor_name, body.alias.strip(), _role_lookup_workspace(body)
+            )
+        if executor_name is not None:
+            # Before placement: a profile may supply host_needs / host_preference.
+            from omnigent.executor_profiles import apply_executor_profile, get_executor_profile
+
+            profile = await asyncio.to_thread(get_executor_profile, executor_name)
+            body = apply_executor_profile(body, profile)
+        # An orchestrated top-level session joins its creator's project, so bare
+        # ``Role`` addresses resolve for the creator.
+        inherit_project = (
+            source is not None and body.project_id is None and body.parent_session_id is None
+        )
+        body.labels.pop(PLACEMENT_REASON_LABEL_KEY, None)  # server-set provenance only
+        if body.host_needs is not None and body.host_id is not None:
+            raise OmnigentError(
+                "host_needs and host_id are mutually exclusive", code=ErrorCode.INVALID_INPUT
+            )
+        if body.host_needs is not None:
+            body = await _place_session_host(request, body, user_id, orchestration_source)
         if body.alias is not None:
-            if orchestration_source is not None or body.parent_session_id is not None:
+            if body.parent_session_id is not None:
                 raise OmnigentError(
-                    "Only owner-created top-level sessions can claim an alias",
+                    "Only top-level sessions can claim an alias",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            from omnigent.server.session_aliases import check_alias_for_new_session
+            from omnigent.server.session_aliases import (
+                check_alias_for_new_session,
+                session_project_name,
+            )
 
+            inherited_project_name = None
+            if inherit_project:
+                inherited_project_name = await asyncio.to_thread(
+                    session_project_name, source, project_store, user_id
+                )
             await asyncio.to_thread(
                 check_alias_for_new_session,
                 conversation_store,
@@ -1103,6 +1278,7 @@ def register_core_routes(
                 alias=body.alias,
                 project_id=body.project_id,
                 user_id=user_id,
+                project_name=inherited_project_name,
             )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
@@ -1121,11 +1297,21 @@ def register_core_routes(
             project_store=project_store,
             created_by_session_id=source.id if source is not None else None,
         )
+        # Claimed before the response, so the caller never holds an unaddressable id.
+        new_labels: dict[str, str] = {}
         if body.alias is not None:
-            # Claimed before the response, so the caller never holds an unaddressable id.
-            await asyncio.to_thread(
-                conversation_store.set_labels, resp.id, {ALIAS_LABEL_KEY: body.alias.strip()}
-            )
+            new_labels[ALIAS_LABEL_KEY] = body.alias.strip()
+        if executor_name is not None:
+            new_labels[EXECUTOR_LABEL_KEY] = executor_name
+        if inherit_project and source is not None:
+            if source.project_id is not None:
+                await asyncio.to_thread(
+                    conversation_store.set_conversation_project, resp.id, source.project_id
+                )
+            elif PROJECT_LABEL_KEY in source.labels:
+                new_labels[PROJECT_LABEL_KEY] = source.labels[PROJECT_LABEL_KEY]
+        if new_labels:
+            await asyncio.to_thread(conversation_store.set_labels, resp.id, new_labels)
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
         # Without this, the runner doesn't know this session exists
@@ -1284,6 +1470,7 @@ def register_core_routes(
                 host_id=launch_host_id,
             )
         add_audit_attrs(session_id=resp.id, agent=resp.agent_id)
+        shadow_route_created_session(body, resp)
         return resp
 
     async def _create_bundled_session_from_multipart(
@@ -1347,6 +1534,7 @@ def register_core_routes(
         )
         _reject_reserved_cost_control_label_seed(parsed_metadata.labels)
         _reject_server_reserved_label_seed(parsed_metadata.labels)
+        parsed_metadata.labels.pop(PLACEMENT_REASON_LABEL_KEY, None)
 
         inherited_runner_id: str | None = None
         parent_conv = None
@@ -1565,6 +1753,7 @@ def register_core_routes(
                 workspace=parsed_metadata.workspace,
                 host_id=parsed_metadata.host_id,
             )
+        shadow_route_created_session(parsed_metadata, result, harness=spec_harness(spec))
         return result
 
     # ── GET /sessions/projects ────────────────────────────────────

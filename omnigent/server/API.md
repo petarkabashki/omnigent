@@ -666,8 +666,27 @@ already uploaded or registered an agent. The response is the full
     and validated against the agent's `os_env.cwd` boundary on that
     host (see `designs/SESSION_WORKSPACE_SELECTION.md`).
 
+  host_needs (array of strings or null)
+    Capabilities the host must have, e.g. `["claude-sdk"]`. When set
+    (and `host_id` is not), the server asks `ag-fleet place` to choose
+    a host from the caller's hosts and launches the runner there.
+    `workspace` is required; combining with `host_id` or
+    `host_type: "managed"` is a 400. A refusal is a 409 whose message
+    is `placement refused (<code>): <ag-fleet reason>` (codes
+    `no_eligible_host`, `quiet_window`, `host_ineligible`); no other
+    host is tried. A placement that succeeds with a warning (e.g. a
+    named host over capacity) records ag-fleet's reason in the
+    `omnigent.placement_reason` session label. The reservation is
+    released in the background once the runner binds, or when the
+    create fails. Binary: `OMNIGENT_AG_FLEET_BIN` (default `ag-fleet`);
+    a missing binary or 15 s timeout fails the create with a 500.
+
+  host_preference (string or null)
+    Preferred host name for `host_needs` placement (`--host`).
+    Ignored without `host_needs`.
+
   workspace (string or null)
-    Absolute path on the host. Required when `host_id` is set. When
+    Absolute path on the host. Required when `host_id` or `host_needs` is set. When
     `git` is also set, this is the source repository directory; the
     created worktree becomes the stored workspace.
 
@@ -694,7 +713,8 @@ already uploaded or registered an agent. The response is the full
 400 Bad Request - invalid terminal_launch_args (count / length bounds)
 404 Not Found - no agent with that id
 409 Conflict - a managed create's host_id names an existing host, or
-  its `managed-<first 8 hex>` name is already taken
+  its `managed-<first 8 hex>` name is already taken; or ag-fleet refused
+  a `host_needs` placement
 422 Unprocessable Entity - invalid request body
 
 ### List Sessions
@@ -1233,8 +1253,13 @@ POST   /v1/sessions/aliases/resolve {"addresses": [...]} (1-100)
 
 An entry has `session_id`, `alias` and `handle` (`project/Role`). `POST
 /v1/sessions` with `agent_id` also accepts `"alias"`: it is validated before
-the session exists and set before the response returns. Agents (requests with
-the orchestration source header) and sub-agent creates cannot set aliases.
+the session exists and set before the response returns. Sub-agent creates
+(`parent_session_id`) cannot set aliases. Top-level sessions created by an agent
+through `POST /v1/sessions/orchestrated` (orchestration source header) may claim
+one; they join the creator's project, so the creator addresses them as bare
+`Role`. That route uses an explicit `host_id` + `workspace` when given (host
+ownership is enforced; `host_id` without `workspace` returns 400) and otherwise
+the sender's host.
 
 A `session_message` event's ack adds `message_id`. The receiver sees it in
 the header line `[Message from <handle> (session <id>, message <message_id>)]`,

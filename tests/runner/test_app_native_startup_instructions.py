@@ -106,3 +106,10 @@ def test_native_startup_instructions_append_role_file(
         _spec(None), init({"omnigent.alias": "architect"})
     )
     assert role_only is not None and role_only.startswith("## Role: architect\n")
+    # A spec the runner already overlaid with the role is not given it twice.
+    assert (
+        _native_startup_raw_instructions_from_spec(
+            _spec(composed), init({"omnigent.alias": "Architect"})
+        )
+        == composed
+    )

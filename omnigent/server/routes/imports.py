@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from omnigent.db.utils import builtin_agent_id, generate_item_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.entities import CompactionData, NewConversationItem, parse_item_data
+from omnigent.entities.conversation import SERVER_CONTROLLED_ITEM_TYPES
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostImportLocalByIdFrame, HostImportLocalFrame, encode_host_frame
 from omnigent.native.native_coding_agents import native_coding_agent_for_harness
@@ -70,6 +71,11 @@ class ImportItemInput(BaseModel):
 
     def to_item(self) -> NewConversationItem:
         """Validate the type-specific payload and return a new item entity."""
+        if self.type in SERVER_CONTROLLED_ITEM_TYPES:
+            raise OmnigentError(
+                f"Imported sessions cannot contain {self.type!r} items",
+                code=ErrorCode.INVALID_INPUT,
+            )
         try:
             data = parse_item_data(self.type, self.data)
             return NewConversationItem(type=self.type, response_id=self.response_id, data=data)

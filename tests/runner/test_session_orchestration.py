@@ -161,6 +161,108 @@ async def test_create_placement(placement, monkeypatch, profile, capability, num
         assert result["initial_message"] == {"queued": True}
 
 
+async def _create_with(args):
+    requests = []
+
+    def handler(request):
+        if request.url.path == "/v1/info":
+            return httpx.Response(200, json={})
+        requests.append(request)
+        return httpx.Response(201, json={"id": uuid4().hex, "agent_id": "worker"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps({"agent_id": "worker", **args}),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+    return result, requests
+
+
+@pytest.mark.asyncio
+async def test_create_on_named_host_with_harness_and_alias():
+    result, requests = await _create_with(
+        {
+            "placement": "host",
+            "host_id": " laptop ",
+            "workspace": "/srv/repo",
+            "harness": "pi",
+            "alias": "Reviewer",
+        }
+    )
+    assert "error" not in result, result
+    assert result["alias"] == "Reviewer"
+    body = json.loads(requests[0].content)
+    assert requests[0].url.path == "/v1/sessions/orchestrated"
+    assert (body["host_id"], body["workspace"]) == ("laptop", "/srv/repo")
+    assert (body["harness_override"], body["alias"]) == ("pi", "Reviewer")
+    assert "parent_session_id" not in body
+
+
+@pytest.mark.asyncio
+async def test_host_create_reports_alias_conflict_not_uncertain_creation():
+    def handler(request):
+        return httpx.Response(
+            409,
+            json={
+                "error": {"code": "already_exists", "message": "Alias 'Reviewer' is already used"}
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_create",
+                arguments=json.dumps(
+                    {
+                        "agent_id": "worker",
+                        "placement": "host",
+                        "host_id": "laptop",
+                        "workspace": "/srv/repo",
+                        "alias": "Reviewer",
+                    }
+                ),
+                server_client=client,
+                conversation_id="manager",
+            )
+        )
+    assert result["error"] == "alias_taken"
+    assert "already used" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_child_create_passes_harness():
+    result, requests = await _create_with({"harness": "pi"})
+    assert "error" not in result, result
+    assert json.loads(requests[0].content)["harness_override"] == "pi"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args,fragment",
+    [
+        ({"alias": "Reviewer"}, "independent placement"),
+        ({"placement": "same_host", "alias": "9bad"}, "must match"),
+        ({"placement": "same_host", "alias": "x" * 33}, "must match"),
+        ({"placement": "host", "host_id": "laptop"}, "requires both"),
+        ({"placement": "host", "workspace": "/srv"}, "requires both"),
+        ({"placement": "same_host", "host_id": "h", "workspace": "/w"}, "placement='host'"),
+        ({"harness": "  "}, "nonempty"),
+    ],
+)
+async def test_create_rejects_invalid_harness_alias_host_args(args, fragment):
+    result, requests = await _create_with(args)
+    assert fragment in result["error"], result
+    assert not requests
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("placement", ["same_host", "managed"])
 @pytest.mark.parametrize("status", [404, 405])
@@ -640,3 +742,19 @@ async def test_managed_create_routes_to_reserved_host_through_auth_retry(monkeyp
     headers, body = requests[-1]
     assert headers.get(OMNIGENT_SLICE_KEY_HEADER.lower()) == body.get("host_id")
     assert ("host_id" in body) is supported
+
+
+@pytest.mark.asyncio
+async def test_create_passes_executor_through_and_rejects_blank():
+    result, requests = await _create_with({"placement": "same_host", "executor": " deep "})
+    assert "error" not in result, result
+    assert json.loads(requests[0].content)["executor"] == "deep"
+    blank, sent = await _create_with({"placement": "same_host", "executor": "  "})
+    assert "'executor' must be a nonempty string" in blank["error"] and not sent
+
+
+def test_executor_with_config_path_is_refused():
+    from omnigent.runner.tool_dispatch import _validate_session_create_fields
+
+    error = _validate_session_create_fields({"executor": "deep"}, "same_host", True)
+    assert error is not None and "'executor' requires 'agent_id'" in error

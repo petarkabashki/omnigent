@@ -40,6 +40,61 @@ class SessionHistory:
     seed_last_server_item_id: Callable[[str], Coroutine[Any, Any, None]]
 
 
+_HISTORY_BOUNDARY_TYPES = frozenset({"compaction", "context_reset"})
+
+
+def _summary_pair(summary: str) -> list[_JsonObject]:
+    """Build the synthetic user/assistant pair that carries a summary."""
+    return [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "[Automatically generated summary of prior "
+                        "conversation context.]\n\n"
+                        "Please provide a summary of our conversation so far."
+                    ),
+                }
+            ],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": summary}],
+        },
+    ]
+
+
+def split_history_at_boundary(
+    items: list[_JsonObject],
+) -> tuple[list[_JsonObject], list[_JsonObject]]:
+    """Split raw session items at the newest compaction or context reset.
+
+    :param items: Raw ``/items`` rows in ascending order.
+    :returns: ``(prefix, remaining)``: the input items that stand in for
+        everything before the boundary (compacted messages or a summary pair;
+        empty for a clean reset or no boundary), and the raw items after it.
+    """
+    boundary_idx: int | None = None
+    for index, item in enumerate(items):
+        if item.get("type") in _HISTORY_BOUNDARY_TYPES:
+            boundary_idx = index
+    if boundary_idx is None:
+        return [], items
+    boundary = items[boundary_idx]
+    remaining = items[boundary_idx + 1 :]
+    if boundary.get("type") == "context_reset":
+        summary = boundary.get("summary")
+        return (_summary_pair(summary) if isinstance(summary, str) and summary else []), remaining
+    compacted = cast(list[_JsonObject] | None, boundary.get("compacted_messages"))
+    if compacted:
+        return list(compacted), remaining
+    return _summary_pair(str(boundary.get("summary", ""))), remaining
+
+
 def build_session_history(
     *,
     _background_tasks: set[asyncio.Task[Any]],
@@ -160,49 +215,7 @@ def build_session_history(
     def _convert_raw_items_to_input(
         items: list[_JsonObject],
     ) -> list[_JsonObject]:
-        compaction_idx: int | None = None
-        for i, item in enumerate(items):
-            if item.get("type") == "compaction":
-                compaction_idx = i
-
-        result: list[_JsonObject] = []
-        if compaction_idx is not None:
-            c = items[compaction_idx]
-            _compacted = cast(list[_JsonObject] | None, c.get("compacted_messages"))
-            if _compacted:
-                result.extend(_compacted)
-            else:
-                result.append(
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    "[Automatically generated summary of prior "
-                                    "conversation context.]\n\n"
-                                    "Please provide a summary of our conversation so far."
-                                ),
-                            }
-                        ],
-                    }
-                )
-                result.append(
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": c.get("summary", ""),
-                            }
-                        ],
-                    }
-                )
-            remaining = items[compaction_idx + 1 :]
-        else:
-            remaining = items
+        result, remaining = split_history_at_boundary(items)
 
         _skipped_types: list[str] = []
         for item in remaining:
@@ -263,10 +276,10 @@ def build_session_history(
                 extra={"session_id": runner_primary_session_id()},
             )
         _logger.info(
-            "_convert_raw_items_to_input: %d raw items → %d converted (compaction_idx=%s)",
+            "_convert_raw_items_to_input: %d raw items → %d converted (boundary skipped %d)",
             len(items),
             len(result),
-            compaction_idx,
+            len(items) - len(remaining),
             extra={"session_id": runner_primary_session_id()},
         )
         return result

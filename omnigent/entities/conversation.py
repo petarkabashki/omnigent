@@ -257,6 +257,8 @@ class Conversation:
     share_workspace_files: bool = False
     sub_agent_name: str | None = None
     task_summary: str | None = None
+    # Count of context resets; 0 until the first reset.
+    context_epoch: int = 0
     external_session_id: str | None = None
     terminal_launch_args: list[str] | None = None
     workspace: str | None = None
@@ -634,6 +636,33 @@ class ResourceEventData(BaseModel):
     resource: dict[str, Any] | None = None
 
 
+class ContextResetData(BaseModel):
+    """
+    Data payload for a context-reset boundary item (``type="context_reset"``).
+
+    Model input for the next turn starts after this item: items before it
+    stay in the store (and in the UI) but are no longer replayed. Listed in
+    :data:`NON_CONTENT_ITEM_TYPES` so history filters skip the item itself.
+
+    :param epoch: 1-based reset counter for the conversation, e.g. ``3``.
+    :param last_item_id: The last item (inclusive) before the boundary, or
+        ``None`` when the conversation had no items, e.g. ``"msg_abc123"``.
+    :param summary: Optional carry-over text replayed as a synthetic
+        user/assistant pair, or ``None`` for a clean reset.
+    :param reason: Who asked for the reset.
+    :param engine_change: Audit record of an engine switch, ``None`` when unchanged.
+    :param previous_external_session_id: The vendor session id cleared by the
+        reset, for native harnesses; ``None`` otherwise.
+    """
+
+    epoch: int
+    last_item_id: str | None = None
+    summary: str | None = None
+    reason: Literal["user", "agent", "api"] = "user"
+    engine_change: dict[str, Any] | None = None
+    previous_external_session_id: str | None = None
+
+
 class TerminalCommandData(BaseModel):
     """
     Data payload for a runner-side terminal command (``!cmd``) observed
@@ -797,6 +826,7 @@ ItemData = (
     | ErrorData
     | ReasoningData
     | CompactionData
+    | ContextResetData
     | NativeToolData
     | ResourceEventData
     | RoutingDecisionData
@@ -811,6 +841,7 @@ ITEM_TYPE_TO_DATA_CLS: dict[str, type[BaseModel]] = {
     "error": ErrorData,
     "reasoning": ReasoningData,
     "compaction": CompactionData,
+    "context_reset": ContextResetData,
     "native_tool": NativeToolData,
     "resource_event": ResourceEventData,
     "routing_decision": RoutingDecisionData,
@@ -818,12 +849,17 @@ ITEM_TYPE_TO_DATA_CLS: dict[str, type[BaseModel]] = {
     "terminal_command": TerminalCommandData,
 }
 
+# Item types only the server writes through a dedicated control (e.g. the
+# ``reset`` control); generic append paths must refuse them.
+SERVER_CONTROLLED_ITEM_TYPES: frozenset[str] = frozenset({"context_reset"})
+
 # Item types that are metadata / lifecycle events — not content
 # the agent loop should include in the LLM's message context.
 # Used by _sync_history and _load_initial_history to filter.
 NON_CONTENT_ITEM_TYPES: frozenset[str] = frozenset(
     {
         "compaction",
+        "context_reset",
         "error",
         "resource_event",
         "routing_decision",

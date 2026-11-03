@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
@@ -103,6 +103,7 @@ from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    RUNNER_LIVENESS_TTL_S,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
     ConversationStore,
@@ -291,6 +292,7 @@ def _to_conversation(
         share_workspace_files=overrides["share_workspace_files"] == "on",
         sub_agent_name=meta.sub_agent_name if meta else None,
         task_summary=meta.task_summary if meta else None,
+        context_epoch=(meta.context_epoch or 0) if meta else 0,
         external_session_id=meta.external_session_id if meta else None,
         # NULL → None; a stored JSON array (e.g. ``"[]"`` or
         # ``'["--foo"]'``) decodes back to a list. ``"[]"`` is a
@@ -2251,6 +2253,33 @@ class SqlAlchemyConversationStore(ConversationStore):
         with self._session("list_host_conversations") as session:
             return list(session.scalars(query.order_by(SqlConversationMetadata.id).limit(limit)))
 
+    def count_running_sessions_by_host(self, host_ids: Sequence[str]) -> dict[str, int]:
+        if not host_ids:
+            return {}
+        query = (
+            select(SqlConversationMetadata.host_id, func.count())
+            .where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.host_id.in_(list(host_ids)),
+                or_(
+                    SqlConversationMetadata.live_status.in_(
+                        [
+                            encode_session_live_status("running"),
+                            encode_session_live_status("waiting"),
+                        ]
+                    ),
+                    and_(
+                        SqlConversationMetadata.runner_id.is_not(None),
+                        SqlConversationMetadata.runner_last_seen
+                        >= now_epoch() - RUNNER_LIVENESS_TTL_S,
+                    ),
+                ),
+            )
+            .group_by(SqlConversationMetadata.host_id)
+        )
+        with self._session("count_running_sessions_by_host") as session:
+            return {str(row[0]): int(row[1]) for row in session.execute(query).all()}
+
     def list_pending_inputs_page(
         self,
         conversation_id: str,
@@ -3967,6 +3996,26 @@ class SqlAlchemyConversationStore(ConversationStore):
             return None
         # Bulk UPDATE leaves no in-session ORM row to reuse; re-read.
         return self.get_conversation(conversation_id)
+
+    def advance_context_epoch(self, conversation_id: str, epoch: int) -> bool:
+        """Raise ``context_epoch`` to ``epoch`` when it is lower."""
+
+        def write(session: Session) -> bool:
+            result = cast(
+                _RowCountResult,
+                session.execute(
+                    update(SqlConversationMetadata)
+                    .where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.id == conversation_id,
+                        SqlConversationMetadata.context_epoch < epoch,
+                    )
+                    .values(context_epoch=epoch)
+                ),
+            )
+            return result.rowcount == 1
+
+        return run_write_transaction(self._session_immediate, "advance_context_epoch", write)
 
     def set_task_summary(self, conversation_id: str, task_summary: str) -> Conversation | None:
         """Set a human-readable task summary on a sub-agent conversation."""

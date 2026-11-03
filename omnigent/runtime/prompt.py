@@ -418,8 +418,8 @@ def history_to_input_items(
             # (they are output-only)
             pass
 
-        elif item.type == "compaction":
-            # compaction items are metadata, not conversation content
+        elif item.type in ("compaction", "context_reset"):
+            # compaction / reset boundary items are metadata, not conversation content
             # the LLM should see — they are converted to a synthetic
             # summary message pair by compaction_to_history_items()
             # before being prepended to history.

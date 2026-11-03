@@ -12,6 +12,7 @@ from omnigent.server.feature_flags import FeatureFlags
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
+    EXECUTOR_LABEL_KEY,
     PROJECT_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -684,7 +685,7 @@ async def test_same_host_creation_uses_current_source_and_stays_private(
         response = await auth_client.post(
             "/v1/sessions/orchestrated",
             headers={ORCHESTRATION_SOURCE_HEADER: manager["id"]},
-            json={"agent_id": source["agent_id"], "host_id": hosts[2], "workspace": "/requested"},
+            json={"agent_id": source["agent_id"]},
         )
         assert response.status_code == 201, response.text
         created_id = response.json()["id"]
@@ -1296,3 +1297,153 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
         )
         assert refused.status_code in (400, 409), refused.text
     assert len(store.list_conversations(limit=200).data) == before
+
+    # Racing creates can leave two live holders of one alias; resolving must not pick one.
+    store.set_labels(other["id"], {ALIAS_LABEL_KEY: "bench"})
+    ambiguous = await auth_client.get("/v1/sessions/aliases/resolve", params={"address": "Bench"})
+    assert ambiguous.status_code == 409
+    assert claimed.json()["id"] in ambiguous.text and other["id"] in ambiguous.text
+    rows = (
+        await auth_client.post(
+            "/v1/sessions/aliases/resolve", json={"addresses": ["Bench", "py-qwant/Architect"]}
+        )
+    ).json()["data"]
+    assert "ambiguous" in rows[0]["error"] and other["id"] in rows[0]["error"]
+    assert rows[1]["session_id"] == source["id"]
+
+
+async def test_orchestrated_session_on_named_host_with_alias(auth_client, auth_app, peers, db_uri):
+    from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame
+    from tests.server.integration.test_sessions_permissions import _register_online_host
+
+    source, _, _ = peers
+    mine, theirs = uuid4().hex, uuid4().hex
+    for host_id, owner in ((mine, "alice"), (theirs, "bob")):
+        _register_online_host(auth_app, host_id, owner)
+        auth_app.state.host_store.upsert_on_connect(host_id, host_id, owner)
+    store = SqlAlchemyConversationStore(db_uri)
+    frames = []
+
+    def answer_host(connection, payload):
+        frame = decode_host_frame(payload)
+        frames.append((connection.host_id, frame))
+        if isinstance(frame, HostStatFrame):
+            connection.pending_stats[frame.request_id].set_result(
+                {"status": "ok", "exists": True, "type": "directory", "canonical_path": frame.path}
+            )
+        elif isinstance(frame, HostLaunchRunnerFrame):
+            connection.pending_launches[frame.request_id].set_result({"status": "launched"})
+
+    auth_app.state.host_registry.send_text = answer_host
+    store.set_labels(source["id"], {PROJECT_LABEL_KEY: "py-qwant"})
+    headers = {ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    body = {"agent_id": source["agent_id"], "alias": "Reviewer", "workspace": "/srv/work"}
+
+    before = {s.id for s in store.list_conversations().data}
+    refused = await auth_client.post(
+        "/v1/sessions/orchestrated", headers=headers, json={**body, "host_id": theirs}
+    )
+    assert refused.status_code == 403, refused.text
+    assert {s.id for s in store.list_conversations().data} == before
+
+    created = await auth_client.post(
+        "/v1/sessions/orchestrated", headers=headers, json={**body, "host_id": mine}
+    )
+    assert created.status_code == 201, created.text
+    row = store.get_conversation(created.json()["id"])
+    assert row is not None
+    assert (row.host_id, row.workspace) == (mine, "/srv/work")
+    assert row.parent_conversation_id is None
+    assert row.labels[CREATED_BY_SESSION_LABEL_KEY] == source["id"]
+    assert row.labels[ALIAS_LABEL_KEY] == "Reviewer"
+    assert row.labels[PROJECT_LABEL_KEY] == "py-qwant"
+    assert {host for host, _ in frames} == {mine}
+    resolved = await _send(auth_client, source, {"id": "Reviewer"})
+    assert "Could not resolve" not in str(resolved.get("error", "")), resolved
+
+    taken = await auth_client.post(
+        "/v1/sessions/orchestrated", headers=headers, json={**body, "host_id": mine}
+    )
+    assert taken.status_code == 409, taken.text
+    # Any orchestrated top-level create joins its creator's project, alias or not.
+    plain = await auth_client.post(
+        "/v1/sessions/orchestrated",
+        headers=headers,
+        json={"agent_id": source["agent_id"], "workspace": "/srv/work", "host_id": mine},
+    )
+    assert plain.status_code == 201, plain.text
+    plain_row = store.get_conversation(plain.json()["id"])
+    assert plain_row is not None and plain_row.labels[PROJECT_LABEL_KEY] == "py-qwant"
+    assert ALIAS_LABEL_KEY not in plain_row.labels
+    no_workspace = await auth_client.post(
+        "/v1/sessions/orchestrated",
+        headers=headers,
+        json={"agent_id": source["agent_id"], "host_id": mine},
+    )
+    assert no_workspace.status_code == 400, no_workspace.text
+
+
+async def test_create_with_executor_fills_unset_fields_and_labels(
+    auth_client, peers, db_uri, tmp_path, monkeypatch
+):
+    source, _, _ = peers
+    monkeypatch.setenv("HOME", str(tmp_path))
+    profiles = tmp_path / ".omnigent" / "executors.yaml"
+    profiles.parent.mkdir()
+    profiles.write_text("deep: {model: profile-model, reasoning_effort: high}\n")
+    store = SqlAlchemyConversationStore(db_uri)
+
+    unknown = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "executor": "nope"}
+    )
+    assert unknown.status_code == 400 and "deep" in unknown.text
+
+    filled = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "executor": "deep"}
+    )
+    assert filled.status_code in (200, 201), filled.text
+    row = store.get_conversation(filled.json()["id"])
+    assert row is not None
+    assert (row.model_override, row.reasoning_effort) == ("profile-model", "high")
+    assert row.labels[EXECUTOR_LABEL_KEY] == "deep"
+
+    explicit = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "executor": "deep", "model_override": "mine"},
+    )
+    assert explicit.status_code in (200, 201), explicit.text
+    row = store.get_conversation(explicit.json()["id"])
+    assert row is not None
+    assert (row.model_override, row.reasoning_effort) == ("mine", "high")
+
+    profiles.write_text("Judge_exec: {reasoning_effort: low}\n")
+    role = tmp_path / ".omnigent" / "roles"
+    role.mkdir()
+    (role / "Judge.md").write_text("---\nexecutor: Judge_exec\n---\nJudge.\n")
+    by_role = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "alias": "Judge"}
+    )
+    assert by_role.status_code in (200, 201), by_role.text
+    row = store.get_conversation(by_role.json()["id"])
+    assert row is not None and row.reasoning_effort == "low"
+    assert row.labels[EXECUTOR_LABEL_KEY] == "Judge_exec"
+
+
+async def test_create_executor_supplies_agent_id_and_label_is_reserved(
+    auth_client, peers, db_uri, tmp_path, monkeypatch
+):
+    source, _, _ = peers
+    monkeypatch.setenv("HOME", str(tmp_path))
+    profiles = tmp_path / ".omnigent" / "executors.yaml"
+    profiles.parent.mkdir()
+    profiles.write_text(f"bundled: {{agent_id: {source['agent_id']}, model: m1}}\n")
+    created = await auth_client.post("/v1/sessions", json={"executor": "bundled"})
+    assert created.status_code in (200, 201), created.text
+    row = SqlAlchemyConversationStore(db_uri).get_conversation(created.json()["id"])
+    assert row is not None and row.model_override == "m1"
+
+    forged = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "labels": {EXECUTOR_LABEL_KEY: "bundled"}},
+    )
+    assert forged.status_code == 400, forged.text

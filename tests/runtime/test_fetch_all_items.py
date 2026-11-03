@@ -154,6 +154,8 @@ class _CompactionStore:
                 ),
             )
             return PagedList(data=[item], last_id=item.id, has_more=False)
+        if type == "context_reset":
+            return PagedList(data=[], last_id=None, has_more=False)
         self.cursors.append(after)
         if after is not None:
             raise StaleCursorError(conversation_id)

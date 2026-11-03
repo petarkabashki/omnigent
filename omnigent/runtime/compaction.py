@@ -23,6 +23,7 @@ import tiktoken
 
 from omnigent.entities import (
     CompactionData,
+    ContextResetData,
     ConversationItem,
     FunctionCallData,
     FunctionCallOutputData,
@@ -513,22 +514,37 @@ def compaction_to_history_items(
 
     :param compaction_item: The compaction item from the store,
         with ``type="compaction"`` and
-        ``data`` of type :class:`~omnigent.entities.CompactionData`.
+        ``data`` of type :class:`~omnigent.entities.CompactionData`, or a
+        ``context_reset`` boundary (pair only when it carries a summary).
     :returns: Two :class:`~omnigent.entities.ConversationItem`
         instances: a ``role=user`` message requesting the summary
         and a ``role=assistant`` message containing it.
     """
-    assert isinstance(compaction_item.data, CompactionData)
-    data = compaction_item.data
+    if isinstance(compaction_item.data, ContextResetData):
+        # A reset carries an optional summary only; a clean reset adds nothing.
+        reset_summary = compaction_item.data.summary
+        if not reset_summary:
+            return []
+        # Assistant messages need an agent; the pair is in-memory only.
+        summary_text, summary_model = reset_summary, "context_reset"
+    else:
+        assert isinstance(compaction_item.data, CompactionData)
+        summary_text = compaction_item.data.summary
+        summary_model = compaction_item.data.model
 
     # Prefer compacted_messages when available — they carry the
     # full compacted state (e.g. OpenAI's opaque compaction tokens
     # or Claude's post-compaction transcript) that the harness can
     # replay directly. Fall back to the synthetic summary pair for
     # older compaction items that don't have compacted messages.
-    if data.compacted_messages:
+    compacted = (
+        compaction_item.data.compacted_messages
+        if isinstance(compaction_item.data, CompactionData)
+        else None
+    )
+    if compacted:
         items: list[ConversationItem] = []
-        for i, msg in enumerate(data.compacted_messages):
+        for i, msg in enumerate(compacted):
             items.append(
                 ConversationItem(
                     id=f"{compaction_item.id}_compacted_{i}",
@@ -569,8 +585,8 @@ def compaction_to_history_items(
         created_at=compaction_item.created_at,
         data=MessageData(
             role="assistant",
-            content=[{"type": "output_text", "text": data.summary}],
-            agent=data.model,
+            content=[{"type": "output_text", "text": summary_text}],
+            agent=summary_model,
         ),
     )
     return [user_item, assistant_item]

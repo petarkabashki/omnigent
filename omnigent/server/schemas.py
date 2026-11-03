@@ -1515,6 +1515,17 @@ _MAX_MANAGED_WORKSPACES = 10
 # Shape of a server-minted host id (``uuid.uuid4().hex``); a managed create's
 # ``host_id`` must match it.
 _MANAGED_HOST_ID_RE = re.compile(r"[0-9a-f]{32}")
+_ROLE_PARAM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
+
+
+def _fold_role_params(role_params: dict[str, str], labels: dict[str, str]) -> None:
+    """Store ``role_params`` as ``omnigent.role_param.<name>`` labels."""
+    from omnigent.runtime.role_instructions import ROLE_PARAM_LABEL_PREFIX
+
+    for name, value in role_params.items():
+        if not _ROLE_PARAM_NAME_RE.fullmatch(name):
+            raise ValueError(f"invalid role_params name {name!r}")
+        labels[f"{ROLE_PARAM_LABEL_PREFIX}{name}"] = value
 
 
 class _SandboxProfileSelection(BaseModel):
@@ -1552,6 +1563,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         e.g. ``"debugging auth flow"``.
     :param labels: Initial guardrails labels to set on the session.
     :param alias: Role alias (``Role``) claimed at creation; top-level, owner-made sessions only.
+    :param executor: Executor profile name; unset harness/model/effort fields take its values.
     :param parent_session_id: Parent session for sub-agent spawns.
         When set, the server inherits the parent's ``runner_id``
         affinity and sets ``parent_conversation_id`` on the child
@@ -1574,6 +1586,10 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         the sandbox host registers. A message posted before then
         waits for the launch to settle instead of failing with
         "no runner bound".
+    :param host_needs: Capabilities the host must have, e.g. ``["claude-sdk"]``.
+        The server asks ag-fleet to pick the host and launches there. Requires
+        ``workspace``; cannot be combined with ``host_id``.
+    :param host_preference: Preferred host name for ``host_needs`` placement.
     :param host_id: Optional host to launch the runner on, e.g.
         ``"host_a1b2c3d4..."``. When set, the server triggers the
         host launch flow (generate binding token, write runner_id,
@@ -1699,10 +1715,19 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     labels: dict[str, str] = Field(default_factory=dict)
     alias: str | None = None
+    # Name from ~/.omnigent/executors.yaml; fills agent/harness/model/effort left unset.
+    executor: str | None = None
+    # Values for the alias's role ``${params.<name>}``; stored as
+    # ``omnigent.role_param.<name>`` labels that override role-file params.
+    role_params: dict[str, str] = Field(default_factory=dict, max_length=32)
     parent_session_id: str | None = None
     sub_agent_name: str | None = None
     host_type: Literal["external", "managed"] = "external"
     host_id: str | None = None
+    # Capabilities for ag-fleet placement; the server picks the host when set.
+    host_needs: list[str] | None = Field(default=None, min_length=1, max_length=32)
+    # Preferred host name for placement; ag-fleet may still refuse it.
+    host_preference: str | None = Field(default=None, min_length=1, max_length=256)
     # A managed create's ``host_id``, moved here at validation so ``host_id``
     # keeps meaning the caller's existing host everywhere downstream.
     requested_host_id: SkipJsonSchema[str | None] = None
@@ -1717,6 +1742,11 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     subagent_routing_override: str | None = None
     harness_override: str | None = None
     smart_routing_message: str | None = None
+
+    @model_validator(mode="after")
+    def _fold_role_params_into_labels(self) -> Self:
+        _fold_role_params(self.role_params, self.labels)
+        return self
 
     @model_validator(mode="after")
     def _check_startup_input(self) -> Self:
@@ -1740,7 +1770,12 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         :returns: The validated instance.
         :raises ValueError: If ``git`` is set but ``host_id`` is not.
         """
-        if self.git is not None and self.host_id is None and self.project_id is None:
+        if (
+            self.git is not None
+            and self.host_id is None
+            and self.host_needs is None
+            and self.project_id is None
+        ):
             raise ValueError("git worktree creation requires host_id")
         return self
 
@@ -1948,10 +1983,17 @@ class SessionCreateMetadata(_SandboxProfileSelection):
     parent_session_id: str | None = None
     host_type: Literal["external", "managed"] = "external"
     sandbox_provider: str | None = None
+    # Role ``${params.<name>}`` values, folded into labels as on the JSON create.
+    role_params: dict[str, str] = Field(default_factory=dict, max_length=32)
 
     model_config = ConfigDict(extra="forbid")
 
     initial_input: SessionStartupInput | None = None
+
+    @model_validator(mode="after")
+    def _fold_role_params_into_labels(self) -> Self:
+        _fold_role_params(self.role_params, self.labels)
+        return self
 
     @model_validator(mode="after")
     def _check_startup_input(self) -> Self:
@@ -4098,6 +4140,72 @@ class SessionSupersededEvent(_SSEEventBase):
     conversation_id: str
     target_conversation_id: str
     reason: Literal["clear"] = "clear"
+
+
+class SessionResetEvent(_SSEEventBase):
+    """
+    The session's model context was reset in place.
+
+    Emitted after a ``context_reset`` boundary item is persisted. Unlike
+    ``session.superseded`` there is no redirect: the conversation id stays
+    the same. Clients clear the context gauge and may collapse items before
+    ``boundary_item_id``. Category: **transient** (SSE-only); the persisted
+    boundary item is the durable record.
+
+    :param type: Always ``"session.reset"``.
+    :param conversation_id: The reset session, e.g. ``"conv_abc"``.
+    :param epoch: The new context epoch, e.g. ``2``.
+    :param boundary_item_id: Id of the ``context_reset`` item.
+    :param summary_present: Whether a carry-over summary was kept.
+    :param engine_changed: Whether the harness/model/host changed (phase 3).
+    """
+
+    type: Literal["session.reset"]
+    conversation_id: str
+    epoch: int
+    boundary_item_id: str
+    summary_present: bool = False
+    engine_changed: bool = False
+
+
+class ResetSummaryText(BaseModel):
+    """Caller-supplied carry-over text for a context reset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=64_000)
+
+
+class ResetSessionRequest(BaseModel):
+    """
+    Body of ``POST /v1/sessions/{id}/reset`` and of the ``reset`` session event.
+
+    :param summary: ``"none"`` for a clean reset, or ``{"text": ...}`` to
+        carry a summary. ``"auto"`` is accepted by the schema but refused
+        until generated summaries are supported.
+    :param stop_running: Interrupt a running turn first instead of returning 409.
+    :param pending: ``"reject"`` returns 409 while input is queued;
+        ``"drop"`` discards it. ``"carry"`` is not supported yet.
+    :param children: Only ``"keep"``; closing children is not supported yet.
+    :param idempotency_key: Repeating a key returns the first result.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: Literal["none", "auto"] | ResetSummaryText = "none"
+    stop_running: bool = False
+    pending: Literal["reject", "drop", "carry"] = "reject"
+    children: Literal["keep"] = "keep"
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ResetSessionResponse(BaseModel):
+    """Result of a context reset: the same session, now at ``epoch``."""
+
+    session_id: str
+    epoch: int
+    boundary_item_id: str
+    relaunched: bool = False
 
 
 class SessionBtwSidechatEvent(_SSEEventBase):

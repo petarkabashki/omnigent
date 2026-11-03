@@ -229,6 +229,13 @@ class ErrorCode:
         access there or the service dropped its auth context is decided
         upstream, so it must not read as our own authorization layer
         rejecting the request.
+    :cvar SESSION_BUSY: A context reset was refused because a turn is
+        running (HTTP 409).
+    :cvar PENDING_INPUTS: A context reset was refused because queued input
+        would land on the wrong side of the boundary (HTTP 409).
+    :cvar RESET_IN_PROGRESS: Another context reset holds the session (HTTP 409).
+    :cvar RESET_UNSUPPORTED: The session's harness or runner cannot reset
+        its context in place (HTTP 409).
     :cvar STALE_CURSOR: A pagination cursor (``after``/``before``)
         references a row that no longer exists — typically deleted
         between two page fetches (HTTP 400). Without a distinct signal
@@ -260,6 +267,10 @@ class ErrorCode:
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
     STALE_CURSOR = "stale_cursor"
+    SESSION_BUSY = "session_busy"
+    PENDING_INPUTS = "pending_inputs"
+    RESET_IN_PROGRESS = "reset_in_progress"
+    RESET_UNSUPPORTED = "reset_unsupported"
 
 
 # Client-facing text for ``SESSION_AGENT_MISSING``: the session's agent was
@@ -320,6 +331,11 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     # succeed — the fix is to restart the enumeration without the cursor. The
     # distinct code is what a paging client keys that restart off.
     ErrorCode.STALE_CURSOR: 400,
+    # Context reset refusals: valid requests the session's current state blocks.
+    ErrorCode.SESSION_BUSY: 409,
+    ErrorCode.PENDING_INPUTS: 409,
+    ErrorCode.RESET_IN_PROGRESS: 409,
+    ErrorCode.RESET_UNSUPPORTED: 409,
 }
 
 
@@ -364,6 +380,10 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     # A stale reference: the cursor row was deleted (often by the same user
     # in another client) between two page fetches.
     ErrorCode.STALE_CURSOR: ErrorCategory.USER,
+    ErrorCode.SESSION_BUSY: ErrorCategory.USER,
+    ErrorCode.PENDING_INPUTS: ErrorCategory.USER,
+    ErrorCode.RESET_IN_PROGRESS: ErrorCategory.USER,
+    ErrorCode.RESET_UNSUPPORTED: ErrorCategory.USER,
 }
 
 
@@ -410,6 +430,10 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     ErrorCode.REFRESH_UNSUPPORTED: ErrorImpact.BENIGN,
     ErrorCode.LOGIN_UNSUPPORTED: ErrorImpact.BENIGN,
     ErrorCode.STALE_CURSOR: ErrorImpact.BENIGN,
+    ErrorCode.SESSION_BUSY: ErrorImpact.BENIGN,
+    ErrorCode.PENDING_INPUTS: ErrorImpact.BENIGN,
+    ErrorCode.RESET_IN_PROGRESS: ErrorImpact.BENIGN,
+    ErrorCode.RESET_UNSUPPORTED: ErrorImpact.BENIGN,
 }
 
 
@@ -452,6 +476,10 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.UPSTREAM_CANCELLED: ErrorPhase.UNKNOWN,
     ErrorCode.UPSTREAM_PERMISSION_DENIED: ErrorPhase.UNKNOWN,
     ErrorCode.STALE_CURSOR: ErrorPhase.REQUEST,
+    ErrorCode.SESSION_BUSY: ErrorPhase.REQUEST,
+    ErrorCode.PENDING_INPUTS: ErrorPhase.REQUEST,
+    ErrorCode.RESET_IN_PROGRESS: ErrorPhase.REQUEST,
+    ErrorCode.RESET_UNSUPPORTED: ErrorPhase.REQUEST,
 }
 
 

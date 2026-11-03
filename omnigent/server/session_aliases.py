@@ -112,15 +112,31 @@ def check_alias_for_new_session(
     alias: object,
     project_id: str | None,
     user_id: str | None,
+    project_name: str | None = None,
 ) -> str:
-    """Validate an alias requested at creation, before anything is created."""
+    """Validate an alias requested at creation, before anything is created.
+
+    ``project_name`` overrides ``project_id`` when the new session will inherit a project.
+    """
     value = validate_alias(alias)
-    project = ""
-    if project_id and projects is not None:
+    project = project_name or ""
+    if project_name is None and project_id and projects is not None:
         found = projects.get(project_id, user_id=user_id)
         project = found.name if found is not None else ""
     _require_alias_free(conversations, user_id, project, value, holder_id=None)
     return value
+
+
+def ambiguous_alias_error(
+    alias: str, project: str, candidates: list[Conversation]
+) -> OmnigentError:
+    """Conflict error naming every session that shares one alias in a project."""
+    where = f"project {project!r}" if project else "unfiled sessions"
+    ids = ", ".join(session.id for session in candidates)
+    return OmnigentError(
+        f"Alias {alias!r} is ambiguous in {where}: matches sessions {ids}; address one by id",
+        code=ErrorCode.CONFLICT,
+    )
 
 
 def _require_alias_free(
@@ -158,11 +174,14 @@ def resolve_session_address(
     project_name, _, role = text.rpartition("/")
     if not project_name and "/" not in text:
         project_name = session_project_name(source, projects, user_id) if source else ""
+    project_name = project_name.strip()
     role = validate_alias(role)
     matches = find_aliased_sessions(
-        conversations, user_id=user_id, project=project_name.strip(), alias=role
+        conversations, user_id=user_id, project=project_name, alias=role
     )
     if not matches:
         where = f"project {project_name!r}" if project_name else "unfiled sessions"
         raise OmnigentError(f"No live session named {role!r} in {where}", code=ErrorCode.NOT_FOUND)
+    if len(matches) > 1:
+        raise ambiguous_alias_error(role, project_name, matches)
     return matches[0].id

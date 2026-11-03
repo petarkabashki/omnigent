@@ -30,6 +30,7 @@ from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.db.workspace_cache import WorkspaceScopedCache, WorkspaceScopedSet
 from omnigent.entities.conversation import (
     ITEM_TYPE_TO_DATA_CLS,
+    SERVER_CONTROLLED_ITEM_TYPES,
 )
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_capabilities import ForkHistory
@@ -80,6 +81,8 @@ _COMPACT_TYPE: str = "compact"
 
 # Starts a fresh context in a native session's own terminal (the vendor /clear).
 _CLEAR_TYPE: str = "clear"
+#: In-place context reset; see ``_sessions/reset.py``.
+_RESET_TYPE: str = "reset"
 
 
 _SLASH_COMMAND_TYPE: str = "slash_command"
@@ -566,12 +569,15 @@ _RUNNER_FORWARD_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool
 
 
 # Event types clients post; ``/v1/info`` advertises these as ``session_event_types``.
-CLIENT_SESSION_EVENT_TYPES: frozenset[str] = frozenset(ITEM_TYPE_TO_DATA_CLS.keys()) | {
+CLIENT_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
+    ITEM_TYPE_TO_DATA_CLS.keys() - SERVER_CONTROLLED_ITEM_TYPES
+) | {
     _INTERRUPT_TYPE,
     _APPROVAL_TYPE,
     _MCP_ELICITATION_TYPE,
     _COMPACT_TYPE,
     _CLEAR_TYPE,
+    _RESET_TYPE,
     _STOP_SESSION_TYPE,
     _RETRY_SESSION_TYPE,
     # The web posts this when the user closes its /btw side chat.
@@ -1227,6 +1233,7 @@ __all__ = [
     "_PI_EXTENSION_UI_HOOK_TIMEOUT_S",
     "_PI_NATIVE_WRAPPER_LABEL_VALUE",
     "_RACE_TASK_REAP_TIMEOUT_S",
+    "_RESET_TYPE",
     "_RETRY_SESSION_TYPE",
     "_RUNNER_CLIENT_RESOLVE_ATTEMPTS",
     "_RUNNER_CLIENT_RESOLVE_RETRY_S",

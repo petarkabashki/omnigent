@@ -210,6 +210,7 @@ from omnigent.runtime.prompt import (
     build_instructions_nullable,
     raw_author_instructions,
 )
+from omnigent.runtime.role_instructions import apply_session_role
 from omnigent.scheduled_context import current_scheduled_run, scheduled_run_scope
 from omnigent.server.schemas import (
     BackgroundSessionTitleRequest,
@@ -610,6 +611,44 @@ class _SessionSnapshot:
     parent_session_id: str | None = None
     agent_name: str | None = None
     wrapper_label: str | None = None
+    labels: Mapping[str, str] | None = None
+
+
+def _with_session_role(entry: Any, labels: Mapping[str, str] | None, workspace: str | None) -> Any:  # type: ignore[explicit-any]
+    """Overlay an aliased session's role onto its resolved spec entry.
+
+    Copies the spec, so the resolver's per-agent cache stays role-free.
+    """
+    spec = _unwrap_resolved_spec(entry)
+    if not isinstance(spec, AgentSpec):
+        return entry
+    overlaid = apply_session_role(spec, labels, workspace)
+    if overlaid is spec:
+        return entry
+    return (
+        dataclasses.replace(entry, spec=overlaid) if isinstance(entry, ResolvedSpec) else overlaid
+    )
+
+
+def _session_role_resolver(
+    raw_resolver: SpecResolver,
+    session_snapshot: Callable[[str], Awaitable[_SessionSnapshot]],
+) -> SpecResolver:
+    """Wrap ``raw_resolver`` so every caller sees the session's role overlay."""
+
+    async def resolve(agent_id: str, session_id: str | None) -> _SpecEntry | None:
+        entry = await raw_resolver(agent_id, session_id)
+        if entry is None or not session_id:
+            return entry
+        snapshot = await session_snapshot(session_id)
+        if not snapshot.labels:
+            return entry
+        # Role loading reads files and walks skill directories; keep it off the loop.
+        return await asyncio.to_thread(
+            _with_session_role, entry, snapshot.labels, snapshot.workspace
+        )
+
+    return resolve
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1508,6 +1547,8 @@ def create_runner_app(
     _model_dialog_watchers: set[asyncio.Task[None]] = set()
     _session_message_buffers: dict[str, list[dict[str, Any]]] = {}
     app.state.session_message_buffers = _session_message_buffers
+    # Serializes context resets per session (see ``_handle_session_context_reset``).
+    _session_reset_locks: dict[str, asyncio.Lock] = {}
     _claude_prompt_waiters: dict[str, asyncio.Task[None]] = {}
     app.state.claude_prompt_waiters = _claude_prompt_waiters
     # Sessions whose queued Claude message waits for a launcher sign-in.
@@ -2206,6 +2247,7 @@ def create_runner_app(
             parent_session_id: str | None = None
             agent_name: str | None = None
             wrapper_label: str | None = None
+            labels: dict[str, str] = {}
             try:
                 resp = await server_client.get(
                     f"/v1/sessions/{session_id}", params=_SESSION_METADATA_PARAMS
@@ -2230,6 +2272,9 @@ def create_runner_app(
                     if isinstance(raw_agent_name, str) and raw_agent_name:
                         agent_name = raw_agent_name
                     wrapper_label = wrapper_label_from_labels(body.get("labels"))
+                    raw_labels = body.get("labels")
+                    if isinstance(raw_labels, dict):
+                        labels = {str(k): str(v) for k, v in raw_labels.items()}
             except Exception:  # noqa: BLE001 — best-effort; created_at falls back to wall time
                 pass
             snapshot = _SessionSnapshot(
@@ -2242,11 +2287,15 @@ def create_runner_app(
                 parent_session_id=parent_session_id,
                 agent_name=agent_name,
                 wrapper_label=wrapper_label,
+                labels=labels,
             )
             if snapshot.ok and snapshot.agent_id is not None:
                 if _session_cache_generation_is_current(session_id, generation):
                     _session_snapshot_cache[session_id] = snapshot
             return snapshot
+
+    if spec_resolver is not None:
+        spec_resolver = _session_role_resolver(spec_resolver, _session_snapshot)
 
     async def _session_workspace_value(session_id: str) -> str | None:
         if session_id not in _session_workspace_cache:
@@ -2328,6 +2377,7 @@ def create_runner_app(
             sub_agent_name=envelope.sub_agent_name,
             parent_session_id=snapshot.parent_session_id,
             wrapper_label=wrapper_label_from_labels(snapshot.labels),
+            labels=dict(snapshot.labels or {}),
         )
         _session_start_cache[session_id] = float(snapshot.created_at)
         _session_workspace_cache[session_id] = snapshot.workspace
@@ -7711,6 +7761,9 @@ def create_runner_app(
                 return await _handle_claude_sdk_compact(conversation_id)
             return Response(status_code=204)
 
+        if body_type == "reset":
+            return await _handle_session_context_reset(conversation_id, body)
+
         if body_type == "clear":
             if _session_harness_name(conversation_id) == "claude-native":
                 return await _handle_claude_native_clear(conversation_id)
@@ -7888,7 +7941,10 @@ def create_runner_app(
                         _warn_unresolved_sub_agent(session_id, sub_agent_name)
                         _session_sub_agent_resolved[session_id] = False
                     else:
-                        spec_entry = sub_entry
+                        # The resolver overlaid the parent tree; the child needs it too.
+                        spec_entry = await asyncio.to_thread(
+                            _with_session_role, sub_entry, snapshot.labels, snapshot.workspace
+                        )
                         _session_sub_agent_resolved[session_id] = True
             if _session_cache_generation_is_current(session_id, generation):
                 _session_spec_cache[session_id] = spec_entry
@@ -8175,6 +8231,55 @@ def create_runner_app(
         _session_mcp_spec_hash.pop(session_id, None)
         _instruction_delivery_warned.pop(session_id, None)
         _session_sub_agent_resolved.pop(session_id, None)
+
+    async def _handle_session_context_reset(conversation_id: str, body: Any) -> Response:
+        """Drop the runner's context for a session so the next turn starts at the boundary.
+
+        ``prepare`` checks for buffered input and drops the caches; the server
+        then writes the ``context_reset`` item and sends ``commit``, which drops
+        history a turn cached meanwhile and releases the harness process. A
+        body without ``phase`` does both. Native terminal harnesses are refused.
+        """
+        harness = _session_harness_name(conversation_id) or ""
+        if harness.endswith("-native"):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "reset_unsupported",
+                    "detail": f"reset is not supported for the {harness} harness yet",
+                },
+            )
+        fields = body if isinstance(body, dict) else {}
+        phase = fields.get("phase")
+        lock = _session_reset_locks.setdefault(conversation_id, asyncio.Lock())
+        if phase == "commit":
+            async with lock:
+                _session_histories.pop(conversation_id, None)
+                await _invalidate_session_agent_state(conversation_id)
+            return JSONResponse(status_code=200, content={"reset": True, "phase": "commit"})
+        if lock.locked():
+            return JSONResponse(
+                status_code=409,
+                content={"error": "reset_in_progress", "detail": "a reset is already running"},
+            )
+        pending = fields.get("pending", "reject")
+        async with lock:
+            buffered = _session_message_buffers.get(conversation_id) or []
+            if buffered and pending != "drop":
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "pending_inputs",
+                        "detail": f"{len(buffered)} buffered message(s) are waiting",
+                    },
+                )
+            _session_message_buffers.pop(conversation_id, None)
+            _session_histories.pop(conversation_id, None)
+            if phase != "prepare":
+                await _invalidate_session_agent_state(conversation_id)
+        return JSONResponse(
+            status_code=200, content={"reset": True, "dropped_buffered": len(buffered)}
+        )
 
     async def _invalidate_session_agent_state(session_id: str) -> None:
         """Clear all agent-derived caches and release the harness subprocess.

@@ -938,6 +938,10 @@ class SysSessionCreateTool(Tool):
             "on the caller's host/workspace; placement='managed' provisions a new sandbox "
             "using the server's configured default provider. Managed creation requires a "
             "configured sandbox provider; use same_host for an existing connected host. "
+            "placement='host' with host_id and workspace launches an independent session on a "
+            "named connected host you own (workspace is a path on that machine). "
+            "Optional harness picks the harness (agent_id only); optional alias gives an "
+            "independent session a role name (^[A-Za-z][A-Za-z0-9_-]{0,31}$) peers can message. "
             "These placements require orchestration enabled "
             "and a sending session that is private or shared read-only, including its "
             "side-chat source chain. "
@@ -971,10 +975,52 @@ class SysSessionCreateTool(Tool):
                     "properties": {
                         "placement": {
                             "type": "string",
-                            "enum": ["child", "same_host", "managed"],
+                            "enum": ["child", "same_host", "host", "managed"],
                             "description": (
-                                "Default child; same_host or managed launches a private "
-                                "top-level session (agent_id only)."
+                                "Default child; same_host, host or managed launches a private "
+                                "top-level session (agent_id only). host runs it on the "
+                                "connected machine named by host_id and workspace."
+                            ),
+                        },
+                        "host_id": {
+                            "type": "string",
+                            "description": (
+                                "Connected host to run on; required with placement='host'. "
+                                "Must be one of your hosts."
+                            ),
+                        },
+                        "workspace": {
+                            "type": "string",
+                            "description": (
+                                "Absolute directory on that host; required with "
+                                "placement='host' (paths differ per machine)."
+                            ),
+                        },
+                        "harness": {
+                            "type": "string",
+                            "description": (
+                                "Optional harness override, e.g. 'pi' or 'codex'. agent_id "
+                                "mode only; the agent must be an executor.type omnigent "
+                                "spec and the server rejects unknown harnesses. Omit to "
+                                "use the agent's declared harness."
+                            ),
+                        },
+                        "executor": {
+                            "type": "string",
+                            "description": (
+                                "Optional executor profile name from ~/.omnigent/executors.yaml; "
+                                "fills the harness, model and reasoning effort you leave unset. "
+                                "Unknown names are rejected. Omit to use the role's executor "
+                                "(if its alias declares one) or the defaults."
+                            ),
+                        },
+                        "alias": {
+                            "type": "string",
+                            "description": (
+                                "Optional role alias, e.g. 'Reviewer', so peers can address "
+                                "the session by name. Independent placements only (not "
+                                "child). Matches ^[A-Za-z][A-Za-z0-9_-]{0,31}$ and must be "
+                                "unused in your project."
                             ),
                         },
                         "sandbox_provider": {

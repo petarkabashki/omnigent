@@ -165,6 +165,7 @@ from omnigent.server.routes._sessions.common import (
     _HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
     _INTERRUPT_TYPE,
     _MCP_ELICITATION_TYPE,
+    _RESET_TYPE,
     _RETRY_SESSION_TYPE,
     _SLASH_COMMAND_TYPE,
     _SNAPSHOT_RUNNER_TIMEOUT_S,
@@ -253,6 +254,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _child_session_summaries_from_conversations,
     _codex_side_chat_fork_lost,
     _codex_side_chat_thread_id,
+    _dispatch_in_flight,
     _dispatch_session_event_to_runner,
     _enrich_terminal_status_with_subagent_output,
     _ensure_native_terminal_ready,
@@ -283,6 +285,11 @@ from omnigent.server.routes._sessions.orchestration import (
     _wait_for_host_reconnect,
     ensure_runner_connected,
 )
+from omnigent.server.routes._sessions.reset import (
+    RESET_FORWARD_TIMEOUT_S,
+    is_reset_in_flight,
+    run_context_reset,
+)
 from omnigent.server.scheduled.telemetry import start_fire_stage
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
@@ -291,6 +298,8 @@ from omnigent.server.schemas import (
     ElicitationRequestParams,
     ErrorDetail,
     McpServerStartup,
+    ResetSessionRequest,
+    ResetSessionResponse,
     SessionEventInput,
 )
 from omnigent.server.session_live_state import last_liveness_stamp
@@ -917,6 +926,33 @@ def register_events_routes(
         return user_id, conv
 
     @event_router.post(
+        "/sessions/{session_id}/reset",
+        response_model=ResetSessionResponse,
+    )
+    async def post_session_reset(
+        request: Request,
+        session_id: str,
+        body: ResetSessionRequest,
+    ) -> ResetSessionResponse:
+        """
+        Reset the session's model context in place, keeping its id and items.
+
+        Sugar over the ``reset`` session event. Requires owner access.
+        """
+        ack = await _post_event_impl(
+            request,
+            session_id,
+            SessionEventInput(
+                type=_RESET_TYPE, data=body.model_dump(mode="json", exclude_none=True)
+            ),
+        )
+        return ResetSessionResponse(
+            session_id=session_id,
+            epoch=int(ack["epoch"]),
+            boundary_item_id=str(ack["boundary_item_id"]),
+        )
+
+    @event_router.post(
         "/sessions/{session_id}/events",
         # Internal event ingestion — hidden from the public API reference.
         include_in_schema=False,
@@ -1327,6 +1363,7 @@ def register_events_routes(
             _MCP_ELICITATION_TYPE,
             _COMPACT_TYPE,
             _CLEAR_TYPE,
+            _RESET_TYPE,
             _SLASH_COMMAND_TYPE,
             _STOP_SESSION_TYPE,
             _RETRY_SESSION_TYPE,
@@ -1367,6 +1404,11 @@ def register_events_routes(
                     f"Invalid data payload for event type {body.type!r}: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+        if body.type in ("message", "session_message") and is_reset_in_flight(session_id):
+            raise OmnigentError(
+                "The session's context is being reset; retry shortly",
+                code=ErrorCode.RESET_IN_PROGRESS,
+            )
         # Set when this message sends a file outside the default extensions, which
         # the bound runtime must be able to deliver as a file.
         outgoing_needs_delivery_capability = False
@@ -2162,6 +2204,64 @@ def register_events_routes(
                 "/compact is not available for this session type.",
                 code=ErrorCode.INVALID_INPUT,
             )
+        if body.type == _RESET_TYPE:
+            await _require_access(
+                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+            )
+            try:
+                reset_request = ResetSessionRequest.model_validate(body.data)
+            except ValueError as exc:
+                raise OmnigentError(
+                    f"Invalid reset payload: {exc}", code=ErrorCode.INVALID_INPUT
+                ) from exc
+            reset_conv = conv
+            startup_inputs = getattr(request.app.state, "startup_inputs", None)
+
+            async def _has_server_pending() -> bool:
+                return bool(
+                    await asyncio.to_thread(conversation_store.list_pending_inputs, session_id)
+                )
+
+            async def _drop_server_pending() -> None:
+                if startup_inputs is not None:
+                    await startup_inputs.cancel(session_id)
+
+            async def _interrupt() -> None:
+                await _dispatch_event(
+                    request, session_id, SessionEventInput(type=_INTERRUPT_TYPE), in_flight
+                )
+
+            async def _wake() -> bool:
+                _, client = await _wake_bound_runner_for_control(reset_conv)
+                return client is not None
+
+            from omnigent.server.routes import sessions as _sessions_facade
+
+            reset_result = await run_context_reset(
+                session_id=session_id,
+                conv=reset_conv,
+                reset=reset_request,
+                conversation_store=conversation_store,
+                status_of=lambda: _session_status_cache.get(session_id, reset_conv.live_status),
+                has_server_pending=_has_server_pending,
+                drop_server_pending=_drop_server_pending,
+                interrupt=_interrupt,
+                forward=lambda event: _forward_session_change_to_runner(
+                    session_id, runner_router, event, timeout_s=RESET_FORWARD_TIMEOUT_S
+                ),
+                wake=_wake,
+                native=_is_native_terminal_session(reset_conv),
+                publish=lambda payload: _sessions_facade.session_stream.publish(
+                    session_id, payload
+                ),
+                dispatching=lambda: _dispatch_in_flight.get(session_id, 0) > 0,
+                created_by=created_by,
+            )
+            return {
+                "queued": False,
+                "epoch": str(reset_result.epoch),
+                "boundary_item_id": reset_result.boundary_item_id,
+            }
         if body.type == _CLEAR_TYPE:
             # Like /compact, /clear runs in the vendor TUI: the runner types the
             # harness's own /clear, and the harness rotates the terminal onto a

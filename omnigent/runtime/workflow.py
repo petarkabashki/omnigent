@@ -2934,6 +2934,39 @@ def _find_latest_compaction_item(
     return page.data[0] if page.data else None
 
 
+def _find_latest_context_reset_item(
+    conv_store: ConversationStore,
+    conversation_id: str,
+) -> ConversationItem | None:
+    """Return the newest ``context_reset`` boundary item, or ``None``."""
+    page = conv_store.list_items(conversation_id, type="context_reset", order="desc", limit=1)
+    reset = page.data[0] if page.data else None
+    return reset if reset is not None and reset.type == "context_reset" else None
+
+
+def _compaction_is_after(
+    conv_store: ConversationStore,
+    conversation_id: str,
+    reset_item: ConversationItem,
+) -> bool:
+    """Report whether any compaction item was appended after ``reset_item``."""
+    page = conv_store.list_items(
+        conversation_id, type="compaction", after=reset_item.id, order="asc", limit=1
+    )
+    return bool(page.data)
+
+
+def _load_reset_epoch_history(
+    conv_store: ConversationStore,
+    conversation_id: str,
+    reset_item: ConversationItem,
+) -> _LoadedHistory:
+    """Load only the current epoch: the reset's summary pair plus later items."""
+    recent_items = fetch_all_items(conv_store, conversation_id, after=reset_item.id)
+    content_items = [i for i in recent_items if i.type not in NON_CONTENT_ITEM_TYPES]
+    return _LoadedHistory(items=compaction_to_history_items(reset_item) + content_items)
+
+
 @dataclass(frozen=True)
 class _LoadedHistory:
     """
@@ -2978,6 +3011,14 @@ def _load_initial_history(
         prompt construction and the latest compaction timestamp.
     """
     compaction_item = _find_latest_compaction_item(conv_store, conversation_id)
+    # A context reset is a hard lower bound: history and compaction never
+    # reach before it unless a newer compaction inside the epoch exists.
+    reset_item = _find_latest_context_reset_item(conv_store, conversation_id)
+    if reset_item is not None and (
+        compaction_item is None
+        or not _compaction_is_after(conv_store, conversation_id, reset_item)
+    ):
+        return _load_reset_epoch_history(conv_store, conversation_id, reset_item)
     if compaction_item is None:
         return _LoadedHistory(
             items=[
@@ -3001,6 +3042,8 @@ def _load_initial_history(
             conversation_id,
             last_id,
         )
+        if reset_item is not None:
+            return _load_reset_epoch_history(conv_store, conversation_id, reset_item)
         return _LoadedHistory(
             items=[
                 item
@@ -3027,6 +3070,8 @@ def _load_initial_history(
             last_id,
             conversation_id,
         )
+        if reset_item is not None:
+            return _load_reset_epoch_history(conv_store, conversation_id, reset_item)
         return _LoadedHistory(
             items=[
                 item
