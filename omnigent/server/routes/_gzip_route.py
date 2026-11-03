@@ -120,10 +120,28 @@ class _StateAwareGZipResponder(GZipResponder):
     ) -> None:
         super().__init__(app, minimum_size, compresslevel=compresslevel)
         self._state = state
+        self._start_forwarded = False
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """
+        Run the wrapped app, tracking whether the start message went out.
+
+        :param scope: ASGI request scope, e.g. type ``"http"``.
+        :param receive: ASGI receive callable.
+        :param send: ASGI send callable.
+        :returns: None.
+        """
+
+        async def tracking_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                self._start_forwarded = True
+            await send(message)
+
+        await super().__call__(scope, receive, tracking_send)
 
     async def send_with_compression(self, message: Message) -> None:
         """
-        Widen Starlette's exclusion set when the handler opted out.
+        Pass the response through untouched when the handler opted out.
 
         :param message: The outgoing ASGI message.
         :returns: None.
@@ -133,9 +151,14 @@ class _StateAwareGZipResponder(GZipResponder):
             and not self.started
             and self._state.get(SKIP_GZIP_STATE_KEY)
         ):
-            # Starlette reads this flag on the first body message, then emits
-            # the start message it buffered — untouched.
+            # Newer Starlette decides exclusion at the start message, so the
+            # buffered start is never flushed by a late flag; send it here.
+            self.started = True
             self.content_type_is_excluded = True
+            if not self._start_forwarded:
+                await self.send(self.initial_message)
+            await self.send(message)
+            return
         await super().send_with_compression(message)
 
 
