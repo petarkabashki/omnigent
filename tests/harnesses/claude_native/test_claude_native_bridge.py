@@ -16820,3 +16820,17 @@ async def test_relay_keeps_high_descriptor_connections_alive(
         release.set()
         await asyncio.wait_for(call, 2)
         relay.close()
+
+
+def test_clear_replacement_identity_moves_alias_title_and_project() -> None:
+    """The replacement inherits title/project; the superseded session releases its alias."""
+    from omnigent.harnesses.claude_native.bridge import clear_replacement_identity
+
+    old = {"title": "Architect", "project_id": "proj_1", "labels": {"omnigent.alias": "Architect"}}
+    extra, released = clear_replacement_identity(old)
+    assert extra == {"title": "Architect", "project_id": "proj_1"}
+    assert released == {"omnigent.alias": ""}
+
+    extra, released = clear_replacement_identity({"title": None, "labels": {}})
+    assert extra == {}
+    assert released == {}

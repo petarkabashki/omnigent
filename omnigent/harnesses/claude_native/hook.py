@@ -21,6 +21,7 @@ from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     CLAUDE_FRAMEWORK_CONTEXT_FILE,
     approval_wait_marker_path,
+    clear_replacement_identity,
     hold_approval_wait_marker,
     read_active_session_id,
     read_bridge_id,
@@ -550,12 +551,14 @@ def _create_clear_replacement_session(
         else {}
     )
     labels.setdefault(BRIDGE_ID_LABEL_KEY, read_bridge_id(bridge_dir) or old_session_id)
+    carried_fields, released_old_labels = clear_replacement_identity(old)
 
     create_resp = client.post(
         f"{ap_server_url}/v1/sessions",
         json={
             "agent_id": agent_id,
             "labels": labels,
+            **carried_fields,
         },
     )
     create_resp.raise_for_status()
@@ -595,7 +598,10 @@ def _create_clear_replacement_session(
             # session's live one (which would double-mirror the transcript and
             # trip the executor guard). Mirrors the async forwarder rotation;
             # ``_auto_create_claude_terminal`` recognises this marker.
-            "labels": {BRIDGE_ID_LABEL_KEY: f"{old_session_id}-cleared"},
+            "labels": {
+                BRIDGE_ID_LABEL_KEY: f"{old_session_id}-cleared",
+                **released_old_labels,
+            },
         },
     )
     if clear_resp.status_code >= 400:

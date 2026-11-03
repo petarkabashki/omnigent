@@ -134,6 +134,30 @@ BRIDGE_DIR_ENV_VAR = "HARNESS_CLAUDE_NATIVE_BRIDGE_DIR"
 REQUEST_SESSION_ID_ENV_VAR = "HARNESS_CLAUDE_NATIVE_REQUEST_SESSION_ID"
 BRIDGE_ID_LABEL_KEY = "omnigent.claude_native.bridge_id"
 RESUME_COPY_MARKER_SUFFIX = ".omnigent-resume-copy"
+# Mirrors ``ALIAS_LABEL_KEY`` in the conversation store; kept literal so the
+# lightweight hook process need not import the store.
+_ALIAS_LABEL_KEY = "omnigent.alias"
+
+
+def clear_replacement_identity(old_session: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    Split a ``/clear``-superseded session's identity between old and new.
+
+    The replacement keeps the title and project, and the role alias moves to it
+    so ``project/Role`` resolves to one live session.
+
+    :param old_session: Snapshot of the superseded session.
+    :returns: ``(extra_create_fields, old_label_updates)``: fields to add to the
+        replacement's create body, and labels to blank on the superseded session.
+    """
+    extra: dict[str, str] = {}
+    for field in ("title", "project_id"):
+        value = old_session.get(field)
+        if isinstance(value, str) and value:
+            extra[field] = value
+    labels = old_session.get("labels")
+    has_alias = isinstance(labels, dict) and bool(labels.get(_ALIAS_LABEL_KEY))
+    return extra, ({_ALIAS_LABEL_KEY: ""} if has_alias else {})
 
 
 def _bridge_injection_lock(bridge_dir: Path) -> threading.Lock:
