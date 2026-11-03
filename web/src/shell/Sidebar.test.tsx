@@ -3905,17 +3905,17 @@ describe("Sidebar view options", () => {
     fireEvent.click(screen.getByTestId("session-show-environment"));
     fireEvent.click(screen.getByTestId("session-show-updated"));
 
-    // Environment text is available to screen readers without widening the metadata row.
-    expect(within(row).getByTestId("session-row-meta")).toHaveTextContent("Remote·fix/retries");
-    expect(within(row).getByText("Remote")).toHaveClass("sr-only");
+    // A remote host shows its name, truncated, next to the branch.
+    expect(within(row).getByTestId("session-row-meta")).toHaveTextContent("Build Mac·fix/retries");
+    expect(within(row).getByText("Build Mac")).toHaveClass("truncate");
     expect(within(row).getByTestId("session-row-updated")).toHaveTextContent("2m");
     // With a second line, the controls and the timestamp stay on the title line.
     expect(controls()).toHaveClass("top-4", "md:top-3.5");
     expect(within(row).getByTestId("session-row-updated")).toHaveClass("top-4", "md:top-3.5");
     // A session without a branch omits that part rather than leaving a gap.
     const bare = screen.getByText("conv_no_branch").closest("li")!;
-    expect(within(bare).getByTestId("session-row-meta")).toHaveTextContent(/^Local machine$/);
-    expect(within(bare).getByText("Local machine")).toHaveClass("sr-only");
+    expect(within(bare).getByTestId("session-row-meta")).toHaveTextContent(/^This machine$/);
+    expect(within(bare).getByText("This machine")).toHaveClass("truncate");
     expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).show).toEqual([
       "updated",
       "environment",
@@ -3977,7 +3977,7 @@ describe("Sidebar view options", () => {
     expect(screen.queryByTestId("session-row-meta")).toBeNull();
   });
 
-  it("keeps the device name accessible on the environment icon", () => {
+  it("shows the local device label visibly on the environment segment", () => {
     localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ show: ["environment"] }));
     // A loopback server with one online host: that host is this machine.
     isServerLocalMock.mockReturnValue(true);
@@ -3990,8 +3990,68 @@ describe("Sidebar view options", () => {
       "session-row-meta",
     );
     expect(meta).toHaveTextContent(/^This /);
-    expect(within(meta).getByText(/^This /)).toHaveClass("sr-only");
+    expect(within(meta).getByText(/^This /)).toHaveClass("truncate");
     expect(meta).not.toHaveTextContent("Build Mac");
+    expect(within(meta).queryByTestId("session-row-offline")).toBeNull();
+  });
+
+  it("dims the environment and shows an offline cue for an offline remote host", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ show: ["environment"] }));
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_gone", name: "Lab Box", sandbox_provider: null, status: "offline" }],
+    });
+    mockConversations([conv("conv_gone", "Codex", { status: "idle", host_id: "host_gone" })]);
+    renderGroupingSidebar();
+    const meta = within(screen.getByText("conv_gone").closest("li")!).getByTestId(
+      "session-row-meta",
+    );
+    expect(meta).toHaveTextContent("Lab Box");
+    expect(within(meta).getByText("Lab Box")).toHaveClass("opacity-60");
+    expect(within(meta).getByTestId("session-row-offline")).toHaveTextContent("offline");
+  });
+
+  it("groups by host: remote hosts alphabetically", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "host" }));
+    useHostsMock.mockReturnValue({
+      data: [
+        { host_id: "h_z", name: "zeta", sandbox_provider: null, status: "online" },
+        { host_id: "h_a", name: "alpha", sandbox_provider: null, status: "offline" },
+      ],
+    });
+    mockConversations([
+      conv("conv_z", "Codex", { status: "idle", host_id: "h_z" }),
+      conv("conv_a", "Codex", { status: "idle", host_id: "h_a" }),
+    ]);
+    renderGroupingSidebar();
+    const alpha = screen.getByText("alpha");
+    const zeta = screen.getByText("zeta");
+    expect(alpha.compareDocumentPosition(zeta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("groups by host: this device first, sandboxes last, no-host and this-device sessions merged", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "host" }));
+    isServerLocalMock.mockReturnValue(true);
+    useHostsMock.mockReturnValue({
+      data: [
+        { host_id: "h_me", name: "me", sandbox_provider: null, status: "online" },
+        { host_id: "h_r", name: "remote-box", sandbox_provider: null, status: "online" },
+        { host_id: "h_sb", name: "sb", sandbox_provider: "daytona", status: "online" },
+      ],
+    });
+    mockConversations([
+      conv("conv_sb", "Codex", { status: "idle", host_id: "h_sb" }),
+      conv("conv_r", "Codex", { status: "idle", host_id: "h_r" }),
+      conv("conv_me", "Codex", { status: "idle", host_id: "h_me" }),
+      conv("conv_bare", "Codex", { status: "idle" }),
+    ]);
+    renderGroupingSidebar();
+    const follows = (a: HTMLElement, b: HTMLElement) =>
+      !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const local = screen.getByText("conv_me");
+    expect(follows(local, screen.getByText("conv_r"))).toBe(true);
+    expect(follows(screen.getByText("conv_r"), screen.getByText("conv_sb"))).toBe(true);
+    // Both local sessions share one group, so they are adjacent.
+    expect(follows(screen.getByText("conv_bare"), screen.getByText("conv_r"))).toBe(true);
   });
 
   it("shows a managed-sandbox session's repo name from its label when Show → Repo is on", () => {

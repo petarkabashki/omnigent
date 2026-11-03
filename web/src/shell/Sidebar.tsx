@@ -53,7 +53,9 @@ import {
   InboxIcon,
   ListChecksIcon,
   ListFilterIcon,
+  CloudIcon,
   LaptopIcon,
+  ServerIcon,
   LayoutDashboardIcon,
   Loader2Icon,
   MailIcon,
@@ -299,6 +301,7 @@ import {
   SANDBOX_REPO_LABEL_KEY,
 } from "./NewChatDialog";
 import { useDesktopHostId } from "./RevealInFileManager";
+import { classifySessionHost, orderHostGroups, type SessionHostInfo } from "@/lib/sessionHostKind";
 import { ForkSessionDialog } from "./ForkSessionDialog";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
@@ -1983,14 +1986,28 @@ function ConversationList({
     () => conversationsQuery.data?.pages.flatMap((page) => page.data) ?? [],
     [conversationsQuery.data],
   );
+  const desktopHostId = useDesktopHostId();
+  const thisHostId = useMemo(
+    () => resolveThisHostId(hostsById, desktopHostId),
+    [hostsById, desktopHostId],
+  );
+  const hostGroupOf = useCallback(
+    (c: Conversation) => {
+      const info = classifySessionHost(c, hostsById, thisHostId);
+      return { label: sessionHostLabel(info), kind: info.kind };
+    },
+    [hostsById, thisHostId],
+  );
   const groupOrder = useMemo(
     () =>
-      view.grouping === "harness"
-        ? [...new Set(allConversations.map(harnessLabel))].sort((a, b) => a.localeCompare(b))
-        : view.grouping === "status"
-          ? STATUS_BUCKETS
-          : DATE_BUCKETS.map((bucket) => `${GROUPING_LABELS[view.grouping]} ${bucket}`),
-    [view.grouping, allConversations, harnessLabel],
+      view.grouping === "host"
+        ? orderHostGroups(allConversations.map(hostGroupOf))
+        : view.grouping === "harness"
+          ? [...new Set(allConversations.map(harnessLabel))].sort((a, b) => a.localeCompare(b))
+          : view.grouping === "status"
+            ? STATUS_BUCKETS
+            : DATE_BUCKETS.map((bucket) => `${GROUPING_LABELS[view.grouping]} ${bucket}`),
+    [view.grouping, allConversations, harnessLabel, hostGroupOf],
   );
   const workingIds = useSidebarWorkingIds(allConversations, startingId, statusView);
 
@@ -2222,15 +2239,17 @@ function ConversationList({
         c.id,
         view.grouping === "status"
           ? statusOf(c)
-          : view.grouping === "harness"
-            ? harnessLabel(c)
-            : `${GROUPING_LABELS[view.grouping]} ${dateBucket(
-                view.grouping === "created"
-                  ? c.created_at
-                  : (frozenKeys?.get(c.id) ??
-                      (activeOverride?.id === c.id ? activeOverride.updatedAt : c.updated_at)),
-                now,
-              )}`,
+          : view.grouping === "host"
+            ? hostGroupOf(c).label
+            : view.grouping === "harness"
+              ? harnessLabel(c)
+              : `${GROUPING_LABELS[view.grouping]} ${dateBucket(
+                  view.grouping === "created"
+                    ? c.created_at
+                    : (frozenKeys?.get(c.id) ??
+                        (activeOverride?.id === c.id ? activeOverride.updatedAt : c.updated_at)),
+                  now,
+                )}`,
       ]),
     );
     const sessions = groupConversations(ordered, (c) => groupTitles.get(c.id), groupOrder).flatMap(
@@ -2253,6 +2272,7 @@ function ConversationList({
     grouped,
     groupOrder,
     harnessLabel,
+    hostGroupOf,
     view.grouping,
     sortBy,
     customOrder,
@@ -3158,7 +3178,9 @@ function ConversationList({
                             <ConversationSection
                               key={group.title}
                               title={
-                                index === 0 || view.grouping === "harness"
+                                index === 0 ||
+                                view.grouping === "harness" ||
+                                view.grouping === "host"
                                   ? group.title
                                   : group.title.replace(
                                       /^(?:Created|Updated) (.)/,
@@ -3560,6 +3582,7 @@ const GROUPING_LABELS: Record<SidebarGrouping, string> = {
   default: "Default",
   status: "Status",
   harness: "Harness",
+  host: "Host",
   created: "Created",
   updated: "Updated",
 };
@@ -4637,23 +4660,29 @@ function sessionLocationLabel(
     : (host?.name ?? conversation.host_id);
 }
 
-/** A row's short environment: the sandbox type, this device, or "Remote"; the tooltip names the host. */
-function sessionEnvironmentLabel(
-  conversation: Conversation,
+/** The host id of the device running this UI, or null when it can't be resolved. */
+function resolveThisHostId(
   hostsById: ReadonlyMap<string, Host>,
   desktopHostId: string | null,
-): string {
-  const hostId = conversation.host_id;
-  if (!hostId || hostsById.get(hostId)?.sandbox_provider) {
-    return sessionLocationLabel(conversation, hostsById);
-  }
+): string | null {
   const onlineHostIds = [...hostsById.values()]
     .filter((h) => h.status === "online" && !h.sandbox_provider)
     .map((h) => h.host_id);
-  return hostId === resolveThisMachineHostId(desktopHostId, isCurrentServerLocal(), onlineHostIds)
-    ? localMachineLabel(navigator.userAgent)
-    : "Remote";
+  return resolveThisMachineHostId(desktopHostId, isCurrentServerLocal(), onlineHostIds);
 }
+
+/** A host's display label: this device, the sandbox type, or the remote host's name. */
+function sessionHostLabel(info: SessionHostInfo): string {
+  if (info.kind === "local") return localMachineLabel(navigator.userAgent);
+  if (info.kind === "sandbox") return sandboxOptionLabel(info.sandboxProvider!);
+  return info.name;
+}
+
+const HOST_KIND_ICONS: Record<SessionHostInfo["kind"], LucideIcon> = {
+  local: LaptopIcon,
+  remote: ServerIcon,
+  sandbox: CloudIcon,
+};
 
 /** A managed-sandbox session's repo name from its first `omnigent.sandbox.repo` label; null otherwise. */
 function sessionRepoName(conversation: Conversation): string | null {
@@ -4663,7 +4692,26 @@ function sessionRepoName(conversation: Conversation): string | null {
   return workspace ? deriveRepoName(workspace.split("#")[0]!) : null;
 }
 
+// Kind icon for a session's host in tooltips, matching the row meta line.
+function SessionHostIcon({
+  conversation,
+  hostsById,
+}: {
+  conversation: Conversation;
+  hostsById: ReadonlyMap<string, Host>;
+}) {
+  const desktopHostId = useDesktopHostId();
+  const { kind } = classifySessionHost(
+    conversation,
+    hostsById,
+    resolveThisHostId(hostsById, desktopHostId),
+  );
+  const Icon = HOST_KIND_ICONS[kind];
+  return <Icon aria-hidden className="size-3.5 shrink-0" />;
+}
+
 // Its own component so only rows showing Environment subscribe to the desktop host id.
+// Renders the whole meta segment: kind icon, host label, and an offline cue.
 function SessionEnvironmentLabel({
   conversation,
   hostsById,
@@ -4671,7 +4719,28 @@ function SessionEnvironmentLabel({
   conversation: Conversation;
   hostsById: ReadonlyMap<string, Host>;
 }) {
-  return sessionEnvironmentLabel(conversation, hostsById, useDesktopHostId());
+  const desktopHostId = useDesktopHostId();
+  const info = classifySessionHost(
+    conversation,
+    hostsById,
+    resolveThisHostId(hostsById, desktopHostId),
+  );
+  const Icon = HOST_KIND_ICONS[info.kind];
+  return (
+    <span data-testid="session-row-environment" className="flex min-w-0 items-center gap-1">
+      <Icon aria-hidden className="size-3.5 shrink-0" />
+      <span className={cn("truncate", info.offline && "opacity-60")}>{sessionHostLabel(info)}</span>
+      {info.offline && (
+        <span
+          data-testid="session-row-offline"
+          className="flex shrink-0 items-center gap-1 text-xs"
+        >
+          <span aria-hidden className="size-1.5 rounded-full bg-muted-foreground/60" />
+          offline
+        </span>
+      )}
+    </span>
+  );
 }
 
 // Its own component so only rows showing the timestamp subscribe to the shared clock.
@@ -4690,8 +4759,8 @@ function SessionMetaLine({
   repo: string | null;
   branch: string | null;
 }) {
-  const parts: { key: string; icon: LucideIcon; value: ReactNode }[] = [];
-  if (environment != null) parts.push({ key: "environment", icon: LaptopIcon, value: environment });
+  const parts: { key: string; icon: LucideIcon | null; value: ReactNode }[] = [];
+  if (environment != null) parts.push({ key: "environment", icon: null, value: environment });
   if (repo !== null) parts.push({ key: "repo", icon: FolderGit2Icon, value: repo });
   if (branch !== null) parts.push({ key: "branch", icon: GitBranchIcon, value: branch });
   if (parts.length === 0) return null;
@@ -4703,10 +4772,14 @@ function SessionMetaLine({
       {parts.map(({ key, icon: Icon, value }, i) => (
         <Fragment key={key}>
           {i > 0 && <span aria-hidden>·</span>}
-          <span className="flex min-w-0 items-center gap-1">
-            <Icon aria-hidden className="size-3.5 shrink-0" />
-            <span className={key === "environment" ? "sr-only" : "truncate"}>{value}</span>
-          </span>
+          {Icon === null ? (
+            value
+          ) : (
+            <span className="flex min-w-0 items-center gap-1">
+              <Icon aria-hidden className="size-3.5 shrink-0" />
+              <span className="truncate">{value}</span>
+            </span>
+          )}
         </Fragment>
       ))}
     </span>
@@ -4850,7 +4923,7 @@ function LegacySessionTooltipContent({
         data-testid="session-tooltip-location"
         className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
       >
-        <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
+        <SessionHostIcon conversation={conversation} hostsById={hostsById} />
         <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
       </p>
       {conversation.git_branch && (
@@ -4925,7 +4998,7 @@ function SessionTooltipContent({
           </span>
         )}
         <span data-testid="session-tooltip-location" className="flex min-w-0 items-center gap-1.5">
-          <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
+          <SessionHostIcon conversation={conversation} hostsById={hostsById} />
           <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
         </span>
       </p>
