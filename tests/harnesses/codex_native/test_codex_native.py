@@ -23,6 +23,7 @@ from PIL import Image
 
 from omnigent._runner_startup import RunnerStartupProgress
 from omnigent.entities import CompactionData
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
 from omnigent.harnesses.codex_native import app_server as codex_native_app_server
 from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
 from omnigent.harnesses.codex_native import main as codex_native
@@ -3051,8 +3052,10 @@ def test_forwarder_rotation_redirects_viewers_of_the_cleared_session(
 
     Without the notice and ``external_session_superseded`` event, a browser
     on the old session keeps showing the cleared conversation while the
-    replacement only appears as a new sidebar entry.
+    replacement only appears as a new sidebar entry. The replacement starts at
+    epoch 0, so the shared bridge stamp must stop naming the old session's epoch.
     """
+    record_launch_epoch(tmp_path, 3)
     write_bridge_state(
         tmp_path,
         CodexNativeBridgeState(
@@ -3113,19 +3116,24 @@ def test_forwarder_rotation_redirects_viewers_of_the_cleared_session(
                     ap_client, "conv_old"
                 ),
                 usage_coalescer=codex_native_forwarder._SessionUsageCoalescer(
-                    ap_client, "conv_old"
+                    ap_client, "conv_old", context_epoch=3
                 ),
                 elicitation_tracker=_elicitation_tracker(),
             )
-            return await codex_native_forwarder._maybe_rotate_session_on_thread_started(
+            rotated = await codex_native_forwarder._maybe_rotate_session_on_thread_started(
                 ap_client=ap_client,
                 target=target,
                 bridge_dir=tmp_path,
                 app_server_url="ws://127.0.0.1:9876",
                 event=_thread_started_event("thread_new"),
             )
+            replacement_epochs.append(target.usage_coalescer._context_epoch)
+            return rotated
 
+    replacement_epochs: list[int | None] = []
     assert asyncio.run(run())
+    assert replacement_epochs == [0]
+    assert read_launch_epoch(tmp_path) == 0
     assert [event["type"] for event in old_session_events] == [
         "external_session_status",
         "external_conversation_item",

@@ -10,6 +10,7 @@ import pytest
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.harnesses.codex_native import bridge as codex_native_bridge
+from omnigent.harnesses.codex_native import process_registry
 from omnigent.runner import app as runner_app
 from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
@@ -28,12 +29,15 @@ _IN_PROCESS_SPEC = AgentSpec(
 class _SnapshotServerClient(NullServerClient):
     """Server whose session snapshot names the agent, so the runner can resolve its spec."""
 
+    labels: dict[str, str] = {}
+
     async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
         del kwargs
+        labels = self.labels
 
         class _Snapshot(NullServerClient._Response):
             def json(self) -> dict[str, Any]:
-                return {"id": url.rsplit("/", 1)[-1], "agent_id": _AGENT_ID}
+                return {"id": url.rsplit("/", 1)[-1], "agent_id": _AGENT_ID, "labels": labels}
 
         return _Snapshot()
 
@@ -297,3 +301,55 @@ async def test_codex_native_reset_stops_the_backend_and_wipes_the_cursor_under_t
         assert closed == [session_id]
         assert codex_native_bridge.read_bridge_state(bridge_dir) is None
         assert ensure_locks[session_id].locked()
+
+
+@pytest.mark.asyncio
+async def test_codex_native_reset_of_a_rotated_session_stops_the_launching_sessions_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A native /clear moved the pane to the rotated session; the app-server and
+    # forwarder stay registered to the session that launched them.
+    launching_id = "8a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    rotated_id = "7a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    bridge_dir = codex_native_bridge.prepare_bridge_dir(launching_id)
+    closed: list[str] = []
+    reaped: list[Path] = []
+
+    class _Backend:
+        async def close(self) -> None:
+            closed.append(launching_id)
+
+    def reap(state_dir: Path) -> int:
+        reaped.append(state_dir)
+        return 0
+
+    monkeypatch.setattr(process_registry, "reap_codex_native_processes_for_state_dir", reap)
+    forwarder = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setitem(orchestration._AUTO_CODEX_APP_SERVERS, launching_id, _Backend())
+    monkeypatch.setitem(orchestration._AUTO_CODEX_BRIDGE_DIRS, launching_id, bridge_dir)
+    monkeypatch.setitem(orchestration._AUTO_FORWARDER_TASKS, launching_id, forwarder)
+    server_client = _SnapshotServerClient()
+    server_client.labels = {codex_native_bridge.CODEX_NATIVE_BRIDGE_ID_LABEL_KEY: launching_id}
+    app, _ = await _build_app_for_spec(_harness_spec("codex-native"), server_client=server_client)
+
+    try:
+        async with _runner_client(app) as client:
+            prepared = await client.post(
+                f"/v1/sessions/{rotated_id}/events",
+                json={
+                    "type": "reset",
+                    "harness": "codex-native",
+                    "phase": "prepare",
+                    "pending": "reject",
+                },
+            )
+
+            assert prepared.status_code == 200, prepared.text
+            assert closed == [launching_id]
+            assert forwarder.cancelled()
+            assert launching_id not in orchestration._AUTO_CODEX_APP_SERVERS
+            assert reaped == [bridge_dir]
+            app.state.native_terminal_ensure_locks["codex"][rotated_id].release()
+    finally:
+        forwarder.cancel()

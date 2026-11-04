@@ -22,7 +22,11 @@ import httpx
 from omnigent.codex_approval_modes import codex_permission_preset_from_thread_settings
 from omnigent.debug_logging import debug_event
 from omnigent.entities.session_resources import terminal_resource_id
-from omnigent.harnesses.claude_native.bridge import read_launch_epoch, url_component
+from omnigent.harnesses.claude_native.bridge import (
+    read_launch_epoch,
+    record_launch_epoch,
+    url_component,
+)
 from omnigent.harnesses.codex_egress import (
     CERTIFICATE_REMEDIATION,
     certificate_failure_message,
@@ -2812,6 +2816,8 @@ async def _create_thread_replacement_session(
     )
     transfer_resp.raise_for_status()
 
+    # The shared stamp names the old session's epoch; a new session starts at 0.
+    record_launch_epoch(bridge_dir, 0)
     write_bridge_state(
         bridge_dir,
         CodexNativeBridgeState(

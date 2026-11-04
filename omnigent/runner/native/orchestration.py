@@ -271,6 +271,32 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
         await app_server.close()
 
 
+async def stop_codex_native_bridge_backends(bridge_dir: Path) -> None:
+    """
+    Stop every Codex backend still running against a bridge directory.
+
+    A native ``/clear`` rotates onto a new session in the same directory, while the
+    launching session stays the registry key for the app-server and forwarder. The
+    reap catches a backend no registry entry holds.
+
+    :param bridge_dir: The bridge directory shared by the rotated sessions.
+    :returns: None.
+    """
+    from omnigent.harnesses.codex_native.process_registry import (
+        reap_codex_native_processes_for_state_dir,
+    )
+
+    launching_sessions = [
+        session_id
+        for session_id, launch_dir in _AUTO_CODEX_BRIDGE_DIRS.items()
+        if launch_dir == bridge_dir
+    ]
+    for session_id in launching_sessions:
+        await teardown_codex_native_app_server(session_id)
+        await _cancel_auto_forwarder_task(session_id)
+    await asyncio.to_thread(reap_codex_native_processes_for_state_dir, bridge_dir)
+
+
 async def teardown_all_codex_native_app_servers() -> None:
     """
     Tear down every host-spawned codex-native app-server on this runner.

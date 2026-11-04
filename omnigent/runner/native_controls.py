@@ -1898,7 +1898,10 @@ def build_native_controls(
 
     async def _stop_codex_native_pane(conv_id: str) -> None:
         from omnigent.entities.session_resources import terminal_resource_id
-        from omnigent.runner.native import teardown_codex_native_app_server
+        from omnigent.runner.native import (
+            stop_codex_native_bridge_backends,
+            teardown_codex_native_app_server,
+        )
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
         # The caller holds the session's Codex ensure lock.
@@ -1912,6 +1915,8 @@ def build_native_controls(
             # Stops the forwarder and the app-server that owns the old thread.
             await teardown_codex_native_app_server(conv_id)
             await _cancel_auto_forwarder_task(conv_id)
+            # A rotated session's backend is registered to the session that launched it.
+            await stop_codex_native_bridge_backends(await _codex_native_reset_bridge_dir(conv_id))
         if existing is not None:
             _publish_terminal_deleted_event(
                 conversation_id=conv_id,
