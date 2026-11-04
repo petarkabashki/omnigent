@@ -1070,6 +1070,11 @@ _CLAUDE_LAUNCH_REFUSED_MESSAGE = (
     "Claude, so send it again after Claude starts. If Claude has not started after 15 "
     "minutes, send a message to try again."
 )
+_CLAUDE_LAUNCH_RECOVERED_MESSAGE = (
+    "Claude has started. The earlier \"Claude did not start\" message no longer applies, and "
+    "Omnigent is no longer retrying. A message sent while Claude was down was not delivered, "
+    "so send it again."
+)
 _CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE = (
     "Claude did not start because Omnigent refused access to this session. Your session and "
     "chat are safe and nothing was changed. Sign in again or check that you have access to "
@@ -10972,7 +10977,7 @@ async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
     except _ClaudeLaunchRefusedError as exc:
         _note_claude_launch_refusal(ctx, exc)
         raise
-    _clear_claude_refusal_status(ctx)
+    await _clear_claude_refusal_status(ctx)
     _start_claude_relay_after_launch(ctx)
     return view
 
@@ -11025,11 +11030,12 @@ class _ClaudeRedriveProbe:
     retry_after_s: float | None = None
 
 
-def _clear_claude_refusal_status(ctx: NativeLaunchContext) -> None:
+async def _clear_claude_refusal_status(ctx: NativeLaunchContext) -> None:
     """Clear a refusal's ``failed`` status after a launch started the pane.
 
     ``failed`` only yields to a ``running`` edge. A status other than ``failed``
-    may be a live turn, which must not see a synthetic edge.
+    may be a live turn, which must not see a synthetic edge. The transcript keeps
+    the refusal row, so a follow-up notice says Claude has started since.
     """
     session_id = ctx.session_id
     if session_id not in _claude_refused_status_sessions:
@@ -11039,6 +11045,12 @@ def _clear_claude_refusal_status(ctx: NativeLaunchContext) -> None:
         return
     ctx.publish_event(session_id, {"type": "session.status", "status": "running"})
     ctx.publish_event(session_id, {"type": "session.status", "status": "idle"})
+    await _post_pi_native_notice(
+        session_id=session_id,
+        server_client=ctx.server_client,
+        code="claude_launch_recovered",
+        notice=_CLAUDE_LAUNCH_RECOVERED_MESSAGE,
+    )
 
 
 def _schedule_claude_launch_redrive(

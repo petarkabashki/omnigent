@@ -1528,6 +1528,55 @@ async def test_any_successful_launch_clears_a_refusal_without_touching_a_live_tu
     assert refused_session not in _claude_refused_status_sessions
 
 
+def _record_posts(harness: _RedriveHarness) -> list[dict[str, Any]]:
+    """Point the harness at a server that records every POST body."""
+    posted: list[dict[str, Any]] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posted.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    harness.ctx = dataclasses.replace(
+        harness.ctx,
+        server_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(record), base_url="http://runner"
+        ),
+    )
+    return posted
+
+
+async def test_a_recovered_launch_adds_a_follow_up_line_under_the_stale_refusal(
+    monkeypatch: pytest.MonkeyPatch, refused_session: str
+) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=False, status="failed"
+    )
+    posted = _record_posts(harness)
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _launch_claude(harness.ctx)
+
+    item = posted[0]["data"]["item_data"]
+    assert (item["code"], item["level"]) == ("claude_launch_recovered", "info")
+    assert "no longer retrying" in item["message"]
+
+
+@pytest.mark.parametrize("status", ["running", "idle"])
+async def test_a_launch_with_no_refusal_showing_adds_no_follow_up_line(
+    monkeypatch: pytest.MonkeyPatch, refused_session: str, status: str
+) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=False, status=status
+    )
+    posted = _record_posts(harness)
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _launch_claude(harness.ctx)
+
+    assert posted == []
+
+
 async def test_a_launch_leaves_a_failure_it_did_not_refuse_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
