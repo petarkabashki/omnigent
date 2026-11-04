@@ -257,6 +257,58 @@ async def test_prepare_codex_terminal_resumes_with_launch_provider(
 
 
 @pytest.mark.asyncio
+async def test_prepare_codex_terminal_replaces_a_stale_launch_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A CLI resume after a reset stamps the current epoch over the runner's old one.
+
+    The bridge dir outlives launches, so an old stamp would get all of this
+    launch's usage refused as coming from before the reset.
+    """
+    from unittest.mock import AsyncMock
+
+    from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
+    from omnigent.harnesses.codex_native.bridge import prepare_bridge_dir
+
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
+    bridge_dir = prepare_bridge_dir("conv_test")
+    record_launch_epoch(bridge_dir, 0)
+    monkeypatch.setattr(
+        codex_native,
+        "_fetch_codex_session",
+        AsyncMock(
+            return_value={
+                "labels": {codex_native._WRAPPER_LABEL_KEY: codex_native._WRAPPER_LABEL_VALUE},
+                "external_session_id": "thread_test",
+                "context_epoch": 1,
+            }
+        ),
+    )
+    monkeypatch.setattr(codex_native, "_find_running_codex_terminal", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        codex_native,
+        "_ensure_local_codex_resume_rollout",
+        AsyncMock(side_effect=RuntimeError("stop after stamp")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after stamp"):
+        await codex_native._prepare_codex_terminal(
+            base_url="http://127.0.0.1:8000",
+            headers={},
+            session_id="conv_test",
+            runner_id=None,
+            session_bundle=None,
+            codex_args=(),
+            command="codex",
+            model=None,
+        )
+
+    assert read_launch_epoch(bridge_dir) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_failure", [None, "terminal", "client"])
 @pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])
 async def test_prepare_codex_terminal_closes_resources_when_cleanup_is_interrupted(

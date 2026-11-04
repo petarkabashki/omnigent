@@ -39,7 +39,7 @@ from omnigent.harness_availability import (
     HARNESS_VERSION_TOO_LOW,
     HarnessUnavailableReason,
 )
-from omnigent.harnesses.claude_native.bridge import url_component
+from omnigent.harnesses.claude_native.bridge import record_launch_epoch, url_component
 from omnigent.harnesses.claude_native.main import (
     _attach_with_reconnect,
     attach_local_terminal,
@@ -1140,6 +1140,7 @@ async def _prepare_codex_terminal(
     async with open_server_client(base_url, headers=headers, timeout=timeout) as client:
         bridge_id: str
         thread_id: str | None = None
+        context_epoch: object = None
         if session_id is None:
             if session_bundle is None:
                 raise click.ClickException("Creating a Codex session requires a session bundle.")
@@ -1158,6 +1159,7 @@ async def _prepare_codex_terminal(
                     f"Conversation {session_id!r} is not a codex-native session."
                 )
             bridge_id = str(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id)
+            context_epoch = payload.get("context_epoch")
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             external_session_id = payload.get("external_session_id")
             thread_id = external_session_id if isinstance(external_session_id, str) else None
@@ -1194,6 +1196,9 @@ async def _prepare_codex_terminal(
                 )
 
         bridge_dir = prepare_bridge_dir(bridge_id)
+        if isinstance(context_epoch, int):
+            # Replaces a runner launch's stamp, which a reset may have outdated.
+            record_launch_epoch(bridge_dir, context_epoch)
         socket_path = socket_path_for_bridge_dir(bridge_dir)
         codex_home = codex_home_for_bridge_dir(bridge_dir)
         clear_bridge_state(bridge_dir)

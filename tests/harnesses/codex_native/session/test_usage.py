@@ -393,3 +393,42 @@ def test_usage_coalescer_flush_attaches_model_to_every_post() -> None:
     assert posted[1]["data"]["model"] == "gpt-5.1-codex"
     assert posted[1]["data"]["cumulative_input_tokens"] == 2000
     assert posted[1]["data"]["cumulative_output_tokens"] == 600
+
+
+def test_usage_posts_carry_the_launch_epoch(tmp_path: Path) -> None:
+    """A forwarder's usage is stamped with the epoch the launch recorded."""
+    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+
+    _write_forwarder_bridge(tmp_path, active_turn_id="turn_123")
+    record_launch_epoch(tmp_path, 3)
+    posted: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        """
+        Replay one usage frame through a launch-stamped coalescer.
+
+        :returns: None.
+        """
+        async with _recording_forwarder_client(posted) as client:
+            usage_coalescer = codex_native_forwarder._launch_usage_coalescer(
+                client, "conv_123", tmp_path
+            )
+            delta_coalescer = codex_native_forwarder._OutputTextDeltaCoalescer(client, "conv_123")
+            elicitation_tracker = _elicitation_tracker()
+            await codex_native_forwarder._handle_event(
+                client,
+                session_id="conv_123",
+                bridge_dir=tmp_path,
+                event=_usage_event(100),
+                delta_coalescer=delta_coalescer,
+                usage_coalescer=usage_coalescer,
+                elicitation_tracker=elicitation_tracker,
+            )
+            await delta_coalescer.close()
+            await usage_coalescer.close()
+            await elicitation_tracker.close()
+
+    asyncio.run(run())
+
+    usage_posts = [post for post in posted if post["type"] == "external_session_usage"]
+    assert [post["data"]["context_epoch"] for post in usage_posts] == [3]

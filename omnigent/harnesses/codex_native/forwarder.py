@@ -2340,6 +2340,20 @@ def reset_codex_forward_state(bridge_dir: Path) -> None:
     clear_child_usage_baselines(bridge_dir)
 
 
+def _launch_usage_coalescer(
+    client: httpx.AsyncClient, session_id: str, bridge_dir: Path
+) -> _SessionUsageCoalescer:
+    """
+    Build a usage coalescer stamped with this launch's context epoch.
+
+    :param client: Omnigent server client.
+    :param session_id: Omnigent session the usage belongs to.
+    :param bridge_dir: Bridge directory the launch stamped.
+    :returns: The stamped coalescer.
+    """
+    return _SessionUsageCoalescer(client, session_id, context_epoch=read_launch_epoch(bridge_dir))
+
+
 async def supervise_forwarder(
     *,
     base_url: str,
@@ -2405,9 +2419,7 @@ async def supervise_forwarder(
             session_id=session_id,
             thread_id=thread_id,
             delta_coalescer=_OutputTextDeltaCoalescer(ap_client, session_id),
-            usage_coalescer=_SessionUsageCoalescer(
-                ap_client, session_id, context_epoch=read_launch_epoch(bridge_dir)
-            ),
+            usage_coalescer=_launch_usage_coalescer(ap_client, session_id, bridge_dir),
             elicitation_tracker=_CodexElicitationTaskTracker(),
         )
         forwarder_state = _CodexForwarderState(
@@ -2701,9 +2713,7 @@ async def _maybe_rotate_session_on_thread_started(
     target.session_id = new_session_id
     target.thread_id = new_thread_id
     target.delta_coalescer = _OutputTextDeltaCoalescer(ap_client, new_session_id)
-    target.usage_coalescer = _SessionUsageCoalescer(
-        ap_client, new_session_id, context_epoch=read_launch_epoch(bridge_dir)
-    )
+    target.usage_coalescer = _launch_usage_coalescer(ap_client, new_session_id, bridge_dir)
     target.elicitation_tracker = _CodexElicitationTaskTracker()
     await old_delta_coalescer.close()
     await old_usage_coalescer.close()
