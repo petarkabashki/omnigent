@@ -1561,6 +1561,7 @@ async def _codex_native_launch_config(
         "labels",
         "harness_override",
         "cost_control_mode_override",
+        "context_epoch",
     }
     # Older envelopes can omit fields that default to None during parsing.
     # Only explicit values, including nulls, replace the legacy config read.
@@ -1661,6 +1662,11 @@ async def _codex_native_launch_config(
         _bid = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
         if isinstance(_bid, str) and _bid:
             bridge_id = _bid
+    if snapshot.get("context_epoch"):
+        # A crash can leave fork labels behind a reset; a fork starts at epoch 0.
+        fork_source_id = None
+        fork_source_external_id = None
+        fork_carry_history = False
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(

@@ -8278,13 +8278,16 @@ def create_runner_app(
         ``prepare`` checks for buffered input and drops the caches; the server
         then writes the ``context_reset`` item and sends ``commit``, which drops
         history a turn cached meanwhile and releases the harness process. A
-        body without ``phase`` does both. A claude-native session also stops its
-        pane in ``prepare`` and relaunches it fresh in ``commit``; other native
-        terminal harnesses are refused.
+        body without ``phase`` does both. A claude-native or codex-native session also
+        stops its pane in ``prepare`` and relaunches it fresh in ``commit``; other
+        native terminal harnesses are refused.
         """
         fields = body if isinstance(body, dict) else {}
         harness = await _context_reset_harness_name(conversation_id, fields)
-        native_reset = _native_controls.claude_native_reset if harness == "claude-native" else None
+        native_reset = {
+            "claude-native": _native_controls.claude_native_reset,
+            "codex-native": _native_controls.codex_native_reset,
+        }.get(harness)
         if harness.endswith("-native") and native_reset is None:
             return JSONResponse(
                 status_code=409,

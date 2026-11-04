@@ -64,7 +64,7 @@ RESET_PREPARE_LOCK_WAIT_S = 10.0
 
 
 class ClaudeResetBusyError(Exception):
-    """A launch held the session's Claude ensure lock past the reset's wait."""
+    """A launch held the session's ensure lock past the reset's wait."""
 
 
 @dataclass
@@ -75,10 +75,11 @@ class _EnsureHold:
 
 @dataclass(frozen=True)
 class ClaudeNativeReset:
-    """The runner's two reset phases for a claude-native session.
+    """The runner's two reset phases for a native terminal session.
 
-    ``prepare`` takes the session's Claude ensure lock and keeps it until
-    ``commit``, so no launch in between resumes the old Claude session.
+    Claude and codex-native share these phases. ``prepare`` takes the session's
+    ensure lock and keeps it until ``commit``, so no launch in between resumes
+    the old vendor session.
 
     :param stop_pane: Closes the Claude pane and its transcript forwarder, so
         no late hook re-records the old Claude session id.
@@ -87,6 +88,8 @@ class ClaudeNativeReset:
     :param ensure_lock_for_session: Returns the lock every Claude launch takes.
     :param hold_s: Seconds after which an uncommitted ``prepare`` lets launches
         run again.
+    :param wipe: Removes the bridge's local resume and forward-cursor state.
+    :param runtime_label: Vendor name for the busy refusal, e.g. ``"Codex"``.
     """
 
     stop_pane: Callable[[str], Awaitable[None]]
@@ -94,6 +97,8 @@ class ClaudeNativeReset:
     relaunch: Callable[[str], Awaitable[None]]
     ensure_lock_for_session: Callable[[str], asyncio.Lock]
     hold_s: float = RESET_ENSURE_HOLD_S
+    wipe: Callable[[Path], None] = wipe_claude_resume_state
+    runtime_label: str = "Claude"
     _holds: dict[str, _EnsureHold] = field(default_factory=dict)
 
     async def prepare(self, session_id: str) -> None:
@@ -109,7 +114,7 @@ class ClaudeNativeReset:
                 await lock.acquire()
         except TimeoutError as exc:
             raise ClaudeResetBusyError(
-                "Claude is still starting. Try the reset again in a moment."
+                f"{self.runtime_label} is still starting. Try the reset again in a moment."
             ) from exc
         try:
             await self.stop_pane(session_id)
@@ -156,4 +161,4 @@ class ClaudeNativeReset:
 
     async def _wipe(self, session_id: str) -> None:
         bridge_dir = await self.bridge_dir_for_session(session_id)
-        await asyncio.to_thread(wipe_claude_resume_state, bridge_dir)
+        await asyncio.to_thread(self.wipe, bridge_dir)

@@ -43,7 +43,9 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     DeveloperInstructionsReadState,
     clear_active_turn_id_if_matches,
+    clear_bridge_state,
     clear_certificate_failure,
+    clear_child_usage_baselines,
     codex_config_revision,
     codex_home_for_bridge_dir,
     pending_mcp_servers,
@@ -2315,6 +2317,20 @@ async def _sleep(seconds: float) -> None:
     :returns: None after the sleep completes.
     """
     await asyncio.sleep(seconds)
+
+
+def reset_codex_forward_state(bridge_dir: Path) -> None:
+    """
+    Drop the forwarder's recovery cursor so a fresh launch re-ingests nothing.
+
+    Removes the bridge state (thread, active turn and pending shell command the
+    next subscribe would replay from) and the child-thread usage baselines.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: None.
+    """
+    clear_bridge_state(bridge_dir)
+    clear_child_usage_baselines(bridge_dir)
 
 
 async def supervise_forwarder(

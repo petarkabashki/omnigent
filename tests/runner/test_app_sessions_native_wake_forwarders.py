@@ -16,10 +16,16 @@ import pytest
 from omnigent.entities.session_resources import SessionResourceView
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.harnesses.codex_native import bridge as codex_native_bridge
+from omnigent.harnesses.codex_native import main as codex_native_main
 from omnigent.runner import app as runner_app_mod
 from omnigent.runner import subagent_work
 from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from omnigent.stores.conversation_store import (
+    FORK_CARRY_HISTORY_LABEL_KEY,
+    FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+    FORK_SOURCE_LABEL_KEY,
+)
 from tests.runner.helpers import NullServerClient
 
 
@@ -1659,7 +1665,7 @@ async def test_auto_create_codex_terminal_retries_refused_resume_on_same_thread(
 
 
 @pytest.mark.parametrize(
-    ("resume_error_payload", "expected_error_substring"),
+    ("resume_error_payload", "expected_error_substring", "after_reset"),
     [
         (
             {
@@ -1671,6 +1677,7 @@ async def test_auto_create_codex_terminal_retries_refused_resume_on_same_thread(
                 ),
             },
             "stream did not contain valid UTF-8",
+            False,
         ),
         (
             {
@@ -1682,6 +1689,7 @@ async def test_auto_create_codex_terminal_retries_refused_resume_on_same_thread(
                 ),
             },
             "source rollout is not paginated",
+            False,
         ),
         (
             {
@@ -1689,9 +1697,13 @@ async def test_auto_create_codex_terminal_retries_refused_resume_on_same_thread(
                 "message": "no rollout found for thread id 019e96aa-0be2-7343-8d3b-6f914d60936d",
             },
             "no rollout found",
+            False,
         ),
+        # A reset cleared the thread id and left fork labels behind; a resume
+        # error here would mean the launch still reached the resume branch.
+        ({"code": -32603, "message": "must not resume"}, "", True),
     ],
-    ids=["thread_store_error", "unpaginated_lineage", "missing_rollout"],
+    ids=["thread_store_error", "unpaginated_lineage", "missing_rollout", "after_reset"],
 )
 async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
     tmp_path: Path,
@@ -1699,6 +1711,7 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
     caplog: pytest.LogCaptureFixture,
     resume_error_payload: dict[str, Any],
     expected_error_substring: str,
+    after_reset: bool,
 ) -> None:
     """
     A thread codex cannot read falls back to a fresh thread on the same app-server.
@@ -1717,6 +1730,8 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
     :param resume_error_payload: JSON-RPC error dict codex returns for the resume.
     :param expected_error_substring: Substring from the error that must appear in
         the reset notice surfaced into the session.
+    :param after_reset: Launch after a context reset: no thread id, stale fork
+        labels, and no notice, resume, fork clone or item rebuild.
     """
     import omnigent.harnesses.codex_native.app_server as codex_app_mod
     import omnigent.runner.native.orchestration as orchestration_mod
@@ -1731,6 +1746,30 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
 
     posted: list[dict[str, Any]] = []
+    fetched: list[str] = []
+    transcript_copies: list[str] = []
+    developer_instructions: list[str | None] = []
+    snapshot: dict[str, Any] = {"external_session_id": thread_id}
+    if after_reset:
+        snapshot = {
+            "external_session_id": None,
+            "context_epoch": 1,
+            "labels": {
+                FORK_SOURCE_LABEL_KEY: "conv_source",
+                FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY: "source-thread",
+                FORK_CARRY_HISTORY_LABEL_KEY: "1",
+            },
+        }
+
+        # The launch swallows clone failures, so record calls rather than raise.
+        def _record_transcript_copy(*args: Any, **kwargs: Any) -> None:
+            transcript_copies.append("copied")
+            raise RuntimeError("must not be reached")
+
+        monkeypatch.setattr(codex_native_main, "_clone_codex_rollout", _record_transcript_copy)
+        monkeypatch.setattr(
+            codex_native_main, "_ensure_local_codex_resume_rollout", _record_transcript_copy
+        )
 
     class _SnapshotServerClient:
         """Server client whose snapshot carries a persisted resume thread."""
@@ -1744,17 +1783,14 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
             :returns: HTTP 200 response carrying launch config or items.
             """
             del kwargs
+            fetched.append(url)
             if url == f"/v1/sessions/{session_id}/items":
                 return httpx.Response(
                     200,
                     json={"data": [], "has_more": False},
                     request=httpx.Request("GET", url),
                 )
-            return httpx.Response(
-                200,
-                json={"external_session_id": thread_id},
-                request=httpx.Request("GET", url),
-            )
+            return httpx.Response(200, json=snapshot, request=httpx.Request("GET", url))
 
         async def post(self, url: str, **kwargs: Any) -> httpx.Response:
             """
@@ -1802,6 +1838,7 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
         """
         app_server = _FakeCodexAppServer()
         app_server.codex_home = kwargs["codex_home"]
+        developer_instructions.append(kwargs["developer_instructions"])
         return app_server
 
     connected: list[str] = []
@@ -1906,6 +1943,7 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
             type="omnigent",
             config={"harness": "codex-native", "model": "gpt-5-default"},
         ),
+        instructions="ROLE OVERLAY",
     )
 
     try:
@@ -1920,17 +1958,25 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
         await asyncio.sleep(0)
 
         assert closed == [], "the fallback must keep the app-server for the fresh thread"
-        assert [p["url"] for p in posted] == [f"/v1/sessions/{session_id}/events"], (
-            "the fallback must surface exactly one notice into the session"
-        )
-        notice = posted[0]["json"]
-        assert notice["type"] == "external_conversation_item"
-        assert notice["data"]["item_type"] == "error"
-        assert notice["data"]["item_data"]["code"] == "codex_thread_reset"
-        assert notice["data"]["item_data"]["level"] == "info"
-        # The body names codex as the source and quotes its own error text.
-        assert "Codex could not load" in notice["data"]["item_data"]["message"]
-        assert expected_error_substring in notice["data"]["item_data"]["message"]
+        if after_reset:
+            # The context_reset boundary item is the only marker of this restart.
+            assert posted == []
+            # The fresh launch carries the role text the resolved spec holds.
+            assert developer_instructions == ["ROLE OVERLAY"]
+            assert transcript_copies == []
+            assert f"/v1/sessions/{session_id}/items" not in fetched
+        else:
+            assert [p["url"] for p in posted] == [f"/v1/sessions/{session_id}/events"], (
+                "the fallback must surface exactly one notice into the session"
+            )
+            notice = posted[0]["json"]
+            assert notice["type"] == "external_conversation_item"
+            assert notice["data"]["item_type"] == "error"
+            assert notice["data"]["item_data"]["code"] == "codex_thread_reset"
+            assert notice["data"]["item_data"]["level"] == "info"
+            # The body names codex as the source and quotes its own error text.
+            assert "Codex could not load" in notice["data"]["item_data"]["message"]
+            assert expected_error_substring in notice["data"]["item_data"]["message"]
         assert connected == ["omnigent-codex-native-auto"], (
             "the fresh-thread path must connect the discovery listener"
         )
@@ -1940,11 +1986,16 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
         assert len(runs) == 1 and runs[0].cancelled is False, (
             "exactly one live discovery forwarder must mirror the fresh thread"
         )
-        assert any(
-            thread_id in record.getMessage() and "starting a fresh thread" in record.getMessage()
+        resume_warnings = [
+            record
             for record in caplog.records
             if record.levelno == logging.WARNING
-        ), "dropping the Codex-side context must leave a warning naming the thread"
+            and thread_id in record.getMessage()
+            and "starting a fresh thread" in record.getMessage()
+        ]
+        assert bool(resume_warnings) is not after_reset, (
+            "dropping the Codex-side context must leave a warning naming the thread"
+        )
     finally:
         runner_app_mod._AUTO_FORWARDER_TASKS.pop(session_id, None)
         runner_app_mod._AUTO_CODEX_APP_SERVERS.pop(session_id, None)

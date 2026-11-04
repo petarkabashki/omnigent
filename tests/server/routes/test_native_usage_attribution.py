@@ -886,3 +886,61 @@ def test_concurrent_flushes_cannot_lower_the_persisted_total(db_uri: str) -> Non
     store.get_conversation = real_get  # type: ignore[method-assign]
 
     assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(9.0)
+
+
+def test_codex_token_priced_total_survives_a_reset_and_grows_by_the_new_threads_turns(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex reports tokens only; a fresh thread restarts them but the total keeps growing.
+
+    The cost is the token-priced list-price estimate the badge already shows. The
+    codex forwarder does not stamp a context epoch on its reports.
+    """
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing_with_provider",
+        lambda model, **kwargs: {"stub": True},
+    )
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.compute_llm_cost",
+        lambda usage, pricing: float(usage.get("total_tokens", 0)) * 0.01,
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex-reset", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 1000,
+            "cumulative_output_tokens": 200,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(12.0)
+
+    store.append_context_reset(conv.id, response_id="reset_1")
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(12.0)
+
+    # The fresh thread's first turn adds only its own tokens.
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100,
+            "cumulative_output_tokens": 20,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(13.2)
+
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 150,
+            "cumulative_output_tokens": 30,
+            "model": "gpt-5.6",
+        },
+        store,
+    )
+    usage = _usage(store, conv.id)
+    assert usage["total_cost_usd"] == pytest.approx(13.8)
+    assert usage["by_model"]["gpt-5.6"]["total_cost_usd"] == pytest.approx(13.8)

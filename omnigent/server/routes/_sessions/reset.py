@@ -59,7 +59,7 @@ _STOP_POLL_S = 0.2
 RESET_FORWARD_TIMEOUT_S = 30.0
 
 #: Native harnesses whose runner relaunches the terminal on a fresh vendor session.
-IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native"})
+IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native", "codex-native"})
 #: Labels that make a native launch resume or rebuild the pre-reset transcript.
 _NATIVE_RESUME_LABEL_KEYS = (FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY, FORK_CARRY_HISTORY_LABEL_KEY)
 

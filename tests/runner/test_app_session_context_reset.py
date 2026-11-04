@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
+from omnigent.harnesses.codex_native import bridge as codex_native_bridge
 from omnigent.runner import app as runner_app
-from omnigent.runner.native import claude_reset
+from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import _build_app_for_spec, _runner_client
@@ -120,7 +121,7 @@ async def test_reset_on_native_session_is_refused() -> None:
     session_id = "6a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
     try:
         [(status, body)], _, _ = await _post_resets(
-            _harness_spec("codex-native"), session_id, [{"pending": "reject"}]
+            _harness_spec("pi-native"), session_id, [{"pending": "reject"}]
         )
 
         assert status == 409
@@ -130,32 +131,34 @@ async def test_reset_on_native_session_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("harness", ["claude-native", "codex-native"])
 @pytest.mark.parametrize(
-    ("create_session", "named_harness"),
+    ("create_session", "name_harness"),
     [
-        pytest.param(True, None, id="spec-cached"),
-        pytest.param(False, "claude-native", id="uncached-server-names-harness"),
-        pytest.param(False, None, id="uncached-spec-resolved"),
+        pytest.param(True, False, id="spec-cached"),
+        pytest.param(False, True, id="uncached-server-names-harness"),
+        pytest.param(False, False, id="uncached-spec-resolved"),
     ],
 )
 async def test_claude_native_reset_stops_then_relaunches_the_pane(
-    monkeypatch: pytest.MonkeyPatch, create_session: bool, named_harness: str | None
+    monkeypatch: pytest.MonkeyPatch, harness: str, create_session: bool, name_harness: bool
 ) -> None:
     session_id = "7a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
-    harness_field = {"harness": named_harness} if named_harness is not None else {}
-    phases: list[tuple[str, str]] = []
+    harness_field = {"harness": harness} if name_harness else {}
+    expected_label = {"claude-native": "Claude", "codex-native": "Codex"}[harness]
+    phases: list[tuple[str, str, str]] = []
 
     async def record_prepare(self: ClaudeNativeReset, sid: str) -> None:
-        phases.append(("prepare", sid))
+        phases.append(("prepare", sid, self.runtime_label))
 
     async def record_commit(self: ClaudeNativeReset, sid: str) -> None:
-        phases.append(("commit", sid))
+        phases.append(("commit", sid, self.runtime_label))
 
     monkeypatch.setattr(ClaudeNativeReset, "prepare", record_prepare)
     monkeypatch.setattr(ClaudeNativeReset, "commit", record_commit)
     try:
         responses, _, _ = await _post_resets(
-            _harness_spec("claude-native"),
+            _harness_spec(harness),
             session_id,
             [
                 {"phase": "prepare", "pending": "reject", **harness_field},
@@ -165,7 +168,11 @@ async def test_claude_native_reset_stops_then_relaunches_the_pane(
         )
 
         assert [status for status, _ in responses] == [200, 200]
-        assert phases == [("prepare", session_id), ("commit", session_id)]
+        # Each harness reaches its own reset, not the other's.
+        assert phases == [
+            ("prepare", session_id, expected_label),
+            ("commit", session_id, expected_label),
+        ]
     finally:
         runner_app._session_histories_ref.pop(session_id, None)
 
@@ -247,3 +254,46 @@ async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_not
             assert ensure_lock.locked()
         finally:
             forward.cancel()
+
+
+@pytest.mark.asyncio
+async def test_codex_native_reset_stops_the_backend_and_wipes_the_cursor_under_the_launch_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "9a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    bridge_dir = codex_native_bridge.prepare_bridge_dir(session_id)
+    codex_native_bridge.write_bridge_state(
+        bridge_dir,
+        codex_native_bridge.CodexNativeBridgeState(
+            session_id=session_id,
+            socket_path="ws://127.0.0.1:1",
+            thread_id="thread_old",
+            codex_home=str(bridge_dir / "codex-home"),
+            active_turn_id="turn_old",
+        ),
+    )
+    closed: list[str] = []
+
+    class _Backend:
+        async def close(self) -> None:
+            closed.append(session_id)
+
+    monkeypatch.setitem(orchestration._AUTO_CODEX_APP_SERVERS, session_id, _Backend())
+    monkeypatch.setitem(orchestration._AUTO_CODEX_BRIDGE_DIRS, session_id, bridge_dir)
+    app, _ = await _build_app_for_spec(
+        _harness_spec("codex-native"), server_client=_SnapshotServerClient()
+    )
+    ensure_locks = app.state.native_terminal_ensure_locks["codex"]
+    event = {"type": "reset", "harness": "codex-native"}
+
+    async with _runner_client(app) as client:
+        prepared = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={**event, "phase": "prepare", "pending": "reject"},
+        )
+
+        assert prepared.status_code == 200, prepared.text
+        assert closed == [session_id]
+        assert codex_native_bridge.read_bridge_state(bridge_dir) is None
+        assert ensure_locks[session_id].locked()

@@ -1317,6 +1317,20 @@ def record_child_usage_baseline(
         )
 
 
+def clear_child_usage_baselines(bridge_dir: Path) -> None:
+    """
+    Forget the usage baselines of child threads from earlier conversations.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: None.
+    """
+    with (
+        _bridge_state_lock(bridge_dir, _CHILD_USAGE_BASELINES_LOCK_FILE),
+        contextlib.suppress(FileNotFoundError),
+    ):
+        (bridge_dir / _CHILD_USAGE_BASELINES_FILE).unlink()
+
+
 def clear_bridge_startup_error(bridge_dir: Path) -> None:
     """
     Remove a recorded startup-failure message once startup has succeeded.

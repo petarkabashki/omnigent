@@ -5737,6 +5737,7 @@ async def test_create_session_codex_envelope_avoids_reads_and_overlaps_recovery(
                             "terminal_launch_args": ["--config", "approval_policy=on-request"],
                             "harness_override": "codex-native",
                             "cost_control_mode_override": None,
+                            "context_epoch": 0,
                         },
                     },
                 },

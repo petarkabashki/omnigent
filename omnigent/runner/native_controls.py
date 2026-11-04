@@ -46,6 +46,7 @@ from omnigent.runner.native import (
     _opencode_model_ref,
 )
 from omnigent.runner.native.claude_reset import ClaudeNativeReset, claude_launch_bridge_id
+from omnigent.runner.native.codex_reset import wipe_codex_resume_state
 from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE, SessionResourceRegistry
 from omnigent.spec.types import AgentSpec
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -296,6 +297,7 @@ class NativeControls:
     """Native-harness control handlers the runner app's event dispatch calls."""
 
     claude_native_reset: ClaudeNativeReset
+    codex_native_reset: ClaudeNativeReset
     codex_native_model_options: Callable[[str], Coroutine[Any, Any, list[_JsonObject]]]
     handle_claude_native_btw_dismiss: Callable[[str], Coroutine[Any, Any, Response]]
     handle_claude_native_clear: Callable[[str], Coroutine[Any, Any, Response]]
@@ -1894,6 +1896,39 @@ def build_native_controls(
     async def _relaunch_claude_native_pane(conv_id: str) -> None:
         await _ensure_native_terminal_for_turn(conv_id, "claude-native")
 
+    async def _stop_codex_native_pane(conv_id: str) -> None:
+        from omnigent.entities.session_resources import terminal_resource_id
+        from omnigent.runner.native import teardown_codex_native_app_server
+        from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
+
+        # The caller holds the session's Codex ensure lock.
+        terminal_id = terminal_resource_id("codex", "main")
+        existing = None
+        try:
+            existing = await resource_registry.get_terminal_resource(conv_id, terminal_id)
+            if existing is not None:
+                await resource_registry.close_terminal(conv_id, terminal_id)
+        finally:
+            # Stops the forwarder and the app-server that owns the old thread.
+            await teardown_codex_native_app_server(conv_id)
+            await _cancel_auto_forwarder_task(conv_id)
+        if existing is not None:
+            _publish_terminal_deleted_event(
+                conversation_id=conv_id,
+                terminal_name="codex",
+                session_key="main",
+                publish_event=_publish_event,
+            )
+
+    async def _codex_native_reset_bridge_dir(conv_id: str) -> Path:
+        _, bridge_dir = await _codex_native_bridge_state_and_dir_for_session(
+            conv_id, action="reset", missing_state_log_level=logging.DEBUG
+        )
+        return bridge_dir
+
+    async def _relaunch_codex_native_pane(conv_id: str) -> None:
+        await _ensure_native_terminal_for_turn(conv_id, "codex-native")
+
     async def _inject_codex_native_slash(conv_id: str, *, command: str, action: str) -> Response:
         registry = resource_registry.terminal_registry
         instance = registry.get(conv_id, "codex", "main") if registry is not None else None
@@ -2522,6 +2557,16 @@ def build_native_controls(
             ensure_lock_for_session=lambda conv_id: _claude_terminal_ensure_locks.setdefault(
                 conv_id, asyncio.Lock()
             ),
+        ),
+        codex_native_reset=ClaudeNativeReset(
+            stop_pane=_stop_codex_native_pane,
+            bridge_dir_for_session=_codex_native_reset_bridge_dir,
+            relaunch=_relaunch_codex_native_pane,
+            ensure_lock_for_session=lambda conv_id: _codex_terminal_ensure_locks.setdefault(
+                conv_id, asyncio.Lock()
+            ),
+            wipe=wipe_codex_resume_state,
+            runtime_label="Codex",
         ),
         codex_native_model_options=_codex_native_model_options,
         handle_claude_native_btw_dismiss=_handle_claude_native_btw_dismiss,
