@@ -1286,7 +1286,10 @@ class OpenCodeNativeForwarder:
         if event.data.get("reason") != "user":
             await self._post_event(
                 _EXTERNAL_SESSION_INTERRUPTED,
-                {"response_id": self._response_id(turn, turn.assistant_message_id)},
+                {
+                    "response_id": self._response_id(turn, turn.assistant_message_id),
+                    "origin": "system",
+                },
                 conversation_id=turn.conversation_id,
             )
         await self._end_turn(turn)

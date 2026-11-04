@@ -15,12 +15,14 @@ from omnigent.server import routing_outcomes as ro
 from omnigent.server import shadow_routing as sr
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
 from omnigent.server.routes.sessions import routes_events as _status_cache_module
+from omnigent.server.routes.sessions.routes_hooks import _interrupt_after_decline
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _EVENTS = "omnigent.server.routes.sessions.routes_events"
 _ROUTES_CORE = "omnigent.server.routes.sessions.routes_core"
+_HOOKS = "omnigent.server.routes.sessions.routes_hooks"
 _STATUS_CACHE = _status_cache_module._session_status_cache
 
 
@@ -82,6 +84,7 @@ async def test_stop_records_ended(client: httpx.AsyncClient, routed_session: str
 async def test_interrupt_is_an_override_only_when_it_lands(
     client: httpx.AsyncClient, routed_session: str, delivered: bool
 ) -> None:
+    _STATUS_CACHE[routed_session] = "running"
     runner = SimpleNamespace(
         post=AsyncMock(return_value=SimpleNamespace(status_code=204 if delivered else 500))
     )
@@ -96,9 +99,68 @@ async def test_interrupt_is_an_override_only_when_it_lands(
     )
 
 
+@pytest.mark.parametrize("status", ["idle", None])
+async def test_interrupt_with_no_active_turn_is_not_an_override(
+    client: httpx.AsyncClient, routed_session: str, status: str | None
+) -> None:
+    if status is not None:
+        _STATUS_CACHE[routed_session] = status
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        resp = await client.post(
+            f"/v1/sessions/{routed_session}/events", json={"type": "interrupt"}
+        )
+    assert resp.status_code == 202
+    assert runner.post.await_count == 1  # delivered, so only the idle status held it back
+    assert _events("override") == []
+
+
+@pytest.mark.parametrize(
+    ("data", "actor"),
+    [({}, "unknown"), ({"response_id": "r1"}, "unknown"), ({"origin": "system"}, "system")],
+)
+async def test_pane_interrupt_records_who_is_known(
+    client: httpx.AsyncClient, routed_session: str, data: dict[str, str], actor: str
+) -> None:
+    resp = await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "external_session_interrupted", "data": data},
+    )
+    assert resp.status_code == 202
+    assert [(o["kind"], o["actor"]) for o in _events("override")] == [("interrupt", actor)]
+
+
+async def test_harness_echo_of_a_route_interrupt_is_not_a_second_override(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    _STATUS_CACHE[routed_session] = "running"
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        await client.post(f"/v1/sessions/{routed_session}/events", json={"type": "interrupt"})
+    await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "external_session_interrupted", "data": {}},
+    )
+    assert [o["actor"] for o in _events("override")] == ["owner"]
+
+
+async def test_declined_approval_interrupt_is_recorded_with_an_unknown_actor(
+    routed_session: str,
+) -> None:
+    forward = AsyncMock()
+    with (
+        patch(f"{_HOOKS}._forward_session_change_to_runner", forward),
+        patch(f"{_HOOKS}.get_server_runner_router"),
+    ):
+        await _interrupt_after_decline(routed_session)
+    assert forward.await_args.args[2] == {"type": "interrupt"}
+    assert [(o["kind"], o["actor"]) for o in _events("override")] == [("interrupt", "unknown")]
+
+
 async def test_runner_originated_interrupt_is_not_an_owner_override(
     client: httpx.AsyncClient, routed_session: str
 ) -> None:
+    _STATUS_CACHE[routed_session] = "running"
     runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
     with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
         for origin in ("agent", "system"):
@@ -278,6 +340,7 @@ async def test_accept_by_a_user_without_a_grant_records_nothing(
 async def test_interrupt_actor_follows_resolved_access(
     auth_client: httpx.AsyncClient, routed_session: str, db_uri: str, level: int, actor: str
 ) -> None:
+    _STATUS_CACHE[routed_session] = "running"
     headers = _grant(db_uri, "caller", routed_session, level)
     runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
     with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
@@ -306,6 +369,7 @@ async def test_patch_model_by_a_collaborator_is_not_an_owner_override(
 async def test_admin_interrupt_counts_as_owner(
     auth_client: httpx.AsyncClient, routed_session: str, db_uri: str
 ) -> None:
+    _STATUS_CACHE[routed_session] = "running"
     store = SqlAlchemyPermissionStore(db_uri)
     store.ensure_user("admin@example.com")
     store.set_admin("admin@example.com", True)

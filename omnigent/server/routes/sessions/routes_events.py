@@ -250,6 +250,7 @@ from omnigent.server.routes._sessions.helpers import (
     require_filesystem_attachment_runtime,
 )
 from omnigent.server.routes._sessions.orchestration import (
+    _MID_TURN_STATUSES,
     _best_effort_stop,
     _cancel_runner_relays,
     _child_session_summaries_from_conversations,
@@ -291,7 +292,12 @@ from omnigent.server.routes._sessions.reset import (
     is_reset_in_flight,
     run_context_reset,
 )
-from omnigent.server.routing_outcomes import record_ended, record_override, record_rotation
+from omnigent.server.routing_outcomes import (
+    ACTOR_UNKNOWN,
+    record_ended,
+    record_override,
+    record_rotation,
+)
 from omnigent.server.scheduled.telemetry import start_fire_stage
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
@@ -1140,7 +1146,7 @@ def register_events_routes(
     async def _record_interrupt_override(
         user_id: str | None, session_id: str, data: dict[str, Any]
     ) -> None:
-        """Record a delivered interrupt as an override; never raises.
+        """Record an interrupt that stopped a turn as an override; never raises.
 
         ``data.origin`` names a non-human sender: ``agent`` (a runner tool),
         ``system`` (timeout or watchdog), or ``reset`` (the reset's own
@@ -1888,6 +1894,7 @@ def register_events_routes(
             codex_child = conv.kind == "sub_agent" and _is_codex_native_subagent(conv)
             response_id = None
             queued_pending_ids: list[str] = []
+            turn_active = False
             if codex_child:
                 # Native child boundaries come from the Codex forwarder.
                 child_thread_id = (conv.labels or {}).get(
@@ -1927,6 +1934,10 @@ def register_events_routes(
                     codex_side_turn_id=response_id.removeprefix("codex_"),
                 )
             else:
+                # Read before publishing, which settles the status.
+                turn_active = (
+                    _session_status_cache.get(session_id, conv.live_status) in _MID_TURN_STATUSES
+                )
                 _publish_interrupted(session_id)
                 # Fence the cancelled turn (see _interrupt_fenced_sessions).
                 _interrupt_fenced_sessions.add(session_id)
@@ -1963,7 +1974,8 @@ def register_events_routes(
                 _interrupt_fenced_sessions.discard(session_id)
             elif not codex_child:
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
-                await _record_interrupt_override(user_id, session_id, body.data)
+                if turn_active:
+                    await _record_interrupt_override(user_id, session_id, body.data)
             if stop_codex_side_chat:
                 await asyncio.to_thread(
                     conversation_store.set_labels,
@@ -2390,6 +2402,11 @@ def register_events_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             _publish_interrupted(session_id, response_id=response_id)
+            # A fenced session is the harness echoing an interrupt the route recorded.
+            if session_id not in _interrupt_fenced_sessions:
+                origin = body.data.get("origin")
+                actor = origin if origin in ("agent", "system") else ACTOR_UNKNOWN
+                await asyncio.to_thread(record_override, session_id, "interrupt", actor)
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_SUPERSEDED_TYPE:
             target_conversation_id = body.data.get("target_conversation_id")
