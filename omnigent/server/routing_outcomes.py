@@ -370,6 +370,12 @@ def _is_credits(usage: Mapping[str, Any] | None) -> bool:  # type: ignore[explic
     return (usage or {}).get(COST_UNIT_KEY) == COST_UNIT_CREDITS
 
 
+def _native_complete(usage: Mapping[str, Any], native: bool | None) -> bool | None:  # type: ignore[explicit-any]  # JSON fields
+    """The reporter's own completeness flag; null when it sent none or off the native path."""
+    value = usage.get(NATIVE_COST_COMPLETE)
+    return value if native and isinstance(value, bool) else None
+
+
 def _usage_fields(
     usage: Mapping[str, Any] | None,  # type: ignore[explicit-any]  # JSON fields
     *,
@@ -386,8 +392,7 @@ def _usage_fields(
         USD_POLICY: None if credits else usage.get("policy_cost_usd"),
         CREDITS_TOTAL: _total(usage) if credits else None,
         COST_SOURCE: COST_UNIT_CREDITS if credits else cost_source,
-        # True/false only on the native path; null elsewhere, never false.
-        NATIVE_COST_COMPLETE: (usage.get(NATIVE_COST_COMPLETE) is True) if native else None,
+        NATIVE_COST_COMPLETE: _native_complete(usage, native),
         "session_usage": {
             key: usage[key] for key in _SNAPSHOT_KEYS if key in usage and key not in hidden
         },
@@ -533,8 +538,9 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
     Cumulative fields take the max per session, then sum across the sessions a
     decision spans (a ``/clear`` rotation adds one). ``sessions`` holds the
     per-session figures. ``usd_total`` is null when no session was priced.
-    ``native_cost_complete`` is null off the native path, else true only when
-    every native session was complete. ``check`` and ``check_declared`` keep
+    ``native_cost_complete`` is false when any session was incomplete, true
+    when every session reported complete, and null otherwise: null means
+    unknown or not applicable. ``check`` and ``check_declared`` keep
     the latest by ``at``. ``overrides`` lists every override record.
     ``success_excluded`` is true when an override's actor is unknown and no
     owner override settles the step: leave it out of success scoring.
@@ -603,7 +609,7 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
     for decision_id, sessions in per_session.items():
         summary = summaries[decision_id]
         sources: set[str] = set()
-        native: list[bool] = []
+        native: list[bool | None] = []
         for session_id, entry in sessions.items():
             # A session whose last native report was incomplete stays incomplete.
             session_native = all(entry["native"]) if entry["native"] else None
@@ -615,13 +621,15 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
                 NATIVE_COST_COMPLETE: session_native,
             }
             sources |= entry["sources"]
-            if session_native is not None:
-                native.append(session_native)
+            native.append(session_native)
         summary[USD_TOTAL] = _sum_known([entry[USD_TOTAL] for entry in sessions.values()])
         summary[USD_POLICY] = _sum_known([entry[USD_POLICY] for entry in sessions.values()])
         summary[CREDITS_TOTAL] = _sum_known([entry[CREDITS_TOTAL] for entry in sessions.values()])
         summary[COST_SOURCE] = _combine_session_sources(sources)
-        summary[NATIVE_COST_COMPLETE] = all(native) if native else None
+        if False in native:
+            summary[NATIVE_COST_COMPLETE] = False
+        else:
+            summary[NATIVE_COST_COMPLETE] = None if None in native else True
     for summary in summaries.values():
         actors = {override.get("actor") for override in summary["overrides"]}
         summary["success_excluded"] = ACTOR_UNKNOWN in actors and "owner" not in actors

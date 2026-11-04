@@ -193,7 +193,8 @@ def test_cost_source_and_native_completeness(data_dir: Path) -> None:
     ro.record_ended(
         "s2", {"total_cost_usd": 1.0, "native_cost_complete": True}, reason="stop", native=True
     )
-    assert [r["native_cost_complete"] for r in _lines("cost")][-1] is False
+    # The reporter said nothing about completeness, so it reads as unknown.
+    assert [r["native_cost_complete"] for r in _lines("cost")][-1] is None
     assert _lines("ended")[-1]["native_cost_complete"] is True
     summary = ro.summarize_outcomes()
     assert (
@@ -329,8 +330,31 @@ def test_native_report_snapshot_carries_completeness(data_dir: Path, db_uri: str
     cost = _lines("cost")
     assert [(r["cost_source"], r["native_cost_complete"]) for r in cost] == [
         ("harness", True),
-        ("harness", False),
+        ("harness", None),
     ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (True, True, True),
+        (True, None, None),
+        (None, None, None),
+        (False, None, False),
+        (True, False, False),
+    ],
+)
+def test_summary_keeps_unknown_completeness_apart_from_false(
+    data_dir: Path, first: bool | None, second: bool | None, expected: bool | None
+) -> None:
+    _log_decision("s1", "d1")
+    ro.record_rotation("s1", "s2")
+    for session, complete in (("s1", first), ("s2", second)):
+        usage = {"total_cost_usd": 1.0}
+        if complete is not None:
+            usage["native_cost_complete"] = complete
+        ro.record_cost(session, usage, source="harness", native=True)
+    assert ro.summarize_outcomes()["d1"]["native_cost_complete"] is expected
 
 
 @pytest.mark.parametrize(
