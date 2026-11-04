@@ -58,6 +58,7 @@ from omnigent.runner.native import (
     _is_runner_owned_codex_terminal,
     _log_terminal_lookup_miss,
     _publish_tmux_target_for_bridge,
+    _read_claude_launch_spec,
     _resolved_spec_workdir,
     _unwrap_resolved_spec,
 )
@@ -429,7 +430,7 @@ def register_resource_routes(
                     # Resolve the entry, not just the spec: a sub-agent session
                     # must launch against its own bundle dir so --plugin-dir
                     # carries its skills rather than the parent's.
-                    claude_entry = await _resolve_session_spec_entry(session_id)
+                    claude_entry = await _read_claude_launch_spec(ctx, _resolve_session_spec_entry)
                     claude_agent_spec = _unwrap_resolved_spec(claude_entry)
                     return dataclasses.replace(
                         ctx,

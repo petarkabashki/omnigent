@@ -23,6 +23,7 @@ import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 import pytest
@@ -1221,6 +1222,66 @@ async def test_redrive_launches_once_when_the_server_answers(quick_redrive: None
 
     assert harness.ensures == [("conv_abc", "claude-native")]
     assert harness.events == []
+
+
+async def test_redrive_logs_each_launch_it_starts_with_its_attempt_number(
+    quick_redrive: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=True, refused_launches=1
+    )
+
+    with caplog.at_level("INFO", logger=orchestration._logger.name):
+        await _redrive_refused_claude_launch(harness.ctx)
+
+    assert [r.getMessage() for r in caplog.records if "Re-driving" in r.message] == [
+        "Re-driving refused Claude launch: session=conv_abc attempt=1",
+        "Re-driving refused Claude launch: session=conv_abc attempt=2",
+    ]
+
+
+async def _never_answers(*_args: object) -> None:
+    await asyncio.Event().wait()
+
+
+async def test_spec_read_that_never_answers_refuses_and_schedules_the_redrive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(orchestration, "_LAUNCH_SPEC_READ_DEADLINE_S", 0.01)
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        orchestration,
+        "_schedule_claude_launch_redrive",
+        lambda ctx, first_wait_s=None: scheduled.append(ctx.session_id),
+    )
+    harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=False)
+
+    with pytest.raises(_ClaudeLaunchRefusedError):
+        await orchestration._read_claude_launch_spec(harness.ctx, _never_answers)
+
+    assert scheduled == ["conv_abc"]
+
+
+async def test_launch_config_read_that_never_answers_refuses_instead_of_falling_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(orchestration, "_LAUNCH_SPEC_READ_DEADLINE_S", 0.01)
+    session_id = "conv_config_hang"
+    registry = MagicMock()
+    registry.launch_required_terminal = AsyncMock()
+
+    with pytest.raises(_ClaudeLaunchRefusedError):
+        await orchestration._auto_create_claude_terminal(
+            session_id,
+            registry,
+            Mock(),
+            server_client=AsyncMock(spec=httpx.AsyncClient),
+            session_init=_claude_auto_create_session_init(session_id, tmp_path),
+            auth_token_factory=lambda: None,
+            resolve_launch_config=_never_answers,
+        )
+
+    registry.launch_required_terminal.assert_not_called()
 
 
 async def test_redrive_stops_at_its_launch_bound_when_launches_keep_failing(

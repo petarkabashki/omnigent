@@ -1906,6 +1906,78 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
     assert [ctx.session_status(session_id) for ctx in launch_contexts] == ["failed", "failed"]
 
 
+class _AgentSnapshotServerClient(NullServerClient):
+    """Answers the session read with an agent id, so a spec read reaches the resolver."""
+
+    async def get(self, url: str, **kwargs: Any) -> Any:
+        response = await super().get(url, **kwargs)
+        response.json = lambda: {"agent_id": "9a3f0c1e7b2d4e6f8a0b1c2d3e4f5a6b"}
+        return response
+
+
+@pytest.mark.asyncio
+async def test_spec_read_that_never_answers_blocks_the_claude_launch_on_both_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestration = "omnigent.runner.native.orchestration"
+    monkeypatch.setattr(f"{orchestration}._LAUNCH_SPEC_READ_DEADLINE_S", 0.01)
+    monkeypatch.setattr(
+        f"{orchestration}._schedule_claude_launch_redrive", lambda ctx, first_wait_s=None: None
+    )
+    launches: list[str] = []
+
+    async def _fake_launch(ctx: Any) -> SessionResourceView:
+        launches.append(ctx.session_id)
+        raise AssertionError("launched without the session's spec")
+
+    native_spec = AgentSpec(
+        spec_version=1,
+        name="claude_code",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+    )
+    read_hangs = False
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        if read_hangs:
+            await asyncio.Event().wait()
+        return native_spec
+
+    monkeypatch.setattr("omnigent.runner.native._launch_claude", _fake_launch)
+    session_id = "b3d4e5f6a7c84d9e8f0a1b2c3d4e5f60"
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=_AgentSnapshotServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    spec_cache = app.state.session_spec_cache
+
+    async def _spec_evicted_before_the_build(**_kwargs: Any) -> bool:
+        nonlocal read_hangs
+        read_hangs = True
+        spec_cache.pop(session_id, None)
+        return False
+
+    monkeypatch.setattr(
+        "omnigent.runner.app._claude_native_terminal_arrives_via_transfer",
+        _spec_evicted_before_the_build,
+    )
+    async with _runner_client(app) as client:
+        await client.post(
+            "/v1/sessions",
+            json={"session_id": session_id, "agent_id": "9a3f0c1e7b2d4e6f8a0b1c2d3e4f5a6b"},
+        )
+        assert read_hangs, "the session-create launch never reached its spec read"
+        ensured = await client.post(
+            f"/v1/sessions/{session_id}/resources/terminals",
+            json={"terminal": "claude", "session_key": "main", "ensure_native_terminal": True},
+        )
+
+    assert ensured.status_code >= 400
+    assert launches == []
+
+
 @pytest.mark.asyncio
 async def test_runner_delete_session_cancels_a_refused_launch_redrive() -> None:
     session_id = "7d1c0a2e9b3f4c5d8e6f1a2b3c4d5e6f"

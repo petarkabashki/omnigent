@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.runner import app as runner_app
+from omnigent.runner.native import claude_reset
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from tests.runner.conftest import _build_app_for_spec, _runner_client
@@ -202,3 +204,42 @@ async def test_claude_native_reset_holds_launches_and_drops_the_init_snapshot(
 
     assert session_id not in envelopes
     assert not ensure_locks[session_id].locked()
+
+
+async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_nothing_late(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    session_id = "2f7b1c9e4a6d4e0f9b3c8d1a5e7f6c20"
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(claude_reset, "RESET_PREPARE_LOCK_WAIT_S", 0.05)
+    forward_timeout_s = 0.5
+    app, _ = await _build_app_for_spec(
+        _harness_spec("claude-native"), server_client=_SnapshotServerClient()
+    )
+    ensure_lock = app.state.native_terminal_ensure_locks["claude"].setdefault(
+        session_id, asyncio.Lock()
+    )
+    url = f"/v1/sessions/{session_id}/events"
+    prepare = {"type": "reset", "harness": "claude-native", "phase": "prepare"}
+
+    await ensure_lock.acquire()
+    async with _runner_client(app) as client:
+        forward = asyncio.create_task(client.post(url, json=prepare))
+        try:
+            answered, _ = await asyncio.wait({forward}, timeout=forward_timeout_s)
+            assert answered, "the reset was still queued when the server's forward gave up"
+            refused = forward.result()
+            assert refused.status_code == 409
+            assert refused.json()["error"] == "reset_in_progress"
+
+            # The launch ends after the server gave up: nothing takes the lock late.
+            ensure_lock.release()
+            await asyncio.sleep(0.02)  # custom-lint: disable=sleep-then-assert -- negative check
+            assert not ensure_lock.locked()
+
+            pressed_again = await client.post(url, json=prepare)
+            assert pressed_again.status_code == 200, pressed_again.text
+            assert ensure_lock.locked()
+        finally:
+            forward.cancel()

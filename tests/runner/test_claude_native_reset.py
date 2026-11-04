@@ -10,12 +10,15 @@ import pytest
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import (
     ClaudeNativeReset,
+    ClaudeResetBusyError,
     claude_launch_bridge_id,
     local_resume_hint_epoch,
     wipe_claude_resume_state,
 )
+from omnigent.server.routes._sessions.reset import RESET_FORWARD_TIMEOUT_S
 
 
 @pytest.mark.parametrize(
@@ -170,6 +173,33 @@ async def test_repeated_prepare_replaces_the_previous_hold(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_prepare_refuses_a_launch_that_outlasts_its_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(claude_reset, "RESET_PREPARE_LOCK_WAIT_S", 0.01)
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls)
+    await ensure_lock.acquire()
+
+    with pytest.raises(ClaudeResetBusyError):
+        await reset.prepare("conv_abc")
+
+    ensure_lock.release()
+    await asyncio.sleep(0)
+    assert calls == []
+    assert not ensure_lock.locked()
+
+
+def test_prepare_fits_inside_the_servers_forward_budget() -> None:
+    # Lock wait, then the transcript forwarder's cancel, then the bridge label read.
+    assert (
+        claude_reset.RESET_PREPARE_LOCK_WAIT_S
+        + orchestration._AUTO_FORWARDER_CANCEL_TIMEOUT_S
+        + orchestration._SESSION_LABEL_LOOKUP_TIMEOUT_SECONDS
+        < RESET_FORWARD_TIMEOUT_S
+    )
+
+
 async def test_commit_without_prepare_stops_a_live_pane_before_relaunch(tmp_path: Path) -> None:
     calls: list[str] = []
     reset, ensure_lock = _recording_reset(tmp_path, calls)

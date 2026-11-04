@@ -131,6 +131,7 @@ from omnigent.runner.native import (
     _claude_native_bridge_id_with_optional_labels,
     _claude_native_session_wants_rebuild,
     _claude_native_terminal_arrives_via_transfer,
+    _ClaudeLaunchRefusedError,
     _codex_native_terminal_arrives_via_transfer,
     _codex_session_needs_runner_terminal,
     _delete_native_bridge_dirs,
@@ -139,6 +140,7 @@ from omnigent.runner.native import (
     _is_spec_local_native_python_tool,
     _launch_native_terminal,
     _publish_terminal_pending,
+    _read_claude_launch_spec,
     _required_runner_env,
     _resolve_native_spawn_env,
     _resolved_spec_workdir,
@@ -149,6 +151,7 @@ from omnigent.runner.native import (
     _unwrap_resolved_spec,
 )
 from omnigent.runner.native import orchestration as _native_runtime
+from omnigent.runner.native.claude_reset import ClaudeResetBusyError
 from omnigent.runner.native.interrupt import NativeInterruptRunner
 from omnigent.runner.native_controls import build_native_controls
 from omnigent.runner.policy_proxy import _evaluate_policy_via_omnigent
@@ -1530,6 +1533,7 @@ def create_runner_app(
         }
     )
     app.state.native_terminal_ensure_locks = _native_terminal_ensure_locks
+    app.state.session_spec_cache = _session_spec_cache
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
     app.state.active_turns = _active_turns
@@ -3047,7 +3051,10 @@ def create_runner_app(
                     agent_name: str | None = None
                     skills_filter: str | list[str] = "all"
                     try:
-                        spec = await _resolve_session_agent_spec(session_id)
+                        spec = await _read_claude_launch_spec(ctx, _resolve_session_agent_spec)
+                    except _ClaudeLaunchRefusedError:
+                        # A read that never answered proves nothing about the session.
+                        raise
                     except OmnigentError:
                         spec = None
                         _logger.info(
@@ -8314,7 +8321,13 @@ def create_runner_app(
             _session_message_buffers.pop(conversation_id, None)
             _drop_session_context_caches(conversation_id)
             if native_reset is not None:
-                await native_reset.prepare(conversation_id)
+                try:
+                    await native_reset.prepare(conversation_id)
+                except ClaudeResetBusyError as exc:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"error": "reset_in_progress", "detail": str(exc)},
+                    )
             if phase != "prepare":
                 await _invalidate_session_agent_state(conversation_id)
                 if native_reset is not None:

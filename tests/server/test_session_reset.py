@@ -241,6 +241,14 @@ async def test_failed_commit_keeps_the_persisted_boundary() -> None:
             {},
             ErrorCode.PENDING_INPUTS,
         ),
+        (
+            _Harness(
+                native_harness="claude-native",
+                runner_results=[_Forwarded(409, '{"error": "reset_in_progress"}')],
+            ),
+            {},
+            ErrorCode.RESET_IN_PROGRESS,
+        ),
         (_Harness(runner_results=[None], host_id="host_1"), {}, ErrorCode.RUNNER_UNAVAILABLE),
         (_Harness(), {"summary": "auto"}, ErrorCode.INVALID_INPUT),
         (_Harness(), {"pending": "carry"}, ErrorCode.INVALID_INPUT),

@@ -1055,6 +1055,8 @@ _LAUNCH_SESSION_READ_RETRYABLE_STATUS = frozenset(range(500, 600))
 _LAUNCH_SESSION_READ_ATTEMPTS = 2
 #: Two reads plus the longest retry wait; httpx timeouts are per phase, not total.
 _LAUNCH_SESSION_READ_DEADLINE_S = 50.0
+#: Deadline for the spec and launch-config reads taken under the launch lock.
+_LAUNCH_SPEC_READ_DEADLINE_S = 30.0
 #: A refused launch is re-driven for this long, enough to outlast a server restart.
 _LAUNCH_REDRIVE_WINDOW_S = 900.0
 _LAUNCH_REDRIVE_BASE_DELAY_S = 5.0
@@ -1187,6 +1189,47 @@ def _claude_launch_refused(
     return _ClaudeLaunchRefusedError(
         refusal.message, redrivable=refusal.redrivable, retry_after_s=retry_after_s
     )
+
+
+async def _bounded_claude_launch_read[ReadResult](
+    session_id: str, read: Callable[[], Awaitable[ReadResult]], *, what: str
+) -> ReadResult:
+    """Run a server read under the launch lock, refusing the launch if it never answers.
+
+    :param session_id: Omnigent session id, e.g. ``"conv_abc"``.
+    :param read: The read; its server client has no read timeout.
+    :param what: Names the read in the refusal log, e.g. ``"spec read"``.
+    :returns: The read's result.
+    :raises _ClaudeLaunchRefusedError: The read outlasted the deadline.
+    """
+    try:
+        async with asyncio.timeout(_LAUNCH_SPEC_READ_DEADLINE_S):
+            return await read()
+    except TimeoutError as exc:
+        raise _claude_launch_refused(
+            session_id,
+            _ClaudeReadRefusal(_CLAUDE_LAUNCH_REFUSED_MESSAGE, redrivable=True),
+            reason=f"{what} exceeded {_LAUNCH_SPEC_READ_DEADLINE_S}s",
+        ) from exc
+
+
+async def _read_claude_launch_spec[ReadResult](
+    ctx: NativeLaunchContext, read: Callable[[str], Awaitable[ReadResult]]
+) -> ReadResult:
+    """Resolve a session's spec for a launch, within the launch read deadline.
+
+    :param ctx: The launch context, which schedules the refusal's re-drive.
+    :param read: Resolves the spec for a session id.
+    :returns: The resolved spec.
+    :raises _ClaudeLaunchRefusedError: The read outlasted the deadline.
+    """
+    try:
+        return await _bounded_claude_launch_read(
+            ctx.session_id, lambda: read(ctx.session_id), what="spec read"
+        )
+    except _ClaudeLaunchRefusedError as exc:
+        _note_claude_launch_refusal(ctx, exc)
+        raise
 
 
 async def _launch_config_retry_sleep(delay: float) -> None:
@@ -9403,6 +9446,7 @@ async def _auto_create_claude_terminal(
                 f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
                 json={"labels": {BRIDGE_ID_LABEL_KEY: bridge_id}},
                 params={"include_usage": "false"},
+                timeout=10.0,
             )
         except httpx.HTTPError:
             _logger.debug(
@@ -9725,12 +9769,15 @@ async def _auto_create_claude_terminal(
     claude_binding = binding_for_harness(inference_config, "claude-native")
     try:
         if resolve_launch_config is not None:
-            claude_config = await resolve_launch_config()
+            claude_config = await _bounded_claude_launch_read(
+                session_id, resolve_launch_config, what="launch config read"
+            )
         else:
             claude_config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-    except click.ClickException:
+    except (click.ClickException, _ClaudeLaunchRefusedError):
         # An authoritative Databricks response with no Claude models is a
-        # configuration failure, not permission to bypass the gateway.
+        # configuration failure, not permission to bypass the gateway; neither
+        # is a read that never answered.
         raise
     except Exception:
         if claude_binding is not None:
@@ -10399,6 +10446,7 @@ async def _auto_create_repl_terminal(
             f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
             json={"labels": {UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE}},
             params={"include_usage": "false"},
+            timeout=10.0,
         )
     except httpx.HTTPError:
         _logger.warning(
@@ -10922,15 +10970,22 @@ async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
             rebind_bridge=ctx.rebind_bridge,
         )
     except _ClaudeLaunchRefusedError as exc:
-        redrive_attempt = _claude_redrive_attempt.get()
-        if redrive_attempt is not None:
-            redrive_attempt.refusal = exc
-        if exc.redrivable:
-            _schedule_claude_launch_redrive(ctx, first_wait_s=exc.retry_after_s)
+        _note_claude_launch_refusal(ctx, exc)
         raise
     _clear_claude_refusal_status(ctx)
     _start_claude_relay_after_launch(ctx)
     return view
+
+
+def _note_claude_launch_refusal(
+    ctx: NativeLaunchContext, refusal: _ClaudeLaunchRefusedError
+) -> None:
+    """Tell a running re-drive about a refusal, or start one if it can succeed."""
+    redrive_attempt = _claude_redrive_attempt.get()
+    if redrive_attempt is not None:
+        redrive_attempt.refusal = refusal
+    if refusal.redrivable:
+        _schedule_claude_launch_redrive(ctx, first_wait_s=refusal.retry_after_s)
 
 
 #: Live re-drives by session, so repeated refusals share one bounded task.
@@ -11111,6 +11166,7 @@ async def _redrive_refused_claude_launch(
     retry_after_s = first_wait_s or 0.0
     generation = pending_approvals.current_server_generation()
     launches = 0
+    attempts = 0
     try:
         while launches < _LAUNCH_REDRIVE_MAX_LAUNCHES:
             remaining = deadline - time.monotonic()
@@ -11137,6 +11193,13 @@ async def _redrive_refused_claude_launch(
                 )
                 _publish_claude_redrive_stop(ctx, probe)
                 return
+            attempts += 1
+            _logger.info(
+                "Re-driving refused Claude launch: session=%s attempt=%s",
+                session_id,
+                attempts,
+                extra={"session_id": session_id},
+            )
             attempt = _ClaudeRedriveAttempt()
             token = _claude_redrive_attempt.set(attempt)
             try:

@@ -58,6 +58,13 @@ def wipe_claude_resume_state(bridge_dir: Path) -> None:
 
 #: How long ``prepare`` keeps launches out when no ``commit`` follows.
 RESET_ENSURE_HOLD_S = 90.0
+#: How long ``prepare`` waits for a running launch. Stopping the pane must still
+#: fit the server's forward budget: a late stop would apply a reset it reported failed.
+RESET_PREPARE_LOCK_WAIT_S = 10.0
+
+
+class ClaudeResetBusyError(Exception):
+    """A launch held the session's Claude ensure lock past the reset's wait."""
 
 
 @dataclass
@@ -90,11 +97,20 @@ class ClaudeNativeReset:
     _holds: dict[str, _EnsureHold] = field(default_factory=dict)
 
     async def prepare(self, session_id: str) -> None:
-        """Stop the pane and hold launches off until ``commit``."""
+        """Stop the pane and hold launches off until ``commit``.
+
+        :raises ClaudeResetBusyError: A launch outlasted the wait; nothing changed.
+        """
         # A previous prepare whose commit never came must not block this one.
         self._release(session_id)
         lock = self.ensure_lock_for_session(session_id)
-        await lock.acquire()
+        try:
+            async with asyncio.timeout(RESET_PREPARE_LOCK_WAIT_S):
+                await lock.acquire()
+        except TimeoutError as exc:
+            raise ClaudeResetBusyError(
+                "The session's Claude terminal is still starting; retry the reset shortly."
+            ) from exc
         try:
             await self.stop_pane(session_id)
             await self._wipe(session_id)
