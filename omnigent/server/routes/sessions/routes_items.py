@@ -46,7 +46,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.util.session_lifecycle import is_session_closed
+from omnigent.util.session_lifecycle import has_closed_title_marker
 
 
 def register_items_routes(
@@ -198,12 +198,11 @@ def register_items_routes(
             title=title_filter,
         )
         # Closed children are archived (hidden above); legacy rows closed
-        # before archiving only carry the marker, so drop them here. The
+        # before archiving only carry the title marker, so drop those here.
+        # Label-only closes (read-only side chats) stay listed. The
         # cursors and has_more stay those of the unfiltered page, so a short
         # page with has_more=True still pages onward.
-        open_children = [
-            child for child in page.data if not is_session_closed(child.labels, child.title)
-        ]
+        open_children = [child for child in page.data if not has_closed_title_marker(child.title)]
         data = await _child_session_summaries_from_conversations(
             open_children,
             session_id,

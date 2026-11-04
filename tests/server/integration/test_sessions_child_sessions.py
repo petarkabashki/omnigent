@@ -1077,6 +1077,34 @@ async def test_child_sessions_after_cursor_reaches_every_open_child(
     assert body["has_more"] is False
 
 
+async def test_child_sessions_keeps_label_only_closed_child(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A child closed by label only (a read-only side chat) stays listed.
+
+    Only legacy rows carrying the closed title marker are dropped; the label
+    alone does not unlist a child that was never archived.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    side_chat = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:side",
+        agent_id=session["agent_id"],
+    )
+    conv_store.set_labels(side_chat.id, {"omnigent.closed": "true"})
+
+    body = (await client.get(f"/v1/sessions/{session['id']}/child_sessions")).json()
+
+    assert [row["id"] for row in body["data"]] == [side_chat.id]
+
+
 # ── Scoping — parent isolation ────────────────────────────
 
 
