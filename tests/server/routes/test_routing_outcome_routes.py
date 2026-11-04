@@ -14,7 +14,9 @@ from omnigent.db.utils import generate_agent_id
 from omnigent.server import routing_outcomes as ro
 from omnigent.server import shadow_routing as sr
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _EVENTS = "omnigent.server.routes.sessions.routes_events"
 
@@ -194,3 +196,68 @@ async def test_terminal_model_switch_is_an_override_but_the_launch_report_is_not
     )
     overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
     assert [o["kind"] for o in overrides] == expected
+
+
+def _grant(db_uri: str, user: str, session_id: str, level: int) -> dict[str, str]:
+    """Grant ``user`` ``level`` on the session; returns that user's identity header."""
+    SqlAlchemyPermissionStore(db_uri).grant(f"{user}@example.com", session_id, level)
+    return {"X-Forwarded-Email": f"{user}@example.com"}
+
+
+@pytest.mark.parametrize(
+    ("level", "allowed"),
+    [(LEVEL_READ, False), (LEVEL_EDIT, False), (LEVEL_MANAGE, False), (LEVEL_OWNER, True)],
+)
+async def test_accept_is_owner_only(
+    auth_client: httpx.AsyncClient, routed_session: str, db_uri: str, level: int, allowed: bool
+) -> None:
+    headers = _grant(db_uri, "caller", routed_session, level)
+    resp = await auth_client.post(f"/v1/sessions/{routed_session}/accept", headers=headers)
+    assert resp.status_code == (200 if allowed else 403)
+    assert len(_events("accept")) == (1 if allowed else 0)
+
+
+async def test_accept_by_a_user_without_a_grant_records_nothing(
+    auth_client: httpx.AsyncClient, routed_session: str
+) -> None:
+    resp = await auth_client.post(
+        f"/v1/sessions/{routed_session}/accept",
+        headers={"X-Forwarded-Email": "stranger@example.com"},
+    )
+    assert resp.status_code in (403, 404)
+    assert _events("accept") == []
+
+
+@pytest.mark.parametrize(
+    ("level", "actor"), [(LEVEL_EDIT, "collaborator"), (LEVEL_OWNER, "owner")]
+)
+async def test_interrupt_actor_follows_resolved_access(
+    auth_client: httpx.AsyncClient, routed_session: str, db_uri: str, level: int, actor: str
+) -> None:
+    headers = _grant(db_uri, "caller", routed_session, level)
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        resp = await auth_client.post(
+            f"/v1/sessions/{routed_session}/events", json={"type": "interrupt"}, headers=headers
+        )
+    assert resp.status_code == 202
+    overrides = ro.summarize_outcomes()["d1"]["overrides"]
+    assert [(o["kind"], o["actor"]) for o in overrides] == [("interrupt", actor)]
+
+
+async def test_admin_interrupt_counts_as_owner(
+    auth_client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    store = SqlAlchemyPermissionStore(db_uri)
+    store.ensure_user("admin@example.com")
+    store.set_admin("admin@example.com", True)
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        resp = await auth_client.post(
+            f"/v1/sessions/{routed_session}/events",
+            json={"type": "interrupt"},
+            headers={"X-Forwarded-Email": "admin@example.com"},
+        )
+    assert resp.status_code == 202
+    overrides = ro.summarize_outcomes()["d1"]["overrides"]
+    assert [(o["kind"], o["actor"]) for o in overrides] == [("interrupt", "owner")]
