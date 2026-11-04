@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import get_user_id, require_access_and_level
+from omnigent.server.routes._errors import session_not_found
 from omnigent.server.routing_outcomes import record_accept
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
@@ -44,5 +45,7 @@ def register_outcomes_routes(
             permission_store,
             conversation_store,
         )
+        if await asyncio.to_thread(conversation_store.get_conversation, session_id) is None:
+            raise session_not_found()
         recorded = await asyncio.to_thread(record_accept, session_id, "owner")
         return AcceptSessionResponse(recorded=recorded)

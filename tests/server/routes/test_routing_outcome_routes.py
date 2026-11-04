@@ -60,7 +60,7 @@ async def test_delete_records_ended_with_final_usage(
     resp = await client.delete(f"/v1/sessions/{routed_session}")
     assert resp.status_code == 200
     (ended,) = _events("ended")
-    assert (ended["usd_billed"], ended["usd_policy"], ended["reason"]) == (2.5, 3.0, "delete")
+    assert (ended["usd_total"], ended["usd_policy"], ended["reason"]) == (2.5, 3.0, "delete")
 
 
 async def test_stop_records_ended(client: httpx.AsyncClient, routed_session: str) -> None:
@@ -70,7 +70,7 @@ async def test_stop_records_ended(client: httpx.AsyncClient, routed_session: str
         )
     assert resp.status_code == 202
     (ended,) = _events("ended")
-    assert (ended["usd_billed"], ended["reason"]) == (2.5, "stop")
+    assert (ended["usd_total"], ended["reason"]) == (2.5, "stop")
 
 
 @pytest.mark.parametrize("delivered", [True, False])
@@ -89,6 +89,71 @@ async def test_interrupt_is_an_override_only_when_it_lands(
     assert [(o["kind"], o["actor"]) for o in overrides] == (
         [("interrupt", "owner")] if delivered else []
     )
+
+
+async def test_runner_originated_interrupt_is_not_an_owner_override(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        for origin in ("agent", "system"):
+            await client.post(
+                f"/v1/sessions/{routed_session}/events",
+                json={"type": "interrupt", "data": {"origin": origin}},
+            )
+    overrides = ro.summarize_outcomes()["d1"]["overrides"]
+    assert [(o["kind"], o["actor"]) for o in overrides] == [
+        ("interrupt", "agent"),
+        ("interrupt", "system"),
+    ]
+
+
+async def test_refused_reset_leaves_no_interrupt_override(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    from omnigent.errors import ErrorCode, OmnigentError
+
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+
+    async def interrupt_then_refuse(**kwargs: object) -> None:
+        await kwargs["interrupt"]()  # type: ignore[operator]
+        raise OmnigentError("busy", code=ErrorCode.RESET_IN_PROGRESS)
+
+    with (
+        patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)),
+        patch(f"{_EVENTS}.run_context_reset", AsyncMock(side_effect=interrupt_then_refuse)),
+    ):
+        await client.post(
+            f"/v1/sessions/{routed_session}/events",
+            json={"type": "reset", "data": {"summary": "none"}},
+        )
+    assert ro.summarize_outcomes().get("d1", {}).get("overrides", []) == []
+
+
+async def test_accept_records_owner_actor_and_unknown_session_is_404(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    await client.post(f"/v1/sessions/{routed_session}/accept")
+    (accept,) = _events("accept")
+    assert (accept["actor"], accept["session_id"]) == ("owner", routed_session)
+    missing = await client.post("/v1/sessions/0123456789abcdef0123456789abcdef/accept")
+    assert missing.status_code == 404
+    assert len(_events("accept")) == 1
+
+
+async def test_stop_snapshot_is_reread_after_the_runner_stops(
+    client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+
+    async def stop_and_flush_spend(*args: object, **kwargs: object) -> bool:
+        store.set_session_usage(routed_session, {"total_cost_usd": 4.0})
+        return True
+
+    with patch(f"{_EVENTS}._stop_session_via_runner", stop_and_flush_spend):
+        await client.post(f"/v1/sessions/{routed_session}/events", json={"type": "stop_session"})
+    (ended,) = _events("ended")
+    assert ended["usd_total"] == 4.0 and ended["native_cost_complete"] is None
 
 
 @pytest.mark.parametrize("refused", [False, True])

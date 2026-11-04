@@ -52,19 +52,19 @@ def test_decision_logged_after_first_lookup_is_found(data_dir: Path) -> None:
 
 def test_summary_takes_max_regardless_of_append_order(data_dir: Path) -> None:
     _log_decision("s1", "d1")
-    ro.record_cost("s1", {"total_cost_usd": 5.0, "policy_cost_usd": 6.0})
-    ro.record_cost("s1", {"total_cost_usd": 3.0, "policy_cost_usd": 7.5})
+    ro.record_cost("s1", {"total_cost_usd": 5.0, "policy_cost_usd": 6.0}, source="harness")
+    ro.record_cost("s1", {"total_cost_usd": 3.0, "policy_cost_usd": 7.5}, source="harness")
     ro.record_ended("s1", {"total_cost_usd": 4.0}, reason="stop")
     summary = ro.summarize_outcomes()["d1"]
-    assert (summary["usd_billed"], summary["usd_policy"]) == (5.0, 7.5)
+    assert (summary["usd_total"], summary["usd_policy"]) == (5.0, 7.5)
     assert summary["ended_at"] is not None
 
 
-def test_ended_carries_usd_billed_even_when_unpriced(data_dir: Path) -> None:
+def test_ended_carries_usd_total_even_when_unpriced(data_dir: Path) -> None:
     _log_decision("s1", "d1")
     ro.record_ended("s1", {}, reason="delete")
     (record,) = ro.iter_outcomes()
-    assert record["event"] == "ended" and record["usd_billed"] is None
+    assert record["event"] == "ended" and record["usd_total"] is None
     assert record["usd_policy"] is None and record["reason"] == "delete"
 
 
@@ -72,8 +72,7 @@ def test_check_status_and_passed(data_dir: Path) -> None:
     for status, passed in [("passed", True), ("failed", False), ("error", None)]:
         ro.record_check("d1", status, "sha256:abc")
         assert list(ro.iter_outcomes())[-1]["passed"] is passed
-    with pytest.raises(ValueError):
-        ro.record_check("d1", "flaky", "sha256:abc")
+    assert ro.record_check("d1", "flaky", "sha256:abc") is False
 
 
 def test_check_declared_and_latest_check_win(data_dir: Path) -> None:
@@ -128,7 +127,7 @@ def test_cost_stream_matches_session_usage_across_a_reset(
     stored = store.get_conversation(conv.id).session_usage  # type: ignore[union-attr]
     summary = ro.summarize_outcomes()["d1"]
     assert stored["total_cost_usd"] == 5.0
-    assert ro.usage_gap(summary, stored) == {"usd_billed": 0.0, "usd_policy": 0.0}
+    assert ro.usage_gap(summary, stored) == {"usd_total": 0.0, "usd_policy": 0.0}
     epochs = [r["context_epoch"] for r in ro.iter_outcomes() if r["event"] == "cost"]
     assert epochs == [0, 1, 1]
     last = list(ro.iter_outcomes())[-1]
@@ -136,7 +135,170 @@ def test_cost_stream_matches_session_usage_across_a_reset(
 
 
 def test_usage_gap_reports_under_count_and_unpriced() -> None:
-    assert ro.usage_gap({"usd_billed": 4.0, "usd_policy": None}, {"total_cost_usd": 5.0}) == {
-        "usd_billed": -1.0,
+    assert ro.usage_gap({"usd_total": 4.0, "usd_policy": None}, {"total_cost_usd": 5.0}) == {
+        "usd_total": -1.0,
         "usd_policy": None,
     }
+
+
+# ── Contract: cost, rotation, buffering, robustness ────────────────────────
+
+
+def _lines(event: str) -> list[dict]:
+    return [r for r in ro.iter_outcomes() if r["event"] == event]
+
+
+def test_no_total_writes_no_cost_line_and_reader_survives_null_ended(data_dir: Path) -> None:
+    _log_decision("s1", "d1")
+    assert not ro.record_cost("s1", {"policy_cost_usd": 1.0}, source=None)
+    assert not ro.record_cost("s1", {"total_cost_usd": None}, source=None)
+    ro.record_ended("s1", {"policy_cost_usd": 1.0}, reason="stop")
+    assert _lines("cost") == []
+    (ended,) = _lines("ended")
+    assert ended["usd_total"] is None and ended["cost_source"] == "none"
+    assert ro.summarize_outcomes()["d1"]["usd_total"] is None
+
+
+def test_cost_source_and_native_completeness(data_dir: Path) -> None:
+    _log_decision("s1", "d1")
+    ro.record_cost("s1", {"total_cost_usd": 1.0}, source="harness")
+    assert _lines("cost")[-1]["cost_source"] == "harness"
+    assert _lines("cost")[-1]["native_cost_complete"] is None
+    ro.record_cost("s1", {"total_cost_usd": 2.0}, source="catalog")
+    assert _lines("cost")[-1]["cost_source"] == "mixed"
+    _log_decision("s2", "d2")
+    ro.record_cost("s2", {"total_cost_usd": 1.0}, source="catalog", native=True)
+    ro.record_ended("s2", {"total_cost_usd": 1.0, "native_cost_complete": True},
+                    reason="stop", native=True)
+    assert [r["native_cost_complete"] for r in _lines("cost")][-1] is False
+    assert _lines("ended")[-1]["native_cost_complete"] is True
+    summary = ro.summarize_outcomes()
+    assert summary["d1"]["cost_source"] == "mixed" and summary["d1"]["native_cost_complete"] is None
+
+
+def test_rotation_keeps_decision_and_sums_sessions(data_dir: Path) -> None:
+    _log_decision("old", "d1")
+    _log_decision("new", "d2")  # the rotated-to session's own creation decision
+    ro.record_cost("old", {"total_cost_usd": 5.0}, source="harness")
+    ro.record_cost("old", {"total_cost_usd": 3.0}, source="harness")
+    assert ro.record_rotation("old", "new")
+    assert not ro.record_rotation("old", "new")  # repeat is a no-op
+    ro.record_cost("new", {"total_cost_usd": 2.0}, source="harness")
+    ro.record_ended("new", {"total_cost_usd": 2.0}, reason="stop")
+    assert {r["decision_id"] for r in ro.iter_outcomes()} == {"d1"}
+    assert {r["session_id"] for r in _lines("cost")} == {"old", "new"}
+    (rotated,) = _lines("rotated")
+    assert (rotated["from_session"], rotated["to_session"]) == ("old", "new")
+    summary = ro.summarize_outcomes()["d1"]
+    assert summary["usd_total"] == 7.0
+    assert summary["sessions"]["old"]["usd_total"] == 5.0
+
+
+def test_event_before_decision_is_buffered_then_written(data_dir: Path) -> None:
+    assert not ro.record_override("s1", "interrupt", "owner", path=ro.outcomes_path())
+    assert not ro.outcomes_path().exists()
+    _log_decision("s1", "d1")
+    ro.flush_pending_outcomes()
+    assert [(r["decision_id"], r["kind"]) for r in _lines("override")] == [("d1", "interrupt")]
+
+
+def test_unjoinable_event_is_counted_not_lost_silently(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ro.record_accept("ghost", "owner", path=ro.outcomes_path())
+    monkeypatch.setattr(ro, "_PENDING_TTL_S", -1.0)
+    ro.flush_pending_outcomes()
+    assert ro.count_dropped() == {"no_decision": 1}
+    assert ro.dropped_outcomes >= 1
+
+
+def test_emitters_never_raise(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _log_decision("s1", "d1")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ro, "append_outcome", boom)
+    assert ro.record_override("s1", "reset", "owner") is False
+    assert ro.record_check("d1", "passed", "sha256:x") is False
+    assert ro.record_check("d1", "bogus", "sha256:x") is False
+    assert ro.record_check_declared("d1", "sha256:x") is False
+
+
+def test_index_ignores_partial_line_and_resets_when_log_shrinks(data_dir: Path) -> None:
+    path = sr.decisions_path()
+    path.parent.mkdir(parents=True)
+    whole = b'{"decision_id":"d1","session_id":"s1"}\n'
+    path.write_bytes(whole + b'{"decision_id":"d2","session_')
+    assert ro.decision_id_for_session("s1") == "d1"
+    assert ro.decision_id_for_session("s2") is None
+    path.write_bytes(whole + b'{"decision_id":"d2","session_id":"s2"}\n')
+    assert ro.decision_id_for_session("s2") == "d2"
+    path.write_bytes(b'{"decision_id":"d9","session_id":"s9"}\n')  # shorter: rotated away
+    assert ro.decision_id_for_session("s9") == "d9"
+    assert ro.decision_id_for_session("s1") is None
+
+
+def test_short_write_is_finished_and_failed_write_ends_the_fragment(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = data_dir / "routing" / "x.jsonl"
+    real_write = os.write
+    state = {"calls": 0}
+
+    def short_write(fd: int, data: bytes) -> int:
+        state["calls"] += 1
+        return real_write(fd, data[: len(data) // 2] if state["calls"] == 1 else data)
+
+    monkeypatch.setattr(sr.os, "write", short_write)
+    sr.append_jsonl_line(target, '{"a":1,"pad":"' + "x" * 40 + '"}')
+    sr.append_jsonl_line(target, '{"b":2}')
+    assert [list(r) for r in sr.iter_jsonl_records(target)][0][0] == "a"
+    assert len(list(sr.iter_jsonl_records(target))) == 2
+
+    def failing(fd: int, data: bytes) -> int:
+        if data.startswith(b'{"c"'):
+            return real_write(fd, data[:5])  # short, then the retry below fails
+        if not data.startswith(b'{"d"') and data != b"\n":
+            raise OSError("boom")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(sr.os, "write", failing)
+    with pytest.raises(OSError):
+        sr.append_jsonl_line(target, '{"c":3,"pad":"yyyyyyyy"}')
+    monkeypatch.setattr(sr.os, "write", real_write)
+    sr.append_jsonl_line(target, '{"d":4}')
+    assert [list(r)[0] for r in sr.iter_jsonl_records(target)] == ["a", "b", "d"]
+
+
+def test_reader_survives_invalid_utf8(data_dir: Path) -> None:
+    target = data_dir / "routing" / "bad.jsonl"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'\xff\xfe{"a":\n{"ok":1}\n')
+    assert list(sr.iter_jsonl_records(target)) == [{"ok": 1}]
+
+
+def test_existing_files_are_tightened_to_0600_and_0700(data_dir: Path) -> None:
+    target = data_dir / "routing" / "outcomes.jsonl"
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    target.chmod(0o644)
+    target.parent.chmod(0o755)
+    sr.append_jsonl_line(target, '{"a":1}')
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+
+
+def test_native_report_snapshot_carries_completeness(data_dir: Path, db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 3.0, "cost_complete": True}, store
+    )
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 4.0}, store)
+    cost = _lines("cost")
+    assert [(r["cost_source"], r["native_cost_complete"]) for r in cost] == [
+        ("harness", True),
+        ("harness", False),
+    ]
