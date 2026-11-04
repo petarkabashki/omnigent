@@ -10,10 +10,14 @@ unauthenticated ``"local"`` fallback is live).
 from __future__ import annotations
 
 import pytest
+from starlette.requests import Request
 
+from omnigent.server import auth as auth_module
 from omnigent.server.auth import (
     bind_host_is_loopback,
+    forwarded_request_signal,
     warn_if_single_user_exposed,
+    warn_once_if_single_user_forwarded,
 )
 
 _AUTH_ENVS = (
@@ -130,3 +134,64 @@ def test_silent_under_auth_enabled_one(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OMNIGENT_AUTH_ENABLED", "1")
 
     assert warn_if_single_user_exposed("0.0.0.0") is None
+
+
+# ── forwarded-request detection ─────────────────────────────────────
+
+
+def _request(headers: dict[str, str]) -> Request:
+    """Build a loopback-peer request carrying *headers*."""
+    return Request(
+        {
+            "type": "http",
+            "client": ("127.0.0.1", 50000),
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Host": "localhost:8000"},
+        {"Host": "127.0.0.1:8000"},
+        {"Host": "[::1]:8000"},
+        {"Host": "app.localhost:8000"},
+        {"Host": "localhost:8000", "User-Agent": "Mozilla/5.0", "Origin": "http://localhost:8000"},
+    ],
+)
+def test_normal_local_use_has_no_forward_signal(headers: dict[str, str]) -> None:
+    """Plain local browser, CLI and plain SSH-tunnel requests look unforwarded."""
+    assert forwarded_request_signal(_request(headers)) is None
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"X-Forwarded-For": "203.0.113.9"},
+        {"Forwarded": "for=203.0.113.9"},
+        {"Via": "1.1 proxy"},
+        {"Tailscale-User-Login": "a@example.com"},
+        {"Cf-Ray": "abc"},
+        {"Host": "box.tail1234.ts.net"},
+        {"Host": "abc.ngrok-free.app:443"},
+    ],
+)
+def test_forward_signals_detected(headers: dict[str, str]) -> None:
+    """Relay headers or a non-loopback Host mark a forwarded request."""
+    assert forwarded_request_signal(_request(headers)) is not None
+
+
+def test_forward_warning_logged_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated forwarded requests log one warning; local ones log none."""
+    monkeypatch.setattr(auth_module, "_forward_warning_emitted", False)
+    with caplog.at_level("WARNING", logger=auth_module.logger.name):
+        warn_once_if_single_user_forwarded(_request({"Host": "localhost:8000"}))
+        assert not caplog.records
+        for _ in range(3):
+            warn_once_if_single_user_forwarded(_request({"X-Forwarded-For": "1.2.3.4"}))
+    assert len(caplog.records) == 1
+    assert "SSH tunnels" in caplog.records[0].getMessage()

@@ -31,6 +31,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -279,6 +280,81 @@ def warn_if_single_user_exposed(host: str) -> str | None:
         f'{RESERVED_USER_LOCAL}" user to anyone who can reach this address.\n'
         "    Only do this on a trusted private network.\n"
         f"    Unset {_LOCAL_SINGLE_USER_ENV} to require login instead."
+    )
+
+
+# Headers that proxies, tunnels and funnels add when relaying a request. A
+# plain SSH ``-L``/``-R`` tunnel adds none, so absence proves nothing.
+_FORWARD_HEADERS = (
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "via",
+    "tailscale-user-login",
+    "cf-connecting-ip",
+    "cf-ray",
+)
+
+_forward_warning_lock = threading.Lock()
+_forward_warning_emitted = False
+
+
+def forwarded_request_signal(request: HTTPConnection) -> str | None:
+    """Name the evidence that *request* arrived through a forward, if any.
+
+    Looks only at request headers: a relay header from :data:`_FORWARD_HEADERS`,
+    or a ``Host`` that is not a loopback name. Catches tailscale serve/funnel,
+    cloudflared, ngrok and header-adding reverse proxies, plus any forward that
+    preserves a public ``Host``. Misses plain SSH ``-L``/``-R`` and VS Code
+    port forwarding, which relay from loopback with ``Host: localhost``.
+
+    :param request: The incoming HTTP request or WebSocket.
+    :returns: A short description of the signal, or ``None``.
+    """
+    headers = request.headers
+    for name in _FORWARD_HEADERS:
+        if name in headers:
+            return f"{name} header"
+    host = headers.get("host", "")
+    if host:
+        hostname = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+        hostname = hostname.strip("[]").lower()
+        if hostname and hostname != "localhost" and not hostname.endswith(".localhost"):
+            if not bind_host_is_loopback(hostname):
+                return f"Host header {host!r}"
+    return None
+
+
+def warn_once_if_single_user_forwarded(request: HTTPConnection) -> None:
+    """Log a single warning when a single-user request looks forwarded.
+
+    Called only on the single-user fallback path, so normal requests pay
+    nothing. Logs at most once per process and never alters the response.
+
+    :param request: The request being served as :data:`RESERVED_USER_LOCAL`.
+    """
+    global _forward_warning_emitted
+    if _forward_warning_emitted:
+        return
+    signal = forwarded_request_signal(request)
+    if signal is None:
+        return
+    with _forward_warning_lock:
+        if _forward_warning_emitted:
+            return
+        _forward_warning_emitted = True
+    logger.warning(
+        "SECURITY: %s is set and a request carried a forwarding signal (%s). "
+        'Unauthenticated requests are served as the "%s" user, so anyone who '
+        "can reach this forward gets full access. Unset %s to require login. "
+        "Detection is best-effort: plain SSH tunnels and VS Code port "
+        "forwarding are NOT detected.",
+        _LOCAL_SINGLE_USER_ENV,
+        signal,
+        RESERVED_USER_LOCAL,
+        _LOCAL_SINGLE_USER_ENV,
     )
 
 
@@ -769,6 +845,7 @@ class UnifiedAuthProvider(AuthProvider):
                 return None
             return email
         if self._local_single_user:
+            warn_once_if_single_user_forwarded(request)
             return RESERVED_USER_LOCAL
         return None
 
