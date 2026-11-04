@@ -349,8 +349,9 @@ def warn_once_if_single_user_forwarded(request: HTTPConnection) -> None:
         "SECURITY: %s is set and a request carried a forwarding signal (%s). "
         'Unauthenticated requests are served as the "%s" user, so anyone who '
         "can reach this forward gets full access. Unset %s to require login. "
-        "Detection is best-effort: plain SSH tunnels and VS Code port "
-        "forwarding are NOT detected.",
+        "Detection is partial: plain SSH tunnels and VS Code port forwarding "
+        "are NOT detected, so seeing no warning does not mean the server is "
+        "unexposed.",
         _LOCAL_SINGLE_USER_ENV,
         signal,
         RESERVED_USER_LOCAL,
