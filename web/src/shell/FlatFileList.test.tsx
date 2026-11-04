@@ -64,6 +64,18 @@ describe("FlatFileList runner-offline state", () => {
     expect(screen.getByText(/failed to load: 500 internal server error/i)).toBeInTheDocument();
     expect(screen.queryByText(/agent is asleep/i)).not.toBeInTheDocument();
   });
+
+  it("keeps the listed files when the connection drops, but not on a real HTTP error", () => {
+    const files = [{ path: "a.ts", name: "a.ts", status: "modified" } as WorkspaceChangedFile];
+    const view = renderList({ files, isError: true, error: new TypeError("Failed to fetch") });
+
+    expect(screen.getByText("a.ts")).toBeInTheDocument();
+    expect(screen.queryByText(/failed to load/i)).not.toBeInTheDocument();
+
+    view.unmount();
+    renderList({ files, isError: true, error: new Error("500 Internal Server Error") });
+    expect(screen.getByText(/failed to load: 500/i)).toBeInTheDocument();
+  });
 });
 
 describe("FlatFileList status / download alignment", () => {

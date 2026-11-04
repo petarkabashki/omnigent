@@ -1,6 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, GitBranch } from "lucide-react";
-import { RunnerOfflineError, type WorkspaceChangedFile } from "@/hooks/useWorkspaceChangedFiles";
+import {
+  isNetworkFailure,
+  RunnerOfflineError,
+  type WorkspaceChangedFile,
+} from "@/hooks/useWorkspaceChangedFiles";
 import { RunnerAsleepHint } from "./RunnerAsleepHint";
 import { cn } from "@/lib/utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -260,7 +264,8 @@ export function FlatFileList({
   if (isLoading) {
     return <p className="px-2 py-1 text-muted-foreground text-sm">Loading…</p>;
   }
-  if (isError) {
+  // A dropped connection with content already on screen keeps that content.
+  if (isError && !(isNetworkFailure(error) && files !== undefined)) {
     // Runner not connected. If it went offline after being up (host
     // restarted), guide the user to send a message to reconnect. If the
     // session just hasn't started, it isn't "asleep" — show the empty

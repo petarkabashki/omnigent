@@ -31,6 +31,7 @@ import {
   resolveChatFilePath,
   runnerOfflineRetryDelay,
   shouldRetryRunnerOffline,
+  useRunnerOfflineRetry,
   useSessionActive,
   useWorkspaceAllFiles,
   useWorkspaceChangedFiles,
@@ -1805,4 +1806,16 @@ it.each([false, true])("gates background workspace activity on grid flag %s", (e
   expect(view.result.current).toBe(false);
   view.unmount();
   conversationRegistry.clear();
+});
+
+describe("network-failure retry", () => {
+  it("retries a dropped connection even when runner retries are not allowed", () => {
+    const { result } = renderHook(() => useRunnerOfflineRetry(false));
+
+    expect(result.current(0, new TypeError("Failed to fetch"))).toBe(true);
+    expect(result.current(MAX_RUNNER_OFFLINE_RETRIES + 1, new TypeError("Failed to fetch"))).toBe(
+      false,
+    );
+    expect(result.current(0, new Error("500 Internal Server Error"))).toBe(false);
+  });
 });

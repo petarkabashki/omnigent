@@ -4,6 +4,7 @@ import type { RefObject } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type DirectoryResult,
+  isNetworkFailure,
   RunnerOfflineError,
   type WorkspaceChangedFile,
   type WorkspaceFile,
@@ -832,7 +833,8 @@ function FolderTreeInner({
   if (isLoading) {
     return <p className="px-2 py-1 text-muted-foreground text-sm">Loading…</p>;
   }
-  if (isError) {
+  // A dropped connection with content already on screen keeps that content.
+  if (isError && !(isNetworkFailure(error) && files !== undefined)) {
     // Runner not connected. If it went offline after being up (host
     // restarted), show the same reconnect hint as the Changed tab; if the
     // session just hasn't started, fall through to the empty state.

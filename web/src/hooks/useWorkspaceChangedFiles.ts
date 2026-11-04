@@ -193,8 +193,17 @@ function useRunnerRecovering(conversationId: string | undefined): boolean {
 }
 
 /**
+ * Whether `error` is a failed `fetch` (connection cut, server unreachable)
+ * rather than an HTTP response, so it clears once the connection returns.
+ */
+export function isNetworkFailure(error: unknown): boolean {
+  return error instanceof TypeError;
+}
+
+/**
  * The `retry` option for a runner-backed query: retry a runner-offline error
- * only while `allowed`, read when each retry is decided. TanStack keeps the
+ * only while `allowed`, read when each retry is decided. A network failure is
+ * always retried, so a connection blip never reaches the error UI. TanStack keeps the
  * `retry` a fetch started with for its whole chain, so a gate captured in that
  * closure kept its page-load value ("snapshot still loading → retry") and
  * retried an asleep sandbox for two minutes.
@@ -204,7 +213,9 @@ export function useRunnerOfflineRetry(allowed: boolean) {
   allowedRef.current = allowed;
   return useCallback(
     (failureCount: number, error: Error) =>
-      allowedRef.current && shouldRetryRunnerOffline(failureCount, error),
+      isNetworkFailure(error)
+        ? failureCount <= MAX_RUNNER_OFFLINE_RETRIES
+        : allowedRef.current && shouldRetryRunnerOffline(failureCount, error),
     [],
   );
 }
