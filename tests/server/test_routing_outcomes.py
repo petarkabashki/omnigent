@@ -10,7 +10,10 @@ import pytest
 
 from omnigent.server import routing_outcomes as ro
 from omnigent.server import shadow_routing as sr
-from omnigent.server.routes._sessions.orchestration import _persist_native_cumulative_usage
+from omnigent.server.routes._sessions.orchestration import (
+    _accumulate_session_usage,
+    _persist_native_cumulative_usage,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
 _AGENT_ID = "0123456789abcdef0123456789abcdef"
@@ -302,3 +305,50 @@ def test_native_report_snapshot_carries_completeness(data_dir: Path, db_uri: str
         ("harness", True),
         ("harness", False),
     ]
+
+
+def _relay_response(**usage: object) -> dict[str, object]:
+    return {"usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, **usage}}
+
+
+def test_relay_harness_reported_cost_is_streamed_as_harness(data_dir: Path, db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _accumulate_session_usage(_relay_response(model="m", cost_usd=1.5), conv.id, store)
+    _accumulate_session_usage(_relay_response(model="m", cost_usd=0.5), conv.id, store)
+    cost = _lines("cost")
+    assert [(r["usd_total"], r["cost_source"], r["session_id"]) for r in cost] == [
+        (1.5, "harness", conv.id),
+        (2.0, "harness", conv.id),
+    ]
+
+
+def test_relay_catalog_priced_cost_is_streamed_as_catalog(
+    data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window
+
+    monkeypatch.setattr(
+        context_window, "fetch_model_pricing_with_provider", lambda *a, **k: {"priced": True}
+    )
+    monkeypatch.setattr(context_window, "compute_llm_cost", lambda *a, **k: 0.25)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _accumulate_session_usage(_relay_response(model="m"), conv.id, store)
+    (cost,) = _lines("cost")
+    assert (cost["usd_total"], cost["cost_source"]) == (0.25, "catalog")
+
+
+def test_relay_unpriced_turn_writes_no_cost_line(
+    data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window
+
+    monkeypatch.setattr(context_window, "fetch_model_pricing_with_provider", lambda *a, **k: None)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _accumulate_session_usage(_relay_response(model="m"), conv.id, store)
+    assert _lines("cost") == []

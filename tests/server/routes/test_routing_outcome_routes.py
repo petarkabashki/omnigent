@@ -143,21 +143,6 @@ async def test_accept_records_owner_actor_and_unknown_session_is_404(
     assert len(_events("accept")) == 1
 
 
-async def test_stop_snapshot_is_reread_after_the_runner_stops(
-    client: httpx.AsyncClient, routed_session: str, db_uri: str
-) -> None:
-    store = SqlAlchemyConversationStore(db_uri)
-
-    async def stop_and_flush_spend(*args: object, **kwargs: object) -> bool:
-        store.set_session_usage(routed_session, {"total_cost_usd": 4.0})
-        return True
-
-    with patch(f"{_EVENTS}._stop_session_via_runner", stop_and_flush_spend):
-        await client.post(f"/v1/sessions/{routed_session}/events", json={"type": "stop_session"})
-    (ended,) = _events("ended")
-    assert ended["usd_total"] == 4.0 and ended["native_cost_complete"] is None
-
-
 @pytest.mark.parametrize("refused", [False, True])
 async def test_reset_is_an_override_only_when_it_commits(
     client: httpx.AsyncClient, routed_session: str, refused: bool
@@ -261,3 +246,50 @@ async def test_admin_interrupt_counts_as_owner(
     assert resp.status_code == 202
     overrides = ro.summarize_outcomes()["d1"]["overrides"]
     assert [(o["kind"], o["actor"]) for o in overrides] == [("interrupt", "owner")]
+
+
+async def test_delete_snapshot_is_reread_after_runner_cleanup(
+    client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+
+    async def flush_spend_on_cleanup(*args: object, **kwargs: object) -> SimpleNamespace:
+        store.set_session_usage(routed_session, {"total_cost_usd": 4.0})
+        return SimpleNamespace(status_code=204)
+
+    runner = SimpleNamespace(delete=flush_spend_on_cleanup)
+    with patch(
+        f"{_EVENTS}._get_runner_client_for_resource_access", AsyncMock(return_value=runner)
+    ):
+        resp = await client.delete(f"/v1/sessions/{routed_session}")
+    assert resp.status_code == 200
+    (ended,) = _events("ended")
+    assert (ended["usd_total"], ended["reason"]) == (4.0, "delete")
+
+
+async def test_stop_snapshot_includes_spend_flushed_during_host_runner_stop(
+    client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    agent_id = store.get_conversation(routed_session).agent_id  # type: ignore[union-attr]
+    hosted = store.create_conversation(
+        agent_id=agent_id, host_id="a" * 32, workspace="/w", runner_id="b" * 32
+    )
+    sr.append_decision({"decision_id": "d2", "session_id": hosted.id, "backend": "rules"})
+    store.set_session_usage(hosted.id, {"total_cost_usd": 2.5})
+
+    async def stop_host_runner_and_flush_spend(*args: object, **kwargs: object) -> bool:
+        store.set_session_usage(hosted.id, {"total_cost_usd": 5.0})
+        return True
+
+    with (
+        patch(f"{_EVENTS}._stop_session_via_runner", AsyncMock(return_value=True)),
+        patch(f"{_EVENTS}._owns_host_runner", AsyncMock(return_value=True)),
+        patch(f"{_EVENTS}._stop_host_runner_intentionally", stop_host_runner_and_flush_spend),
+    ):
+        resp = await client.post(
+            f"/v1/sessions/{hosted.id}/events", json={"type": "stop_session"}
+        )
+    assert resp.status_code == 202
+    (ended,) = _events("ended")
+    assert (ended["usd_total"], ended["reason"]) == (5.0, "stop")
