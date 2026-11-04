@@ -1,0 +1,131 @@
+"""Routes that feed the routing outcome stream: accept, stop, delete, interrupt."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+import pytest_asyncio
+
+from omnigent.db.utils import generate_agent_id
+from omnigent.server import routing_outcomes as ro
+from omnigent.server import shadow_routing as sr
+from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+_EVENTS = "omnigent.server.routes.sessions.routes_events"
+
+
+@pytest_asyncio.fixture()
+async def routed_session(db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A session with a logged routing decision ``d1`` and $2.50 of billed usage."""
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    agent_id = generate_agent_id()
+    SqlAlchemyAgentStore(db_uri).create(agent_id, name="a", bundle_location="test:///bundle")
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(agent_id=agent_id)
+    store.set_session_usage(conv.id, {"total_cost_usd": 2.5, "policy_cost_usd": 3.0})
+    sr.append_decision({"decision_id": "d1", "session_id": conv.id, "backend": "rules"})
+    return conv.id
+
+
+def _events(event: str) -> list[dict]:
+    return [r for r in ro.iter_outcomes() if r["event"] == event]
+
+
+async def test_accept_records_for_routed_session(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    resp = await client.post(f"/v1/sessions/{routed_session}/accept")
+    assert resp.status_code == 200 and resp.json() == {"recorded": True}
+    assert ro.summarize_outcomes()["d1"]["accept_at"] is not None
+
+
+async def test_accept_without_decision_is_not_an_error(
+    client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    agent_id = store.get_conversation(routed_session).agent_id  # type: ignore[union-attr]
+    other = store.create_conversation(agent_id=agent_id)
+    resp = await client.post(f"/v1/sessions/{other.id}/accept")
+    assert resp.status_code == 200 and resp.json() == {"recorded": False}
+
+
+async def test_delete_records_ended_with_final_usage(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    resp = await client.delete(f"/v1/sessions/{routed_session}")
+    assert resp.status_code == 200
+    (ended,) = _events("ended")
+    assert (ended["usd_billed"], ended["usd_policy"], ended["reason"]) == (2.5, 3.0, "delete")
+
+
+async def test_stop_records_ended(client: httpx.AsyncClient, routed_session: str) -> None:
+    with patch(f"{_EVENTS}._stop_session_via_runner", AsyncMock(return_value=True)):
+        resp = await client.post(
+            f"/v1/sessions/{routed_session}/events", json={"type": "stop_session"}
+        )
+    assert resp.status_code == 202
+    (ended,) = _events("ended")
+    assert (ended["usd_billed"], ended["reason"]) == (2.5, "stop")
+
+
+@pytest.mark.parametrize("delivered", [True, False])
+async def test_interrupt_is_an_override_only_when_it_lands(
+    client: httpx.AsyncClient, routed_session: str, delivered: bool
+) -> None:
+    runner = SimpleNamespace(
+        post=AsyncMock(return_value=SimpleNamespace(status_code=204 if delivered else 500))
+    )
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        resp = await client.post(
+            f"/v1/sessions/{routed_session}/events", json={"type": "interrupt"}
+        )
+    assert resp.status_code == 202
+    overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
+    assert [(o["kind"], o["actor"]) for o in overrides] == (
+        [("interrupt", "owner")] if delivered else []
+    )
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_reset_is_an_override_only_when_it_commits(
+    client: httpx.AsyncClient, routed_session: str, refused: bool
+) -> None:
+    from omnigent.errors import ErrorCode, OmnigentError
+
+    outcome = (
+        AsyncMock(side_effect=OmnigentError("busy", code=ErrorCode.RESET_IN_PROGRESS))
+        if refused
+        else AsyncMock(return_value=SimpleNamespace(epoch=1, boundary_item_id="item_1"))
+    )
+    with patch(f"{_EVENTS}.run_context_reset", outcome):
+        await client.post(
+            f"/v1/sessions/{routed_session}/events",
+            json={"type": "reset", "data": {"summary": "none"}},
+        )
+    overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
+    assert [o["kind"] for o in overrides] == ([] if refused else ["reset"])
+
+
+@pytest.mark.parametrize(("previous", "expected"), [(None, []), ("opus", ["model_change"])])
+async def test_terminal_model_switch_is_an_override_but_the_launch_report_is_not(
+    client: httpx.AsyncClient,
+    routed_session: str,
+    db_uri: str,
+    previous: str | None,
+    expected: list[str],
+) -> None:
+    if previous is not None:
+        SqlAlchemyConversationStore(db_uri).update_conversation(
+            routed_session, reported_model=previous
+        )
+    await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "external_model_change", "data": {"model": "claude-sonnet-4-6"}},
+    )
+    overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
+    assert [o["kind"] for o in overrides] == expected

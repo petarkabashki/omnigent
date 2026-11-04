@@ -290,6 +290,7 @@ from omnigent.server.routes._sessions.reset import (
     is_reset_in_flight,
     run_context_reset,
 )
+from omnigent.server.routing_outcomes import record_ended, record_override
 from omnigent.server.scheduled.telemetry import start_fire_stage
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
@@ -1135,6 +1136,13 @@ def register_events_routes(
         )
         return {**ack, "message_id": message_id}
 
+    async def _override_actor(user_id: str | None, session_id: str) -> str:
+        """``"owner"`` when the caller owns the session (or auth is off), else ``"collaborator"``."""
+        if permission_store is None or user_id is None:
+            return "owner"
+        grant = await asyncio.to_thread(permission_store.get, user_id, session_id)
+        return "owner" if grant is not None and grant.level >= LEVEL_OWNER else "collaborator"
+
     async def _dispatch_event(
         request: Request | _RunnerEventContext | StartupInputContext,
         session_id: str,
@@ -1939,6 +1947,9 @@ def register_events_routes(
                 _interrupt_fenced_sessions.discard(session_id)
             elif not codex_child:
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
+                record_override(
+                    session_id, "interrupt", await _override_actor(user_id, session_id)
+                )
             if stop_codex_side_chat:
                 await asyncio.to_thread(
                     conversation_store.set_labels,
@@ -2063,6 +2074,11 @@ def register_events_routes(
                         conversation_store,
                         int(time.time()) - RUNNER_LIVENESS_TTL_S,
                     )
+            record_ended(
+                session_id,
+                stop_conv.session_usage if stop_conv is not None else None,
+                reason="stop",
+            )
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
             # honestly, and the next message auto-relaunches the session on
@@ -2260,6 +2276,7 @@ def register_events_routes(
                 dispatching=lambda: _dispatch_in_flight.get(session_id, 0) > 0,
                 created_by=created_by,
             )
+            record_override(session_id, "reset", "owner")
             return {
                 "queued": False,
                 "epoch": str(reset_result.epoch),
@@ -4043,9 +4060,13 @@ def register_events_routes(
                 )
         _interrupt_fenced_sessions.discard(session_id)
         _intentional_stop_sessions.pop(session_id, None)
+        # Re-read so the final snapshot includes spend flushed while the runner stopped.
+        final_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        final_usage = (final_conv or conv).session_usage
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
+        record_ended(session_id, final_usage, reason="delete")
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
         _cancel_runner_relays([session_id, *descendant_ids])

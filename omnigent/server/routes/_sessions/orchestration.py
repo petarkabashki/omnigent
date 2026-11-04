@@ -371,6 +371,7 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_managed_runner_tunnel,
     _wait_for_runner_client,
 )
+from omnigent.server.routing_outcomes import record_cost
 from omnigent.server.runner_session_init import RunnerSessionInitializer
 from omnigent.server.sandbox_profile_launch import prepare_profile, record_profile, saved_profile
 from omnigent.server.schemas import (
@@ -1824,6 +1825,7 @@ def _accumulate_session_usage(
         delta["by_model"] = {llm_model: model_delta}
 
     new_current = conversation_store.increment_session_usage(session_id, delta)
+    record_cost(session_id, new_current)
     # Per-user daily rollup (policy-gated; this is the per-turn delta).
     _record_daily_cost(conv, cost_delta, conversation_store)
     return _priced_cost_for_display(new_current)
@@ -2010,9 +2012,11 @@ def _persist_native_cumulative_usage(
 
     old_cost = 0.0
     applied = False
+    stored_epoch = 0
 
     def apply_report(current: dict[str, Any], session_epoch: int) -> bool:
-        nonlocal old_cost, applied
+        nonlocal old_cost, applied, stored_epoch
+        stored_epoch = session_epoch
         # A pre-reset total added to the new base would inflate the session
         # permanently through the clamps below, so it changes nothing.
         applied = report_epoch is None or report_epoch >= session_epoch
@@ -2144,6 +2148,7 @@ def _persist_native_cumulative_usage(
     current = conversation_store.update_session_usage(session_id, apply_report)
     if not applied:
         return _priced_cost_for_display(current)
+    record_cost(session_id, current, context_epoch=stored_epoch)
     # Per-user daily rollup. Native reports cumulative totals, so the turn's
     # delta is the increase in cumulative cost. Uses the authoritative
     # ``total_cost_usd`` (= statusLine S), NOT ``policy_cost_usd`` — the

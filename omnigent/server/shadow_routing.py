@@ -347,11 +347,10 @@ def _encode_record(record: dict[str, Any]) -> str:  # type: ignore[explicit-any]
     return json.dumps(stub, separators=(",", ":"))
 
 
-def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  # type: ignore[explicit-any]  # JSON record
-    """Append one record as a single line (one ``O_APPEND`` write)."""
-    target = path or decisions_path()
+def append_jsonl_line(target: Path, line: str) -> None:
+    """Append *line* plus a newline to *target* (one ``O_APPEND`` write, mode 0600)."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    data = (_encode_record(record) + "\n").encode()
+    data = (line + "\n").encode()
     fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.write(fd, data)
@@ -359,9 +358,13 @@ def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  
         os.close(fd)
 
 
-def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
-    """Yield records from the log, skipping blank or corrupt lines."""
-    source = path or decisions_path()
+def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  # type: ignore[explicit-any]  # JSON record
+    """Append one record as a single line (one ``O_APPEND`` write)."""
+    append_jsonl_line(path or decisions_path(), _encode_record(record))
+
+
+def iter_jsonl_records(source: Path) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
+    """Yield dict records from a JSONL file, skipping blank or corrupt lines."""
     try:
         handle = source.open(encoding="utf-8")
     except FileNotFoundError:
@@ -377,6 +380,11 @@ def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # typ
                 continue
             if isinstance(record, dict):
                 yield record
+
+
+def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
+    """Yield records from the log, skipping blank or corrupt lines."""
+    return iter_jsonl_records(path or decisions_path())
 
 
 # ── Hook ───────────────────────────────────────────────────────────────────

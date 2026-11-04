@@ -262,6 +262,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     set_server_runner_router,
     user_session_stream,
 )
+from omnigent.server.routing_outcomes import record_override
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -2420,6 +2421,9 @@ async def _persist_external_model_change(
         session_id,
         reported_model=model,
     )
+    if conv.reported_model is not None:
+        # A switch inside the pane replaces a known model; the launch report does not.
+        record_override(session_id, "model_change", "owner")
     event = SessionModelEvent(
         type="session.model",
         conversation_id=session_id,
