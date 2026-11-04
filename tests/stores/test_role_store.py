@@ -320,3 +320,42 @@ def test_project_delete_waits_for_a_take_holding_the_project_lock(
 
     assert outcomes["taken"] is not None and outcomes["deleted"] is True
     assert roles.get(role.id, user_id=OWNER).holder_session_id == holder
+
+
+def test_take_waits_for_a_project_delete_in_flight_and_is_refused(
+    roles: SqlAlchemyRoleStore, db_uri: str
+) -> None:
+    """Without the wait the take would commit against a row the delete is removing."""
+    projects = SqlAlchemyProjectStore(db_uri)
+    project = _id()
+    projects.create(project, "ns", OWNER)
+    role = roles.create("Bench", user_id=OWNER, project_id=project)
+    reached, resume = threading.Event(), threading.Event()
+
+    def hold_delete(_operation: str) -> None:
+        reached.set()
+        assert resume.wait(timeout=15)
+
+    projects.after_checks_hook = hold_delete
+    outcomes: dict[str, object] = {}
+
+    def take() -> None:
+        try:
+            outcomes["taken"] = _take(roles, role, _id())
+        except OmnigentError as error:
+            outcomes["refused"] = error.code
+
+    deleter = threading.Thread(target=lambda: projects.delete(project, user_id=OWNER))
+    taker = threading.Thread(target=take)
+    deleter.start()
+    assert reached.wait(timeout=15)
+    taker.start()
+    taker.join(timeout=1)
+    assert taker.is_alive(), "the take must wait for the delete's lock"
+    resume.set()
+    deleter.join(timeout=15)
+    taker.join(timeout=15)
+
+    assert outcomes == {"refused": ErrorCode.NOT_FOUND}
+    assert roles.get(role.id, user_id=OWNER).holder_session_id is None
+    assert roles.events(role.id) == []
