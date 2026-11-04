@@ -232,6 +232,10 @@ async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_not
             refused = forward.result()
             assert refused.status_code == 409
             assert refused.json()["error"] == "reset_in_progress"
+            assert (
+                refused.json()["detail"]
+                == "Claude is still starting. Try the reset again in a moment."
+            )
 
             # The launch ends after the server gave up: nothing takes the lock late.
             ensure_lock.release()

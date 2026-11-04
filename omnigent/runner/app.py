@@ -8305,7 +8305,10 @@ def create_runner_app(
         if lock.locked():
             return JSONResponse(
                 status_code=409,
-                content={"error": "reset_in_progress", "detail": "a reset is already running"},
+                content={
+                    "error": "reset_in_progress",
+                    "detail": "A reset is already running for this session.",
+                },
             )
         pending = fields.get("pending", "reject")
         async with lock:

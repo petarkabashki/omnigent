@@ -109,7 +109,7 @@ class ClaudeNativeReset:
                 await lock.acquire()
         except TimeoutError as exc:
             raise ClaudeResetBusyError(
-                "The session's Claude terminal is still starting; retry the reset shortly."
+                "Claude is still starting. Try the reset again in a moment."
             ) from exc
         try:
             await self.stop_pane(session_id)

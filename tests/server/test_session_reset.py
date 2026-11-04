@@ -263,6 +263,16 @@ async def test_reset_refusals_persist_nothing(
     assert not is_reset_in_flight("conv_1")
 
 
+async def test_runner_refusal_reaches_the_caller_in_plain_words() -> None:
+    body = '{"error": "reset_in_progress", "detail": "Claude is still starting."}'
+    harness = _Harness(native_harness="claude-native", runner_results=[_Forwarded(409, body)])
+
+    with pytest.raises(OmnigentError) as refused:
+        await harness.run()
+
+    assert refused.value.message == "Claude is still starting."
+
+
 async def test_other_native_harnesses_keep_the_planned_refusal() -> None:
     with pytest.raises(OmnigentError) as caught:
         await _Harness(native_harness="pi-native").run()

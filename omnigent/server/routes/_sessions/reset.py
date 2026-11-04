@@ -81,19 +81,21 @@ def _unsupported(message: str) -> OmnigentError:
     return OmnigentError(message, code=ErrorCode.INVALID_INPUT)
 
 
-def _runner_error_code(body: str) -> str:
-    """Map a runner 409 body (``{"error": "<code>"}``) to an error code."""
+def _runner_refusal(body: str) -> tuple[str, str]:
+    """Map a runner 409 body to an error code and the words the caller sees."""
     try:
-        code = json.loads(body).get("error")
+        parsed = json.loads(body)
+        code, detail = parsed.get("error"), parsed.get("detail")
     except (ValueError, AttributeError):
-        code = None
+        code, detail = None, None
     known = (
         ErrorCode.PENDING_INPUTS,
         ErrorCode.RESET_IN_PROGRESS,
         ErrorCode.RESET_UNSUPPORTED,
         ErrorCode.SESSION_BUSY,
     )
-    return code if code in known else ErrorCode.RESET_IN_PROGRESS
+    message = detail if isinstance(detail, str) and detail else "The session refused the reset."
+    return (code if code in known else ErrorCode.RESET_IN_PROGRESS), message
 
 
 async def run_context_reset(
@@ -337,10 +339,8 @@ async def _forward_reset(
             "reset not supported by this runner version", code=ErrorCode.RESET_UNSUPPORTED
         )
     if result.status_code == 409:
-        raise OmnigentError(
-            f"Runner refused the reset: {result.body[:200]}",
-            code=_runner_error_code(result.body),
-        )
+        code, message = _runner_refusal(result.body)
+        raise OmnigentError(message, code=code)
     raise OmnigentError(
         f"Reset failed: runner returned {result.status_code}", code=ErrorCode.INTERNAL_ERROR
     )
