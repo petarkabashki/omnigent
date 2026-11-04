@@ -9369,12 +9369,14 @@ async def _cancel_subagent_task(
         return "Error: sys_cancel_task requires server access for sub-agent tasks"
 
     event_type = "stop_session" if capability == "stop" else "interrupt"
+    # An agent's cancel must not read as an owner override in the outcome stream.
+    event_data: _JsonObject = {"origin": "agent"} if event_type == "interrupt" else {}
 
     try:
         resp = await server_client.post(
             f"{_session_url(task_id)}/events",
             # Bare control events 422 on servers that require body.data.
-            json={"type": event_type, "data": {}},
+            json={"type": event_type, "data": event_data},
             timeout=30.0,
         )
     except (httpx.HTTPError, ValueError) as exc:
