@@ -1063,7 +1063,8 @@ class SessionsNamespace:
 
         :param session_id: Root parent session identifier.
         :param max_depth: Levels to descend (1 = direct children only). Capped
-            to match the CLI tree and the web Agents rail.
+            to match the CLI tree and the web Agents rail. Every level is
+            paged to the end.
         :param limit: Per-level page size passed to :meth:`child_sessions`.
         :returns: Flattened list of child-session summary dicts, each carrying a
             ``parent_id`` key (empty when the session has no sub-agents).
@@ -1077,16 +1078,22 @@ class SessionsNamespace:
         while frontier and depth < max_depth:
             next_frontier: list[str] = []
             for parent_id in frontier:
-                page = await self.child_sessions(parent_id, limit=limit)
-                for row in page.data:
-                    if not isinstance(row, dict):
-                        continue
-                    sid = row.get("id")
-                    if not isinstance(sid, str) or sid in seen:  # cycle / dupe guard
-                        continue
-                    seen.add(sid)
-                    nodes.append({**row, "parent_id": parent_id})
-                    next_frontier.append(sid)
+                after: str | None = None
+                while True:
+                    page = await self.child_sessions(parent_id, limit=limit, after=after)
+                    for row in page.data:
+                        if not isinstance(row, dict):
+                            continue
+                        sid = row.get("id")
+                        if not isinstance(sid, str) or sid in seen:  # cycle / dupe guard
+                            continue
+                        seen.add(sid)
+                        nodes.append({**row, "parent_id": parent_id})
+                        next_frontier.append(sid)
+                    # Follow the cursor so no level stops at one page.
+                    if not page.has_more or not page.last_id or page.last_id == after:
+                        break
+                    after = page.last_id
             frontier = next_frontier
             depth += 1
         return nodes
