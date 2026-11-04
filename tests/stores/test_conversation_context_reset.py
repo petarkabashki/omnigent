@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import contextvars
+import threading
+import time
+from typing import Any
+
 import pytest
 
 from omnigent.entities import ContextResetData, MessageData, NewConversationItem
@@ -104,3 +109,57 @@ def test_reset_of_an_unused_session_stores_no_usage(store: SqlAlchemyConversatio
     current = store.get_conversation(conv.id)
     assert current is not None
     assert not current.session_usage
+
+
+def test_update_session_usage_applies_against_the_current_epoch(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    """``apply`` sees the stored usage and epoch; returning False writes nothing."""
+    conv = store.create_conversation()
+    store.append_context_reset(conv.id, response_id="reset_1")
+    seen: list[int] = []
+
+    def record(usage: dict[str, Any], epoch: int) -> bool:
+        seen.append(epoch)
+        usage["total_usd"] = 1.5
+        return True
+
+    assert store.update_session_usage(conv.id, record) == {"total_usd": 1.5}
+
+    def discard(usage: dict[str, Any], _epoch: int) -> bool:
+        usage["total_usd"] = 99.0
+        return False
+
+    store.update_session_usage(conv.id, discard)
+    assert seen == [1]
+    assert store.update_session_usage(conv.id, lambda _usage, _epoch: False) == {"total_usd": 1.5}
+
+
+def test_concurrent_update_session_usage_loses_no_update(
+    store: SqlAlchemyConversationStore,
+) -> None:
+    """Writers serialize on the row, so each one reads the previous writer's result."""
+    conv = store.create_conversation()
+    writers = 6
+    barrier = threading.Barrier(writers)
+
+    def add_one(usage: dict[str, Any], _epoch: int) -> bool:
+        before = usage.get("turns", 0)
+        time.sleep(0.05)  # Hold the read open so an unlocked writer would overlap.
+        usage["turns"] = before + 1
+        return True
+
+    def write() -> None:
+        barrier.wait()
+        store.update_session_usage(conv.id, add_one)
+
+    threads = [
+        threading.Thread(target=contextvars.copy_context().run, args=(write,))
+        for _ in range(writers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert store.update_session_usage(conv.id, lambda _usage, _epoch: False) == {"turns": writers}
