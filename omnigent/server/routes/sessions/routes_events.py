@@ -342,6 +342,7 @@ from omnigent.tools.client_specified import parse_client_side_tool_specs
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
+    has_closed_title_marker,
     is_session_closed,
 )
 
@@ -3794,16 +3795,18 @@ def register_events_routes(
             """
             events: list[dict[str, Any]] = []
             try:
+                # One page, like the child_sessions route: older children are
+                # reached by paging, not by the snapshot. Legacy closed rows stay unlisted.
                 page = await asyncio.to_thread(
                     conversation_store.list_conversations,
-                    limit=100,
+                    limit=20,
                     kind="sub_agent",
                     parent_conversation_id=session_id,
                     order="desc",
                     sort_by="created_at",
                 )
                 summaries = await _child_session_summaries_from_conversations(
-                    page.data,
+                    [c for c in page.data if not has_closed_title_marker(c.title)],
                     session_id,
                     conversation_store,
                 )
