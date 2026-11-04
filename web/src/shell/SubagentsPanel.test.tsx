@@ -110,7 +110,7 @@ function collapseToggleFor(container: HTMLElement, childId: string): HTMLElement
  *  children, mirroring the real hook's empty default. */
 function mockChildTree(
   tree: Record<string, ChildSessionInfo[]>,
-  paging: { moreFor?: string[]; loadMore?: () => Promise<void> } = {},
+  paging: { moreFor?: string[]; loadMore?: () => Promise<void>; loadMoreError?: string } = {},
 ) {
   useChildSessionsMock.mockImplementation((id) => ({
     children: id !== null ? (tree[id] ?? []) : [],
@@ -119,6 +119,7 @@ function mockChildTree(
     hasMore: id !== null && (paging.moreFor ?? []).includes(id),
     loadMore: paging.loadMore ?? (async () => {}),
     isLoadingMore: false,
+    loadMoreError: paging.loadMoreError ?? null,
   }));
 }
 
@@ -1616,6 +1617,17 @@ describe("SubagentsPanel older children", () => {
     expect(notice.textContent).toContain("older agents not shown");
     fireEvent.click(within(notice).getByTestId("subagent-load-more"));
     expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows why Load more failed next to the notice", () => {
+    // WHY: a failed fetch must not look like a button that does nothing.
+    mockChildTree(
+      { conv_parent: [childInfo({ id: "conv_a" })] },
+      { moreFor: ["conv_parent"], loadMoreError: "Server exploded" },
+    );
+    renderPanel();
+
+    expect(screen.getByTestId("subagent-load-more-error").textContent).toBe("Server exploded");
   });
 
   it("shows no notice when every child is loaded", () => {

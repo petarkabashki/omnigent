@@ -84,7 +84,7 @@ interface SubagentsPanelProps {
 type ViewMode = "list" | "graph";
 
 export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanelProps) {
-  const { children, isLoading, error, hasMore, loadMore, isLoadingMore } =
+  const { children, isLoading, error, hasMore, loadMore, isLoadingMore, loadMoreError } =
     useChildSessions(rootSessionId);
   const [addOpen, setAddOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -163,6 +163,7 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
             shown={children.length}
             depth={1}
             loading={isLoadingMore}
+            error={loadMoreError}
             onLoadMore={loadMore}
           />
         )}
@@ -184,11 +185,13 @@ function MoreChildrenNotice({
   shown,
   depth,
   loading,
+  error,
   onLoadMore,
 }: {
   shown: number;
   depth: number;
   loading: boolean;
+  error: string | null;
   onLoadMore: () => Promise<void>;
 }) {
   return (
@@ -198,6 +201,11 @@ function MoreChildrenNotice({
       className="flex items-center gap-2 py-1 pr-1 text-sm text-muted-foreground"
     >
       <span>Showing {shown} — older agents not shown.</span>
+      {error && (
+        <span role="alert" data-testid="subagent-load-more-error" className="text-destructive">
+          {error}
+        </span>
+      )}
       <Button
         variant="ghost"
         size="xs"
@@ -564,6 +572,7 @@ function SubagentRow({
     hasMore: hasMoreGrandchildren,
     loadMore: loadMoreGrandchildren,
     isLoadingMore: isLoadingMoreGrandchildren,
+    loadMoreError: loadMoreGrandchildrenError,
   } = useChildSessions(depth < MAX_TREE_DEPTH ? child.id : null);
   const hasGrandchildren = grandchildren.length > 0;
   const ToggleIcon = collapsed ? ChevronRightIcon : ChevronDownIcon;
@@ -709,6 +718,7 @@ function SubagentRow({
           shown={grandchildren.length}
           depth={depth + 1}
           loading={isLoadingMoreGrandchildren}
+          error={loadMoreGrandchildrenError}
           onLoadMore={loadMoreGrandchildren}
         />
       )}
