@@ -42,6 +42,7 @@ import { UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
 import type { Agent } from "@/hooks/useAgents";
 import type { Conversation } from "@/hooks/useConversations";
+import { agentsBadgeLabel } from "@/lib/partialCount";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useOmnigentAnalytics } from "@/lib/analytics";
 import { cn } from "@/lib/utils";
@@ -92,6 +93,8 @@ interface MobileSessionMenuProps {
    * entry badge) — starts at 1 for a lone agent.
    */
   agentCount: number;
+  /** True when the child list is a partial page, so the counts are lower bounds. */
+  agentCountPartial?: boolean;
   /** Open the mobile files drawer (full folder tree). */
   onOpenFiles: () => void;
   /** Open the mobile files drawer pinned to the changed-files list. */
@@ -427,9 +430,11 @@ export function ChatHeader({
                 : "bg-muted text-muted-foreground",
             )}
           >
-            {mobileMenu.subagentsWorking > 0
-              ? `${mobileMenu.subagentsWorking}/${mobileMenu.agentCount}`
-              : mobileMenu.agentCount}
+            {agentsBadgeLabel(
+              mobileMenu.subagentsWorking,
+              mobileMenu.agentCount,
+              mobileMenu.agentCountPartial ?? false,
+            )}
           </span>
         </DropdownMenuItem>
         {mobileMenu.showSideChats && (

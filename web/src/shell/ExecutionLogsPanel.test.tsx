@@ -16,6 +16,8 @@ import type { RawSessionItem } from "@/hooks/useSessionItems";
 
 const h = vi.hoisted(() => ({
   children: [] as ChildSessionInfo[],
+  hasMore: false,
+  loadMore: (() => Promise.resolve()) as () => Promise<void>,
   itemsResult: {
     items: [] as RawSessionItem[],
     isLoading: false,
@@ -31,7 +33,16 @@ vi.mock("@/hooks/useChildSessions", async (importOriginal) => {
   // Keep the real key helpers (executionLogTabKey / MAIN_EXECUTION_LOG_KEY) so
   // the panel's entry keys match what initialKey passes in.
   const actual = await importOriginal<typeof UseChildSessionsModule>();
-  return { ...actual, useChildSessions: () => ({ children: h.children }) };
+  return {
+    ...actual,
+    useChildSessions: () => ({
+      children: h.children,
+      hasMore: h.hasMore,
+      loadMore: h.loadMore,
+      isLoadingMore: false,
+      loadMoreError: null,
+    }),
+  };
 });
 
 vi.mock("@/hooks/useSessionItems", () => ({
@@ -84,6 +95,8 @@ function renderPanel(
 
 beforeEach(() => {
   h.children = [];
+  h.hasMore = false;
+  h.loadMore = () => Promise.resolve();
   h.itemsResult = {
     items: [],
     isLoading: false,
@@ -158,6 +171,32 @@ describe("ExecutionLogsPanel entries", () => {
     // The child's label is the active trigger value.
     expect(screen.getByText("researcher:auth")).toBeInTheDocument();
     expect(screen.getByTestId("execution-log-entry")).toBeInTheDocument();
+  });
+});
+
+describe("ExecutionLogsPanel older agents", () => {
+  it("says older agents are not listed when the child list is partial", () => {
+    h.children = [mkChild({ id: "conv_c1" })];
+    h.hasMore = true;
+    renderPanel({ open: true });
+    expect(screen.getByTestId("older-agents-notice")).toHaveTextContent("older agents not shown");
+  });
+
+  it("pages in a requested agent that is not on the loaded page instead of showing main", () => {
+    const loadMore = vi.fn(() => Promise.resolve());
+    h.children = [mkChild({ id: "conv_c1" })];
+    h.hasMore = true;
+    h.loadMore = loadMore;
+    renderPanel({ open: true, initialKey: executionLogTabKey("conv_older") });
+    expect(loadMore).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("No items")).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("has no notice when every agent is loaded", () => {
+    h.children = [mkChild({ id: "conv_c1" })];
+    renderPanel({ open: true });
+    expect(screen.queryByTestId("older-agents-notice")).toBeNull();
   });
 });
 

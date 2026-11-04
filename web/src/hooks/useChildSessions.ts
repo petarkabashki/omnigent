@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
@@ -405,14 +405,16 @@ export function useChildSessions(
  * @param ancestorId - Session whose tree to search, e.g. ``"conv_root"``;
  *   ``null`` disables the lookup.
  * @param targetId - Descendant to find, e.g. ``"conv_child123"``.
- * @returns The descendant's summary, or ``null`` while unknown.
+ * @returns The descendant's summary, or ``null`` while unknown. When the
+ *   ancestor has older children not yet loaded, pages them in until found,
+ *   so a miss on a partial page is not read as absent.
  */
 export function useDescendantSession(
   ancestorId: string | null,
   targetId: string,
 ): ChildSessionInfo | null {
   const queryClient = useQueryClient();
-  useChildSessions(ancestorId);
+  const { hasMore, loadMore, isLoadingMore, loadMoreError } = useChildSessions(ancestorId);
   const subscribe = useCallback(
     (onChange: () => void) =>
       queryClient.getQueryCache().subscribe((event) => {
@@ -422,9 +424,14 @@ export function useDescendantSession(
   );
   // Cached rows keep their identity until their list changes, so the
   // snapshot is stable between unrelated cache events.
-  return useSyncExternalStore(subscribe, () =>
+  const found = useSyncExternalStore(subscribe, () =>
     ancestorId === null
       ? null
       : findCachedDescendant(queryClient, ancestorId, targetId, MAX_TREE_DEPTH),
   );
+  const shouldPageIn = found === null && hasMore && !isLoadingMore && loadMoreError === null;
+  useEffect(() => {
+    if (shouldPageIn) void loadMore();
+  }, [shouldPageIn, loadMore]);
+  return found;
 }

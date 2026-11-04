@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RunningDot } from "@/components/RunningDot";
 import { useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSessions";
+import { partialCountLabel } from "@/lib/partialCount";
 import { Link, useLocation } from "@/lib/routing";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { cn } from "@/lib/utils";
@@ -54,19 +55,20 @@ function indicatorChild(child: ChildSessionInfo): IndicatorChild | null {
   return null;
 }
 
-function statusSummary(items: IndicatorChild[]): string {
+function statusSummary(items: IndicatorChild[], partial: boolean): string {
   const active = items.filter((item) => item.state === "active").length;
   const parked = items.filter((item) => item.state === "parked").length;
   const quiet = items.filter((item) => item.state === "quiet").length;
   const errors = items.filter((item) => item.state === "error").length;
-  const total = items.length;
+  const total = partialCountLabel(items.length, partial);
   const parts = [
     active > 0 ? `${active} active` : null,
     parked > 0 ? `${parked} awaiting input` : null,
     quiet > 0 ? `${quiet} disconnected` : null,
     errors > 0 ? `${errors} need${errors === 1 ? "s" : ""} attention` : null,
   ].filter(Boolean);
-  return `${total} sub-agent${total === 1 ? "" : "s"}: ${parts.join(", ")}`;
+  const plural = partial || items.length !== 1;
+  return `${total} sub-agent${plural ? "s" : ""}: ${parts.join(", ")}${partial ? " (older agents not counted)" : ""}`;
 }
 
 function SubagentStateIndicator({ state, label }: { state: IndicatorState; label: string }) {
@@ -146,7 +148,7 @@ function SubagentNavigationRow({
 }
 
 export function SubagentTaskIndicator({ conversationId }: { conversationId: string | null }) {
-  const { children } = useChildSessions(conversationId);
+  const { children, hasMore } = useChildSessions(conversationId);
   const items = children
     .map(indicatorChild)
     .filter((item): item is IndicatorChild => item !== null);
@@ -183,7 +185,7 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
 
   if (count <= 0) return null;
 
-  const countLabel = statusSummary(items);
+  const countLabel = statusSummary(items, hasMore);
   const triggerState: IndicatorState = items.some((item) => item.state === "error")
     ? "error"
     : items.some((item) => item.state === "parked")
@@ -218,7 +220,7 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
             )}
           >
             <BotIcon className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
-            {count}
+            {partialCountLabel(count, hasMore)}
           </Button>
         </PopoverTrigger>
         <PopoverContent

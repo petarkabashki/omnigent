@@ -60,6 +60,42 @@ describe("useDescendantSession", () => {
     await waitFor(() => expect(result.current?.task_summary).toBe("Investigate auth flow"));
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/sessions/conv_parent/child_sessions");
   });
+
+  it("pages in older children until the target is found", async () => {
+    // WHY: a miss on a partial first page must not read as absent; the card
+    // would otherwise label an older child as an anonymous sub-agent.
+    const row = (id: string) => ({
+      id,
+      title: `researcher:${id}`,
+      task_summary: `Task ${id}`,
+      tool: "researcher",
+      session_name: id,
+      current_task_status: "in_progress",
+      busy: true,
+    });
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            object: "list",
+            data: [row("conv_new")],
+            has_more: true,
+            last_id: "conv_new",
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ object: "list", data: [row("conv_old")], has_more: false })),
+      );
+    const { result } = renderHook(() => useDescendantSession("conv_parent", "conv_old"), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current?.task_summary).toBe("Task conv_old"));
+    expect(authenticatedFetch).toHaveBeenLastCalledWith(
+      "/v1/sessions/conv_parent/child_sessions?after=conv_new",
+    );
+  });
 });
 
 describe("useChildSessions paging", () => {

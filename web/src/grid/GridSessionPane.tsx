@@ -118,7 +118,8 @@ export function GridSessionPane({
   const wrapper = session?.labels?.["omnigent.wrapper"];
   const terminalFirst = session?.labels?.["omnigent.ui"] === "terminal";
   const rootSessionId = useRootSessionId(sessionId, session?.parentSessionId);
-  const { children: childSessions } = useChildSessions(rootSessionId);
+  const { children: childSessions, hasMore: childSessionsPartial } =
+    useChildSessions(rootSessionId);
   const {
     canBrowseWorkspace: canBrowse,
     environmentQuery: environment,
@@ -499,6 +500,7 @@ export function GridSessionPane({
                 changedCount={changedCount}
                 subagentsWorking={childSessions.filter((child) => child.busy).length}
                 agentCount={childSessions.length + 1}
+                agentCountPartial={childSessionsPartial}
                 rootSessionId={rootSessionId}
                 selectedFilePath={canBrowse ? (workspace.selectedFilePath ?? null) : null}
                 filePosition={position}

@@ -29,8 +29,8 @@ function child(overrides: Partial<ChildSessionInfo>): ChildSessionInfo {
   };
 }
 
-function setChildren(children: ChildSessionInfo[]) {
-  useChildSessionsMock.mockReturnValue({ children, isLoading: false, error: null });
+function setChildren(children: ChildSessionInfo[], hasMore = false) {
+  useChildSessionsMock.mockReturnValue({ children, isLoading: false, error: null, hasMore });
 }
 
 function renderIndicator(conversationId: string | null = "conv-1", route = "/") {
@@ -88,6 +88,15 @@ describe("SubagentTaskIndicator", () => {
     );
     expect(pill.querySelector("svg")).toHaveAttribute("stroke-width", "1.5");
     expect(useChildSessionsMock).toHaveBeenCalledWith("conv-1");
+  });
+
+  it("says the tally is partial when older sub-agents are not loaded", () => {
+    setChildren([child({ id: "working", busy: true })], true);
+    renderIndicator();
+
+    const pill = screen.getByTestId("subagent-task-pill");
+    expect(pill).toHaveTextContent("1+");
+    expect(pill).toHaveAccessibleName("1+ sub-agents: 1 active (older agents not counted)");
   });
 
   it("shows state labels and honest navigation targets in the popover", () => {

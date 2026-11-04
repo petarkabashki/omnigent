@@ -23,6 +23,7 @@ import {
   XIcon,
   type LucideIcon,
 } from "lucide-react";
+import { OlderAgentsNotice } from "./OlderAgentsNotice";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -96,7 +97,9 @@ export function ExecutionLogsPanel({
 }: ExecutionLogsPanelProps) {
   // No child-sessions poll — status arrives live over the session stream
   // (see chatStore ``session_child_session_updated``).
-  const { children } = useChildSessions(open ? conversationId : null);
+  const { children, hasMore, loadMore, isLoadingMore, loadMoreError } = useChildSessions(
+    open ? conversationId : null,
+  );
   const { panelWidth, handleProps, isDesktop } = useResizablePanel(open);
   const [activeKey, setActiveKey] = useState<string>("");
   const ref = useRef<HTMLElement>(null);
@@ -129,7 +132,15 @@ export function ExecutionLogsPanel({
   }, [open]);
 
   const entries = buildLogEntries(conversationId, children);
-  const activeEntry = entries.find((e) => e.key === activeKey) ?? entries[0] ?? null;
+  const requestedEntry = entries.find((e) => e.key === activeKey);
+  // The requested agent may sit on an older page: page it in rather than
+  // falling back to another entry.
+  const awaitingOlderEntry = open && activeKey !== "" && !requestedEntry && hasMore;
+  const activeEntry = requestedEntry ?? (awaitingOlderEntry ? null : (entries[0] ?? null));
+  const shouldPageIn = awaitingOlderEntry && !isLoadingMore && loadMoreError === null;
+  useEffect(() => {
+    if (shouldPageIn) void loadMore();
+  }, [shouldPageIn, loadMore]);
   const [view, setView] = useState<"items" | "sse">("items");
 
   return (
@@ -162,6 +173,14 @@ export function ExecutionLogsPanel({
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+        {open && hasMore && (
+          <OlderAgentsNotice
+            shown={children.length}
+            loading={isLoadingMore}
+            error={loadMoreError}
+            onLoadMore={loadMore}
+          />
+        )}
         {!open || !activeEntry ? (
           <div className="flex-1" />
         ) : (

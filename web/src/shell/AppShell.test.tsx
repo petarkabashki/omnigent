@@ -2371,6 +2371,19 @@ describe("Subagents tab", () => {
     );
   });
 
+  it("marks the Agents badge partial when older children are not loaded", () => {
+    useEnvironmentMock.mockReturnValue({
+      data: { available: true, root: null },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+    mockConversations([{ id: "conv_abc", permission_level: null }]);
+    useChildSessionsMock.mockReturnValue({ ...oneChild, hasMore: true } as never);
+
+    renderShell("/c/conv_abc");
+
+    expect(screen.getByRole("tab", { name: "Agents 2+" })).toBeInTheDocument();
+  });
+
   it("renders the Subagents tab in terminal-first sessions too", () => {
     // Subagents are spawned independently of terminals, so the tab
     // must be reachable in claude-native sessions where the Terminals

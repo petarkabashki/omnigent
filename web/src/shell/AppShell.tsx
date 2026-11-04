@@ -945,7 +945,8 @@ function AppShellImpl() {
   // One-shot fetch (no polling) for the Subagents tab's count badge.
   // SubagentsPanel mounts its own polling usage of the hook against
   // the same rootSessionId, so the cache is shared.
-  const { children: childSessions } = useChildSessions(rootSessionId);
+  const { children: childSessions, hasMore: childSessionsPartial } =
+    useChildSessions(rootSessionId);
   // Remember the resolved root so a later click into one of its tree
   // members can hold it steady (see ``rootSessionId`` above).
   useEffect(() => {
@@ -2693,6 +2694,7 @@ function AppShellImpl() {
                       changedCount,
                       subagentsWorking,
                       agentCount,
+                      agentCountPartial: childSessionsPartial,
                       onOpenFiles: openFilesPanel,
                       onOpenChanges: openChangesPanel,
                       onOpenShells: openShellsPanel,
@@ -2763,6 +2765,7 @@ function AppShellImpl() {
                     changedCount={changedCount}
                     subagentsWorking={subagentsWorking}
                     agentCount={agentCount}
+                    agentCountPartial={childSessionsPartial}
                     rootSessionId={rootSessionId}
                     selectedFilePath={selectedFilePath}
                     filePosition={filePosition}

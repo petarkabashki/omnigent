@@ -65,6 +65,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { BrowserPane } from "@/components/BrowserPane/BrowserPane";
 import { useBrowserTabs } from "@/hooks/useBrowserTabs";
+import { agentsBadgeLabel } from "@/lib/partialCount";
 import { useInertRef } from "@/hooks/useInertRef";
 import { useNewBrowserHotkey } from "@/hooks/useNewBrowserHotkey";
 import { useSideChats } from "@/hooks/useSideChats";
@@ -733,6 +734,8 @@ interface WorkspacePanelProps {
    * badge denominator) — starts at 1 for a lone agent.
    */
   agentCount: number;
+  /** True when the child list is a partial page, so the counts are lower bounds. */
+  agentCountPartial?: boolean;
   /**
    * The "root" session id for the Agents tab — the active session's
    * parent when inside a child, else the active id. May be null while
@@ -849,6 +852,7 @@ function WorkspacePanelImpl({
   changedCount,
   subagentsWorking,
   agentCount,
+  agentCountPartial = false,
   rootSessionId,
   selectedFilePath,
   filePosition,
@@ -1366,6 +1370,7 @@ function WorkspacePanelImpl({
       disabled: false,
     })),
   ];
+  const agentsBadge = agentsBadgeLabel(subagentsWorking, agentCount, agentCountPartial);
   const tabTriggers = {
     "content-search": showContentSearch && showFilesPanel && (
       <WorkspaceTabTooltip
@@ -1439,11 +1444,7 @@ function WorkspacePanelImpl({
           disabled={pending}
           aria-keyshortcuts={shortcutFor("subagents")}
           data-workspace-tab="subagents"
-          aria-label={
-            subagentsWorking > 0
-              ? `Agents ${subagentsWorking}/${agentCount}`
-              : `Agents ${agentCount}`
-          }
+          aria-label={`Agents ${agentsBadge}`}
           className="size-6 shrink-0 p-0 hover:border-1 hover:border-muted rounded-md!"
         >
           <BotIcon />
@@ -1455,7 +1456,7 @@ function WorkspacePanelImpl({
               subagentsWorking > 0 ? "text-success" : "text-muted-foreground",
             )}
           >
-            {subagentsWorking > 0 ? `${subagentsWorking}/${agentCount}` : agentCount}
+            {agentsBadge}
           </span>
         </TabsTrigger>
       </WorkspaceTabTooltip>
