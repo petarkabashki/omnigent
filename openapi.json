@@ -14891,7 +14891,7 @@
     },
     "/v1/sessions/aliases/resolve": {
       "get": {
-        "description": "Resolve `Role`, `project/Role` or a UUID to one owned session.\n\nA bare `Role` is relative to the orchestration source's project when\na runner sends the source header, otherwise to unfiled sessions.",
+        "description": "Resolve `Role`, `/Role`, `path/Role` or a UUID to one owned session.\n\nA bare `Role` is relative to the orchestration source's project when a\nrunner sends the source header, else to `namespace` (the project a\npicker has in view), else to the project of `workspace` (the CLI's\nworking directory), else to unfiled sessions.",
         "operationId": "resolve_session_alias_v1_sessions_aliases_resolve_get",
         "parameters": [
           {
@@ -14901,6 +14901,38 @@
             "schema": {
               "title": "Address",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace"
             }
           }
         ],
@@ -14951,6 +14983,58 @@
           }
         },
         "summary": "Resolve Session Aliases",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/aliases/roles": {
+      "get": {
+        "description": "List one namespace's roles; `sys_role_list` reads this.\n\n`namespace` is a path (`/` = the unfiled root); omitted, it is the\norchestration source's namespace, else the root.",
+        "operationId": "list_namespace_session_roles_v1_sessions_aliases_roles_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "namespace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Namespace"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Namespace Session Roles V1 Sessions Aliases Roles Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Namespace Session Roles",
         "tags": [
           "sessions"
         ]
@@ -15603,7 +15687,7 @@
     },
     "/v1/sessions/{session_id}/alias": {
       "delete": {
-        "description": "Clear a session's alias.",
+        "description": "Release the session's role; a failed release is an error, never a silent success.",
         "operationId": "delete_session_alias_v1_sessions__session_id__alias_delete",
         "parameters": [
           {
@@ -15637,7 +15721,7 @@
         ]
       },
       "put": {
-        "description": "Set the owner-chosen alias, unique within the session's project.",
+        "description": "Take or create the named role in the session's own namespace.",
         "operationId": "put_session_alias_v1_sessions__session_id__alias_put",
         "parameters": [
           {
