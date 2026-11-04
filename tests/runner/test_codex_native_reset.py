@@ -218,14 +218,18 @@ def _codex_reset(
     """Build the shared reset phases configured as codex, recording step order."""
     ensure_lock = asyncio.Lock()
 
-    async def stop_pane(session_id: str) -> None:
+    async def stop_pane(session_id: str, _bridge_dir: Path) -> None:
         calls.append(f"stop {session_id} locked={ensure_lock.locked()}")
         # A forwarder racing the stop re-records the old thread.
         _write_cursor(tmp_path)
 
     async def bridge_dir_for_session(session_id: str) -> Path:
-        calls.append(f"wipe {session_id} cursor={read_bridge_state(tmp_path) is not None}")
+        calls.append(f"lookup {session_id}")
         return tmp_path
+
+    def wipe(bridge_dir: Path) -> None:
+        calls.append(f"wipe cursor={read_bridge_state(bridge_dir) is not None}")
+        wipe_codex_resume_state(bridge_dir)
 
     async def relaunch(session_id: str) -> None:
         calls.append(
@@ -239,7 +243,7 @@ def _codex_reset(
         relaunch=relaunch,
         ensure_lock_for_session=lambda _session_id: ensure_lock,
         hold_s=hold_s,
-        wipe=wipe_codex_resume_state,
+        wipe=wipe,
         runtime_label="Codex",
     )
     return reset, ensure_lock
@@ -257,10 +261,11 @@ async def test_prepare_holds_launches_off_until_commit_relaunches_without_the_cu
     await reset.commit("conv_a")
 
     assert calls == [
+        "lookup conv_a",
         "stop conv_a locked=True",
-        "wipe conv_a cursor=True",
+        "wipe cursor=True",
         "stop conv_a locked=True",
-        "wipe conv_a cursor=True",
+        "wipe cursor=True",
         "relaunch conv_a cursor=False locked=False",
     ]
 

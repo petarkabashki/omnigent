@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
@@ -15,6 +16,7 @@ from omnigent.runner import app as runner_app
 from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
 from omnigent.spec.types import AgentSpec, ExecutorSpec
+from omnigent.terminals import TerminalRegistry
 from tests.runner.conftest import _build_app_for_spec, _runner_client
 from tests.runner.helpers import NullServerClient
 from tests.runner.native_helpers import _harness_spec
@@ -215,6 +217,63 @@ async def test_claude_native_reset_holds_launches_and_drops_the_init_snapshot(
 
     assert session_id not in envelopes
     assert not ensure_locks[session_id].locked()
+
+
+class _LabelsFailAfterFirstReadServerClient(_SnapshotServerClient):
+    """Server that answers one ``/labels`` read, then can't be reached for more."""
+
+    labels = {codex_native_bridge.CODEX_NATIVE_BRIDGE_ID_LABEL_KEY: "rotated-bridge"}
+    label_reads = 0
+
+    async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+        if url.endswith("/labels"):
+            self.label_reads += 1
+            if self.label_reads > 1:
+                raise httpx.ConnectError("server unreachable")
+        return await super().get(url, **kwargs)
+
+
+async def test_codex_reset_relaunches_when_labels_fail_after_prepare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit that raised here would give the user a 200 and no pane."""
+    session_id = "9b1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path)
+    server_client = _LabelsFailAfterFirstReadServerClient()
+    app, _ = await _build_app_for_spec(
+        _harness_spec("codex-native"),
+        server_client=server_client,
+        terminal_registry=TerminalRegistry(),
+    )
+    stopped_bridges: list[Path] = []
+    relaunched: list[str] = []
+
+    async def record_bridge_stop(bridge_dir: Path) -> None:
+        stopped_bridges.append(bridge_dir)
+
+    async def record_relaunch(conv_id: str, *_args: object, **_kwargs: object) -> None:
+        relaunched.append(conv_id)
+
+    monkeypatch.setattr(
+        "omnigent.runner.native.stop_codex_native_bridge_backends", record_bridge_stop
+    )
+    monkeypatch.setattr(orchestration, "_auto_create_codex_terminal", record_relaunch)
+    event = {"type": "reset", "harness": "codex-native"}
+
+    async with _runner_client(app) as client:
+        prepared = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={**event, "phase": "prepare", "pending": "reject"},
+        )
+        assert prepared.status_code == 200, prepared.text
+        committed = await client.post(
+            f"/v1/sessions/{session_id}/events", json={**event, "phase": "commit"}
+        )
+        assert committed.status_code == 200, committed.text
+
+    rotated_bridge = codex_native_bridge.bridge_dir_for_bridge_id("rotated-bridge")
+    assert stopped_bridges == [rotated_bridge, rotated_bridge]
+    assert relaunched == [session_id]
 
 
 async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_nothing_late(

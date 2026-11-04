@@ -1865,7 +1865,7 @@ def build_native_controls(
     async def _handle_claude_native_clear(conv_id: str) -> Response:
         return await _inject_claude_native_slash(conv_id, command="/clear", action="clear")
 
-    async def _stop_claude_native_pane(conv_id: str) -> None:
+    async def _stop_claude_native_pane(conv_id: str, _bridge_dir: Path) -> None:
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
@@ -1897,7 +1897,7 @@ def build_native_controls(
     async def _relaunch_claude_native_pane(conv_id: str) -> None:
         await _ensure_native_terminal_for_turn(conv_id, "claude-native")
 
-    async def _stop_codex_native_pane(conv_id: str) -> None:
+    async def _stop_codex_native_pane(conv_id: str, bridge_dir: Path) -> None:
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.native import (
             stop_codex_native_bridge_backends,
@@ -1907,8 +1907,6 @@ def build_native_controls(
 
         # The caller holds the session's Codex ensure lock.
         terminal_id = terminal_resource_id("codex", "main")
-        # Ahead of any stop, so a refused lookup changes nothing.
-        bridge_dir = await _codex_native_bridge_dir_for_reset(conv_id)
         existing = None
         try:
             existing = await resource_registry.get_terminal_resource(conv_id, terminal_id)
