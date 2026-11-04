@@ -5477,7 +5477,7 @@ async def _auto_create_codex_terminal(
     # old process: the first launch loads the resume/fork module graph too.
     import omnigent.harnesses.codex_native.main as _codex_native_main  # noqa: F401
     import omnigent.harnesses.codex_native.process_registry as _process_registry  # noqa: F401
-    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+    import omnigent.runner.native.codex_reset as _codex_reset
     from omnigent.harnesses.codex_native.app_server import (
         CodexAppServerClient,
         CodexAppServerResponseError,
@@ -5514,7 +5514,12 @@ async def _auto_create_codex_terminal(
     bridge_dir = prepare_bridge_dir(launch_config.bridge_id or session_id)
     if launch_config.context_epoch is not None:
         # Late reports from this launch are stamped so a reset can refuse them.
-        await asyncio.to_thread(record_launch_epoch, bridge_dir, launch_config.context_epoch)
+        await asyncio.to_thread(
+            _codex_reset.stamp_codex_launch_epoch,
+            bridge_dir,
+            launch_config.context_epoch,
+            thread_id=launch_config.external_session_id,
+        )
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)

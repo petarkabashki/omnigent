@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
 from omnigent.harnesses.codex_native.forwarder import reset_codex_forward_state
 from omnigent.native._native_post_delivery import clear_dead_letters
 from omnigent.runner.turn_routing import clear_pending_replay
@@ -25,3 +26,20 @@ def wipe_codex_resume_state(bridge_dir: Path) -> None:
     clear_pending_replay(bridge_dir)
     # The forwarder is stopped, so every dead letter predates the boundary.
     clear_dead_letters(bridge_dir)
+
+
+def stamp_codex_launch_epoch(
+    bridge_dir: Path, context_epoch: int, *, thread_id: str | None
+) -> None:
+    """Stamp a launch's epoch, catching up on a reset no runner ran.
+
+    A reset with no bound runner never wipes the bridge dir, so the first launch
+    after it sees the boundary as an older stamp and a cleared thread id.
+
+    :param bridge_dir: The session's Codex bridge directory.
+    :param context_epoch: The session's current context epoch.
+    :param thread_id: The Codex thread this launch resumes, if any.
+    """
+    if thread_id is None and (read_launch_epoch(bridge_dir) or 0) < context_epoch:
+        wipe_codex_resume_state(bridge_dir)
+    record_launch_epoch(bridge_dir, context_epoch)

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
+    bridge_dir_for_bridge_id,
     read_bridge_state,
     read_child_usage_baselines,
     record_child_usage_baseline,
@@ -21,9 +25,9 @@ from omnigent.harnesses.codex_native.forwarder import (
 )
 from omnigent.native._native_post_delivery import append_dead_letter
 from omnigent.runner import turn_routing
-from omnigent.runner.native import claude_reset
+from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset, ClaudeResetBusyError
-from omnigent.runner.native.codex_reset import wipe_codex_resume_state
+from omnigent.runner.native.codex_reset import stamp_codex_launch_epoch, wipe_codex_resume_state
 
 
 def _write_cursor(bridge_dir: Path) -> None:
@@ -69,6 +73,65 @@ def test_wipe_also_drops_a_pending_routed_prompt_and_keeps_unrelated_files(
     assert read_bridge_state(tmp_path) is None
     assert turn_routing.read_pending_replay(tmp_path) is None
     assert unrelated.exists()
+
+
+@pytest.mark.parametrize(
+    ("stamped_epoch", "thread_id", "wiped"),
+    [
+        pytest.param(1, None, True, id="reset_no_runner_ran"),
+        pytest.param(None, None, True, id="never_stamped"),
+        pytest.param(2, None, False, id="already_on_this_epoch"),
+        pytest.param(1, "thread_new", False, id="resuming_a_thread_from_this_epoch"),
+    ],
+)
+def test_a_launch_catches_up_on_a_reset_no_runner_ran(
+    tmp_path: Path, stamped_epoch: int | None, thread_id: str | None, wiped: bool
+) -> None:
+    _write_cursor(tmp_path)
+    if stamped_epoch is not None:
+        record_launch_epoch(tmp_path, stamped_epoch)
+
+    stamp_codex_launch_epoch(tmp_path, 2, thread_id=thread_id)
+
+    assert read_launch_epoch(tmp_path) == 2
+    assert (read_bridge_state(tmp_path) is None) is wiped
+    assert (read_child_usage_baselines(tmp_path) == {}) is wiped
+
+
+@pytest.mark.asyncio
+async def test_a_runner_launch_catches_up_on_a_reset_no_runner_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
+    bridge_dir = bridge_dir_for_bridge_id("conv_a")
+    bridge_dir.mkdir()
+    _write_cursor(bridge_dir)
+    record_launch_epoch(bridge_dir, 1)
+
+    class _StampDone(Exception):
+        pass
+
+    async def launch_config(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            external_session_id=None, workspace=tmp_path, bridge_id="conv_a", context_epoch=2
+        )
+
+    def stop_after_the_stamp(_bridge_dir: Path) -> Path:
+        raise _StampDone
+
+    monkeypatch.setattr(orchestration, "_codex_native_launch_config", launch_config)
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.bridge.socket_path_for_bridge_dir", stop_after_the_stamp
+    )
+
+    with pytest.raises(_StampDone):
+        await orchestration._auto_create_codex_terminal(
+            "conv_a", MagicMock(), lambda _session_id, _event: None
+        )
+
+    assert read_launch_epoch(bridge_dir) == 2
+    assert read_bridge_state(bridge_dir) is None
+    assert read_child_usage_baselines(bridge_dir) == {}
 
 
 @pytest.mark.asyncio

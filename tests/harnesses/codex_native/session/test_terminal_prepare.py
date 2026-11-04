@@ -16,7 +16,12 @@ import pytest
 from omnigent._runner_startup import RunnerStartupProgress
 from omnigent.harnesses.claude_native.bridge import read_launch_epoch
 from omnigent.harnesses.codex_native import main as codex_native
-from omnigent.harnesses.codex_native.bridge import bridge_dir_for_bridge_id
+from omnigent.harnesses.codex_native.bridge import (
+    bridge_dir_for_bridge_id,
+    prepare_bridge_dir,
+    read_child_usage_baselines,
+    record_child_usage_baseline,
+)
 from tests.harnesses.codex_native.session._support import (
     _write_source_rollout,
 )
@@ -392,10 +397,15 @@ async def test_prepare_codex_terminal_starts_fresh_after_a_reset_with_no_termina
 
     monkeypatch.setattr(codex_native, "build_codex_native_server", _reached_the_launch)
 
+    bridge_dir = prepare_bridge_dir("conv_test")
+    record_child_usage_baseline(bridge_dir, "thread_child", (5000, 4000, 100))
+
     with pytest.raises(_Sentinel):
         await _prepare_existing_session()
 
-    assert read_launch_epoch(bridge_dir_for_bridge_id("conv_test")) == 2
+    assert read_launch_epoch(bridge_dir) == 2
+    # A reset that reached no runner left these for the next launch to drop.
+    assert read_child_usage_baselines(bridge_dir) == {}
 
 
 @pytest.mark.asyncio

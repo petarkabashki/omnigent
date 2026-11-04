@@ -41,7 +41,6 @@ from omnigent.harness_availability import (
 )
 from omnigent.harnesses.claude_native.bridge import (
     read_launch_epoch,
-    record_launch_epoch,
     url_component,
 )
 from omnigent.harnesses.claude_native.main import (
@@ -1270,8 +1269,10 @@ async def _prepare_codex_terminal(
 
         bridge_dir = prepare_bridge_dir(bridge_id)
         if isinstance(context_epoch, int):
+            from omnigent.runner.native.codex_reset import stamp_codex_launch_epoch
+
             # Replaces a runner launch's stamp, which a reset may have outdated.
-            record_launch_epoch(bridge_dir, context_epoch)
+            stamp_codex_launch_epoch(bridge_dir, context_epoch, thread_id=thread_id)
         socket_path = socket_path_for_bridge_dir(bridge_dir)
         codex_home = codex_home_for_bridge_dir(bridge_dir)
         clear_bridge_state(bridge_dir)
