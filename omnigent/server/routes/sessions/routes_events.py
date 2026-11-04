@@ -115,10 +115,10 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
 )
+from omnigent.server.routes._auth_helpers import record_person_override
 from omnigent.server.routes._auth_helpers import (
     require_access as _require_access,
 )
-from omnigent.server.routes._auth_helpers import resolved_allows as _resolved_allows
 from omnigent.server.routes._auth_helpers import (
     require_access_and_level as _require_access_and_level,
 )
@@ -1153,15 +1153,9 @@ def register_events_routes(
             if origin == "reset":
                 return
             if origin in ("agent", "system"):
-                actor = origin
-            elif permission_store is None or user_id is None:
-                actor = "owner"
+                await asyncio.to_thread(record_override, session_id, "interrupt", origin)
             else:
-                access = await asyncio.to_thread(
-                    permission_store.resolve_access, user_id, session_id
-                )
-                actor = "owner" if _resolved_allows(access, LEVEL_OWNER) else "collaborator"
-            await asyncio.to_thread(record_override, session_id, "interrupt", actor)
+                await record_person_override(permission_store, user_id, session_id, "interrupt")
         except Exception:
             _logger.warning("interrupt override not recorded for %r", session_id, exc_info=True)
 
@@ -2095,9 +2089,7 @@ def register_events_routes(
                         int(time.time()) - RUNNER_LIVENESS_TTL_S,
                     )
             # Re-read so spend flushed while the runner stopped is in the snapshot.
-            ended_conv = await asyncio.to_thread(
-                conversation_store.get_conversation, session_id
-            )
+            ended_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             ended_conv = ended_conv or stop_conv
             await asyncio.to_thread(
                 record_ended,
@@ -2410,9 +2402,7 @@ def register_events_routes(
             _publish_session_superseded(session_id, target_conversation_id.strip())
             # /clear is the owner resetting the context; the terminal moved on.
             await asyncio.to_thread(record_override, session_id, "reset", "owner")
-            await asyncio.to_thread(
-                record_rotation, session_id, target_conversation_id.strip()
-            )
+            await asyncio.to_thread(record_rotation, session_id, target_conversation_id.strip())
             return {"queued": False}
         if body.type == _EXTERNAL_BTW_SIDECHAT_TYPE:
             question = body.data.get("question")

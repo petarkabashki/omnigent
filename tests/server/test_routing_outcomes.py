@@ -98,6 +98,25 @@ def test_override_records_actor_and_rejects_unknown_kind(data_dir: Path) -> None
         ro.record_override("s1", "pause", "owner")
 
 
+@pytest.mark.parametrize(
+    ("actors", "excluded"),
+    [
+        (["unknown"], True),
+        (["unknown", "harness"], True),
+        (["unknown", "owner"], False),
+        (["agent"], False),
+        (["collaborator"], False),
+    ],
+)
+def test_unknown_actor_excludes_the_step_unless_the_owner_settled_it(
+    data_dir: Path, actors: list[str], excluded: bool
+) -> None:
+    _log_decision("s1", "d1")
+    for actor in actors:
+        ro.record_override("s1", "model_change", actor)
+    assert ro.summarize_outcomes()["d1"]["success_excluded"] is excluded
+
+
 def test_corrupt_lines_are_skipped(data_dir: Path) -> None:
     _log_decision("s1", "d1")
     ro.record_accept("s1", "owner")

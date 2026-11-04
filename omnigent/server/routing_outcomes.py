@@ -12,6 +12,8 @@ Events (``event`` field), each with ``at`` (epoch seconds) and ``session_id``:
 
 * ``override``: ``kind`` (interrupt, harness_change, model_change,
   host_change, reset, rerun), ``actor``. Only ``actor="owner"`` counts.
+  ``actor="unknown"`` means a change seen with no way to tell who caused it,
+  so the step can be neither a success nor an override (``success_excluded``).
 * ``cost``: cumulative snapshot with ``usd_total`` (``total_cost_usd``),
   ``usd_policy``, ``credits_total``, ``cost_source``, ``native_cost_complete``
   (null off the native path) and ``session_usage``. Not written when the
@@ -58,6 +60,7 @@ from omnigent.server.shadow_routing import (
 
 _logger = logging.getLogger(__name__)
 
+ACTOR_UNKNOWN = "unknown"
 OVERRIDE_KINDS = frozenset(
     {"interrupt", "harness_change", "model_change", "host_change", "reset", "rerun"}
 )
@@ -533,6 +536,8 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
     ``native_cost_complete`` is null off the native path, else true only when
     every native session was complete. ``check`` and ``check_declared`` keep
     the latest by ``at``. ``overrides`` lists every override record.
+    ``success_excluded`` is true when an override's actor is unknown and no
+    owner override settles the step: leave it out of success scoring.
     """
     summaries: dict[str, dict[str, Any]] = {}  # type: ignore[explicit-any]
     per_session: dict[str, dict[str | None, dict[str, Any]]] = {}  # type: ignore[explicit-any]
@@ -556,6 +561,7 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
                 "check_declared": None,
                 "check": None,
                 "overrides": [],
+                "success_excluded": False,
                 "rotations": [],
             },
         )
@@ -616,6 +622,9 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
         summary[CREDITS_TOTAL] = _sum_known([entry[CREDITS_TOTAL] for entry in sessions.values()])
         summary[COST_SOURCE] = _combine_session_sources(sources)
         summary[NATIVE_COST_COMPLETE] = all(native) if native else None
+    for summary in summaries.values():
+        actors = {override.get("actor") for override in summary["overrides"]}
+        summary["success_excluded"] = ACTOR_UNKNOWN in actors and "owner" not in actors
     return summaries
 
 

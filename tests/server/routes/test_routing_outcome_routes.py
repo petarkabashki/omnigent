@@ -12,14 +12,15 @@ import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
 from omnigent.server import routing_outcomes as ro
-from omnigent.server.routes.sessions import routes_events as _status_cache_module
 from omnigent.server import shadow_routing as sr
-from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
+from omnigent.server.routes.sessions import routes_events as _status_cache_module
+from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _EVENTS = "omnigent.server.routes.sessions.routes_events"
+_ROUTES_CORE = "omnigent.server.routes.sessions.routes_core"
 _STATUS_CACHE = _status_cache_module._session_status_cache
 
 
@@ -166,13 +167,15 @@ async def test_reset_that_interrupts_then_is_refused_leaves_no_interrupt_overrid
     assert ro.summarize_outcomes().get("d1", {}).get("overrides", []) == []
 
 
-@pytest.mark.parametrize(("previous", "expected"), [(None, []), ("opus", ["model_change"])])
+@pytest.mark.parametrize(
+    ("previous", "expected"), [(None, []), ("opus", [("model_change", "unknown")])]
+)
 async def test_terminal_model_switch_is_an_override_but_the_launch_report_is_not(
     client: httpx.AsyncClient,
     routed_session: str,
     db_uri: str,
     previous: str | None,
-    expected: list[str],
+    expected: list[tuple[str, str]],
 ) -> None:
     if previous is not None:
         SqlAlchemyConversationStore(db_uri).update_conversation(
@@ -182,8 +185,61 @@ async def test_terminal_model_switch_is_an_override_but_the_launch_report_is_not
         f"/v1/sessions/{routed_session}/events",
         json={"type": "external_model_change", "data": {"model": "claude-sonnet-4-6"}},
     )
-    overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
-    assert [o["kind"] for o in overrides] == expected
+    summary = ro.summarize_outcomes().get("d1", {})
+    overrides = summary.get("overrides", [])
+    assert [(o["kind"], o["actor"]) for o in overrides] == expected
+    assert summary.get("success_excluded", False) is bool(expected)
+
+
+async def test_terminal_report_of_the_requested_model_is_not_a_second_override(
+    client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    SqlAlchemyConversationStore(db_uri).update_conversation(
+        routed_session, reported_model="opus", model_override="claude-sonnet-4-6"
+    )
+    await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "external_model_change", "data": {"model": "claude-sonnet-4-6"}},
+    )
+    assert _events("override") == []
+
+
+@pytest.mark.parametrize(
+    ("patch_body", "expected"),
+    [
+        ({"model_override": "m-new"}, [("model_change", "owner")]),
+        ({"model_override": "m-old"}, []),
+        ({"model_override": "m-new", "silent": True}, []),
+    ],
+)
+async def test_patch_model_override_is_an_owner_action(
+    client: httpx.AsyncClient,
+    routed_session: str,
+    db_uri: str,
+    patch_body: dict[str, object],
+    expected: list[tuple[str, str]],
+) -> None:
+    SqlAlchemyConversationStore(db_uri).update_conversation(routed_session, model_override="m-old")
+    with patch(f"{_ROUTES_CORE}._validate_session_model_selection"):
+        resp = await client.patch(f"/v1/sessions/{routed_session}", json=patch_body)
+    assert resp.status_code == 200
+    assert [(o["kind"], o["actor"]) for o in _events("override")] == expected
+    assert ro.summarize_outcomes().get("d1", {}).get("success_excluded", False) is False
+
+
+async def test_patch_model_refused_by_the_terminal_is_not_an_override(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    refused = AsyncMock(return_value=None)
+    with (
+        patch(f"{_ROUTES_CORE}._validate_session_model_selection"),
+        patch(f"{_ROUTES_CORE}._forward_session_change_to_runner", refused),
+        patch(f"{_ROUTES_CORE}._is_native_terminal_session", return_value=True),
+        patch(f"{_ROUTES_CORE}._unsupported_model_detail", return_value="unsupported model"),
+    ):
+        resp = await client.patch(f"/v1/sessions/{routed_session}", json={"model_override": "m"})
+    assert resp.status_code == 400
+    assert _events("override") == []
 
 
 def _grant(db_uri: str, user: str, session_id: str, level: int) -> dict[str, str]:
@@ -231,6 +287,20 @@ async def test_interrupt_actor_follows_resolved_access(
     assert resp.status_code == 202
     overrides = ro.summarize_outcomes()["d1"]["overrides"]
     assert [(o["kind"], o["actor"]) for o in overrides] == [("interrupt", actor)]
+
+
+async def test_patch_model_by_a_collaborator_is_not_an_owner_override(
+    auth_client: httpx.AsyncClient, routed_session: str, db_uri: str
+) -> None:
+    headers = _grant(db_uri, "caller", routed_session, LEVEL_EDIT)
+    with patch(f"{_ROUTES_CORE}._validate_session_model_selection"):
+        resp = await auth_client.patch(
+            f"/v1/sessions/{routed_session}", json={"model_override": "m-new"}, headers=headers
+        )
+    assert resp.status_code == 200
+    assert [(o["kind"], o["actor"]) for o in _events("override")] == [
+        ("model_change", "collaborator")
+    ]
 
 
 async def test_admin_interrupt_counts_as_owner(
@@ -290,9 +360,7 @@ async def test_stop_snapshot_includes_spend_flushed_during_host_runner_stop(
         patch(f"{_EVENTS}._owns_host_runner", AsyncMock(return_value=True)),
         patch(f"{_EVENTS}._stop_host_runner_intentionally", stop_host_runner_and_flush_spend),
     ):
-        resp = await client.post(
-            f"/v1/sessions/{hosted.id}/events", json={"type": "stop_session"}
-        )
+        resp = await client.post(f"/v1/sessions/{hosted.id}/events", json={"type": "stop_session"})
     assert resp.status_code == 202
     (ended,) = _events("ended")
     assert (ended["usd_total"], ended["reason"]) == (5.0, "stop")
