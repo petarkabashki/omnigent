@@ -315,6 +315,98 @@ async def test_prepare_codex_terminal_replaces_a_stale_launch_epoch(
     assert read_launch_epoch(bridge_dir) == 1
 
 
+def _stub_session_without_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    context_epoch: int,
+    terminal: object | None,
+) -> None:
+    """Serve a codex-native session whose thread id is unset, as after a reset."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        codex_native,
+        "_fetch_codex_session",
+        AsyncMock(
+            return_value={
+                "labels": {codex_native._WRAPPER_LABEL_KEY: codex_native._WRAPPER_LABEL_VALUE},
+                "external_session_id": None,
+                "context_epoch": context_epoch,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        codex_native, "_find_running_codex_terminal", AsyncMock(return_value=terminal)
+    )
+
+
+async def _prepare_existing_session() -> codex_native.PreparedCodexTerminal:
+    return await codex_native._prepare_codex_terminal(
+        base_url="http://127.0.0.1:8000",
+        headers={},
+        session_id="conv_test",
+        runner_id=None,
+        session_bundle=None,
+        codex_args=(),
+        command="codex",
+        model=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_reattaches_while_a_reset_relaunch_has_no_thread_yet(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _stub_session_without_thread(
+        monkeypatch,
+        tmp_path,
+        context_epoch=1,
+        terminal=SimpleNamespace(terminal_id="terminal_1", tmux_socket=None, tmux_target=None),
+    )
+
+    prepared = await _prepare_existing_session()
+
+    assert prepared.reattached is True
+    assert prepared.terminal_id == "terminal_1"
+    assert prepared.thread_id is None
+    assert prepared.app_server is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_starts_fresh_after_a_reset_with_no_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _stub_session_without_thread(monkeypatch, tmp_path, context_epoch=2, terminal=None)
+
+    class _Sentinel(Exception):
+        pass
+
+    def _reached_the_launch(**_kwargs: object) -> object:
+        raise _Sentinel
+
+    monkeypatch.setattr(codex_native, "build_codex_native_server", _reached_the_launch)
+
+    with pytest.raises(_Sentinel):
+        await _prepare_existing_session()
+
+    assert read_launch_epoch(bridge_dir_for_bridge_id("conv_test")) == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_still_refuses_a_thread_id_lost_without_a_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _stub_session_without_thread(monkeypatch, tmp_path, context_epoch=0, terminal=None)
+
+    with pytest.raises(click.ClickException, match="missing its Codex thread id"):
+        await _prepare_existing_session()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_failure", [None, "terminal", "client"])
 @pytest.mark.parametrize("error", [RuntimeError, asyncio.CancelledError])

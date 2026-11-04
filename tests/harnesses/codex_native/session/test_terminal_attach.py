@@ -313,6 +313,40 @@ def test_attach_with_forwarder_uses_direct_tmux_when_socket_is_local(
     assert attached == [(socket_path, "main")]
 
 
+def test_attach_with_forwarder_joins_a_terminal_relaunched_after_a_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attached: list[str] = []
+
+    async def fake_attach_terminal_resource(**kwargs: Any) -> None:
+        attached.append(kwargs["prepared"].terminal_id)
+
+    monkeypatch.setattr(codex_native, "_attach_terminal_resource", fake_attach_terminal_resource)
+
+    asyncio.run(
+        codex_native._attach_with_forwarder(
+            base_url="http://127.0.0.1:8000",
+            headers={},
+            prepared=codex_native.PreparedCodexTerminal(
+                session_id="conv_abc",
+                terminal_id="terminal_codex_main",
+                tmux_socket=None,
+                tmux_target=None,
+                bridge_dir=tmp_path / "bridge",
+                thread_id=None,
+                app_server_url=None,
+                app_server=None,
+                event_client=None,
+                reattached=True,
+            ),
+            prompt=None,
+        )
+    )
+
+    assert attached == ["terminal_codex_main"]
+
+
 def test_fresh_thread_bind_is_stamped_with_the_launch_epoch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

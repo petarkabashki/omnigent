@@ -394,7 +394,8 @@ class PreparedCodexTerminal:
         ``"main"``.
     :param bridge_dir: Native Codex bridge directory.
     :param thread_id: Codex app-server thread id. ``None`` until the
-        first attached TUI creates a fresh thread.
+        first attached TUI creates a fresh thread, or on a reattach to a
+        terminal a context reset relaunched before its thread was recorded.
     :param app_server_url: App-server transport the TUI, forwarder, and
         initial-turn connect over, e.g. ``"ws://127.0.0.1:9876"``. ``None``
         for runner-owned terminal attaches where the CLI never connects to
@@ -1170,7 +1171,9 @@ async def _prepare_codex_terminal(
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             external_session_id = payload.get("external_session_id")
             thread_id = external_session_id if isinstance(external_session_id, str) else None
-            if existing_terminal is not None and thread_id is not None:
+            # A reset clears the thread id until the relaunch records a new one.
+            was_reset = isinstance(context_epoch, int) and context_epoch > 0
+            if existing_terminal is not None and (thread_id is not None or was_reset):
                 reattach_bridge_dir = bridge_dir_for_bridge_id(bridge_id)
                 reattach_unix_socket = socket_path_for_bridge_dir(reattach_bridge_dir)
                 # The running terminal's real transport lives in its bridge
@@ -1197,7 +1200,7 @@ async def _prepare_codex_terminal(
                     event_client=None,
                     reattached=True,
                 )
-            if thread_id is None:
+            if thread_id is None and not was_reset:
                 raise click.ClickException(
                     f"Conversation {session_id!r} is missing its Codex thread id."
                 )
@@ -1362,7 +1365,7 @@ async def _attach_with_forwarder(
     """
     forwarder: asyncio.Task[None] | None = None
     try:
-        if prepared.thread_id is None:
+        if prepared.thread_id is None and not prepared.reattached:
             attach_task = asyncio.create_task(
                 _attach_terminal_resource(
                     base_url=base_url,
@@ -1400,7 +1403,7 @@ async def _attach_with_forwarder(
                         await attach_task
                 raise
         else:
-            if prepared.app_server is not None:
+            if prepared.app_server is not None and prepared.thread_id is not None:
                 forwarder = _start_codex_forwarder(
                     base_url=base_url,
                     headers=headers,
