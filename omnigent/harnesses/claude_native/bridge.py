@@ -266,6 +266,7 @@ _MCP_SOCKET_SUFFIX = ".sock"
 _STATE_FILE = "state.json"
 #: Holds the session's context epoch at the last runner launch.
 _LAUNCH_EPOCH_FILE = "launch_epoch"
+_ROTATED_COST_BASE_FILE = "rotated_cost_base.json"
 _HOOKS_FILE = "hooks.jsonl"
 OBSERVER_HOOK_STDERR_FILE = "observer_hook.stderr"
 _RECENT_LOCAL_COMMAND_LINE_LIMIT = 200
@@ -3231,6 +3232,49 @@ def read_launch_epoch(bridge_dir: Path) -> int | None:
         return int((bridge_dir / _LAUNCH_EPOCH_FILE).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
+
+
+def record_rotated_cost_base(bridge_dir: Path, session_id: str, base: float) -> None:
+    """
+    Remember the statusLine total a rotated-to session must not inherit.
+
+    Kept on disk so a restarted forwarder can't post the old total again.
+
+    :param bridge_dir: Bridge directory path.
+    :param session_id: The rotated-to session, e.g. ``"conv_new"``.
+    :param base: The statusLine total at the rotation, e.g. ``10.0``.
+    """
+    (bridge_dir / _ROTATED_COST_BASE_FILE).write_text(
+        json.dumps({"session_id": session_id, "base": base}), encoding="utf-8"
+    )
+
+
+def read_rotated_cost_base(bridge_dir: Path, session_id: str) -> float | None:
+    """
+    Return the statusLine total *session_id* rotated in on, if one is recorded.
+
+    :param bridge_dir: Bridge directory path.
+    :param session_id: The session being forwarded, e.g. ``"conv_new"``.
+    :returns: The recorded total, or ``None`` when there is none for this session.
+    """
+    try:
+        record = json.loads((bridge_dir / _ROTATED_COST_BASE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("session_id") != session_id:
+        return None
+    base = record.get("base")
+    return float(base) if isinstance(base, (int, float)) else None
+
+
+def clear_rotated_cost_base(bridge_dir: Path) -> None:
+    """
+    Forget the rotation base once the statusLine total no longer carries it.
+
+    :param bridge_dir: Bridge directory path.
+    """
+    with contextlib.suppress(FileNotFoundError):
+        (bridge_dir / _ROTATED_COST_BASE_FILE).unlink()
 
 
 def clear_claude_status_snapshot(bridge_dir: Path) -> None:
