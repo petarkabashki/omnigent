@@ -1754,6 +1754,7 @@ def _accumulate_session_usage(
             )
         )
     )
+    cost_source: str | None = None
     if llm_model:
         if (
             isinstance(provider_cost, (int, float))
@@ -1762,6 +1763,7 @@ def _accumulate_session_usage(
         ):
             cost_delta = float(provider_cost)
             priced = True
+            cost_source = "harness"
         else:
             from omnigent.llms.context_window import (
                 compute_llm_cost,
@@ -1778,6 +1780,7 @@ def _accumulate_session_usage(
             )
             priced = pricing is not None
             if pricing is not None:
+                cost_source = "catalog"
                 # Cache-aware: price the sanitized cache-read / cache-creation
                 # token counts at their own (cheaper read / pricier write)
                 # rates. Pass the validated locals, not the raw response usage
@@ -1825,7 +1828,7 @@ def _accumulate_session_usage(
         delta["by_model"] = {llm_model: model_delta}
 
     new_current = conversation_store.increment_session_usage(session_id, delta)
-    record_cost(session_id, new_current)
+    record_cost(session_id, new_current, source=cost_source if priced else None)
     # Per-user daily rollup (policy-gated; this is the per-turn delta).
     _record_daily_cost(conv, cost_delta, conversation_store)
     return _priced_cost_for_display(new_current)
@@ -2012,10 +2015,11 @@ def _persist_native_cumulative_usage(
 
     old_cost = 0.0
     applied = False
+    cost_source: str | None = None
     stored_epoch = 0
 
     def apply_report(current: dict[str, Any], session_epoch: int) -> bool:
-        nonlocal old_cost, applied, stored_epoch
+        nonlocal old_cost, applied, stored_epoch, cost_source
         stored_epoch = session_epoch
         # A pre-reset total added to the new base would inflate the session
         # permanently through the clamps below, so it changes nothing.
@@ -2094,6 +2098,7 @@ def _persist_native_cumulative_usage(
         if cost is not None:
             # Monotonic: a reported total below the persisted one is ignored.
             current["total_cost_usd"] = max(old_cost, base_cost + float(cost))
+            cost_source = "harness"
         elif has_tokens and pricing is not None:
             # SET (cumulative) — price the running token totals.
             # ``current`` carries the cache-read split when the harness
@@ -2114,6 +2119,7 @@ def _persist_native_cumulative_usage(
             current["total_cost_usd"] = max(
                 old_cost, base_cost + compute_llm_cost(priced_usage, pricing)
             )
+            cost_source = "catalog"
 
         # ADD this report's growth (new - old) to the active model, not the whole
         # cumulative total, so per-model buckets sum to the flat total across model
@@ -2148,7 +2154,9 @@ def _persist_native_cumulative_usage(
     current = conversation_store.update_session_usage(session_id, apply_report)
     if not applied:
         return _priced_cost_for_display(current)
-    record_cost(session_id, current, context_epoch=stored_epoch)
+    record_cost(
+        session_id, current, source=cost_source, native=True, context_epoch=stored_epoch
+    )
     # Per-user daily rollup. Native reports cumulative totals, so the turn's
     # delta is the increase in cumulative cost. Uses the authoritative
     # ``total_cost_usd`` (= statusLine S), NOT ``policy_cost_usd`` — the

@@ -7910,7 +7910,7 @@ async def _execute_rest_tool(
         try:
             resp = await server_client.post(
                 f"{_session_url(handle_id)}/events",
-                json={"type": "interrupt", "data": {}},
+                json={"type": "interrupt", "data": {"origin": "agent"}},
                 timeout=30.0,
             )
             if resp.status_code in (200, 201, 202):

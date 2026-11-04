@@ -14,6 +14,7 @@ model) implement :class:`ShadowRouter` and are registered in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -348,12 +349,28 @@ def _encode_record(record: dict[str, Any]) -> str:  # type: ignore[explicit-any]
 
 
 def append_jsonl_line(target: Path, line: str) -> None:
-    """Append *line* plus a newline to *target* (one ``O_APPEND`` write, mode 0600)."""
-    target.parent.mkdir(parents=True, exist_ok=True)
+    """Append *line* plus a newline to *target* (``O_APPEND``, dir 0700, file 0600).
+
+    A short write is finished; a failed one is closed with a newline so the next
+    record never joins a fragment.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     data = (line + "\n").encode()
     fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    written = 0
     try:
-        os.write(fd, data)
+        # Tighten a pre-existing file and directory created with looser modes.
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o600)
+            os.chmod(target.parent, 0o700)
+        try:
+            while written < len(data):
+                written += os.write(fd, data[written:])
+        except OSError:
+            if written:
+                with contextlib.suppress(OSError):
+                    os.write(fd, b"\n")
+            raise
     finally:
         os.close(fd)
 
@@ -364,9 +381,9 @@ def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  
 
 
 def iter_jsonl_records(source: Path) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
-    """Yield dict records from a JSONL file, skipping blank or corrupt lines."""
+    """Yield dict records from a JSONL file, skipping blank, corrupt or non-UTF-8 lines."""
     try:
-        handle = source.open(encoding="utf-8")
+        handle = source.open("rb")
     except FileNotFoundError:
         return
     with handle:
@@ -376,7 +393,7 @@ def iter_jsonl_records(source: Path) -> Iterator[dict[str, Any]]:  # type: ignor
                 continue
             try:
                 record = json.loads(line)
-            except ValueError:
+            except ValueError:  # includes UnicodeDecodeError
                 continue
             if isinstance(record, dict):
                 yield record
@@ -432,6 +449,10 @@ async def run_shadow_routing(
                 "latency_ms": round((time.monotonic() - started) * 1000, 2),
             }
             await asyncio.to_thread(append_decision, record, path)
+            if path is None:
+                from omnigent.server.routing_outcomes import flush_pending_outcomes
+
+                await asyncio.to_thread(flush_pending_outcomes)
         except Exception:
             _logger.warning("shadow router %r failed", getattr(router, "name", "?"), exc_info=True)
 

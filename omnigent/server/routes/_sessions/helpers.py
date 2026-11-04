@@ -2423,7 +2423,8 @@ async def _persist_external_model_change(
     )
     if conv.reported_model is not None:
         # A switch inside the pane replaces a known model; the launch report does not.
-        record_override(session_id, "model_change", "owner")
+        # The pane's own report can't say who typed the switch, so don't assert a human.
+        await asyncio.to_thread(record_override, session_id, "model_change", "harness")
     event = SessionModelEvent(
         type="session.model",
         conversation_id=session_id,
