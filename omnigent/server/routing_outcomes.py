@@ -13,9 +13,13 @@ Events (``event`` field), each with ``at`` (epoch seconds) and ``session_id``:
 * ``override``: ``kind`` (interrupt, harness_change, model_change,
   host_change, reset, rerun), ``actor``. Only ``actor="owner"`` counts.
 * ``cost``: cumulative snapshot with ``usd_total`` (``total_cost_usd``),
-  ``usd_policy``, ``cost_source`` (harness, catalog, mixed, none),
-  ``native_cost_complete`` (null off the native path) and ``session_usage``.
-  Not written when the session has no total.
+  ``usd_policy``, ``credits_total``, ``cost_source``, ``native_cost_complete``
+  (null off the native path) and ``session_usage``. Not written when the
+  session has no total. ``cost_source`` says what the figure is, and none of
+  its values means billed money: ``harness`` (the harness's or provider's own
+  figure), ``catalog`` (tokens priced from a price list), ``credits`` (a
+  non-dollar meter: ``usd_total`` is null and the amount is ``credits_total``),
+  ``unknown`` (the reporter did not declare a source), ``mixed`` or ``none``.
 * ``ended``: a ``cost`` snapshot plus ``reason`` (stop, delete) taken when the
   session stops or is deleted. ``usd_total`` is always present; null means no
   data. ``cost_source`` is null when this process never saw the session's spend.
@@ -59,10 +63,16 @@ OVERRIDE_KINDS = frozenset(
 )
 CHECK_STATUSES = frozenset({"passed", "failed", "error"})
 ENDED_REASONS = frozenset({"stop", "delete", "launch_failed"})
-COST_SOURCES = frozenset({"harness", "catalog", "mixed", "none"})
+COST_SOURCES = frozenset({"harness", "catalog", "credits", "unknown", "mixed", "none"})
+# What a native reporter may declare for ``cumulative_cost_usd``.
+DECLARED_COST_SOURCES = frozenset({"harness", "catalog", "credits"})
+# ``session_usage`` key marking a total metered in credits, not dollars.
+COST_UNIT_KEY = "cost_unit"
+COST_UNIT_CREDITS = "credits"
 # Field names a reader depends on; every cost/ended line and summary uses these.
 USD_TOTAL = "usd_total"
 USD_POLICY = "usd_policy"
+CREDITS_TOTAL = "credits_total"
 COST_SOURCE = "cost_source"
 NATIVE_COST_COMPLETE = "native_cost_complete"
 # ``session_usage`` keys copied into a cost snapshot so a reader can compare the
@@ -206,7 +216,9 @@ _pending: list[_Pending] = []
 
 
 def _decision_for(item_session: str, path: Path | None) -> str | None:
-    return decision_id_for_session(item_session, path.with_name("decisions.jsonl") if path else None)
+    return decision_id_for_session(
+        item_session, path.with_name("decisions.jsonl") if path else None
+    )
 
 
 def _drop(item: _Pending, reason: str) -> None:
@@ -227,7 +239,9 @@ def _drop(item: _Pending, reason: str) -> None:
 
 
 def _write_pending(item: _Pending, decision_id: str) -> None:
-    append_outcome(decision_id, item.event, item.fields, session_id=item.session_id, path=item.path)
+    append_outcome(
+        decision_id, item.event, item.fields, session_id=item.session_id, path=item.path
+    )
 
 
 def flush_pending_outcomes() -> None:
@@ -327,11 +341,11 @@ _sources_lock = threading.Lock()
 
 
 def _note_source(session_id: str, source: str | None) -> set[str]:
-    """Remember a spend source (harness or catalog) for the session; return all seen."""
+    """Remember what this report's spend was for the session; return all seen."""
     with _sources_lock:
         seen = _sources_seen.setdefault(session_id, set())
         _sources_seen.move_to_end(session_id)
-        if source in ("harness", "catalog"):
+        if source is not None and source in COST_SOURCES:
             seen.add(source)
         while len(_sources_seen) > _SOURCE_SESSIONS_MAX:
             _sources_seen.popitem(last=False)
@@ -349,6 +363,10 @@ def _total(usage: Mapping[str, Any] | None) -> float | None:  # type: ignore[exp
     return value
 
 
+def _is_credits(usage: Mapping[str, Any] | None) -> bool:  # type: ignore[explicit-any]  # JSON fields
+    return (usage or {}).get(COST_UNIT_KEY) == COST_UNIT_CREDITS
+
+
 def _usage_fields(
     usage: Mapping[str, Any] | None,  # type: ignore[explicit-any]  # JSON fields
     *,
@@ -357,13 +375,19 @@ def _usage_fields(
 ) -> dict[str, Any]:  # type: ignore[explicit-any]  # JSON fields
     """Cost-snapshot fields from a ``session_usage`` mapping."""
     usage = usage or {}
+    credits = _is_credits(usage)
+    # A credit total is stored in the dollar key; it must not leave as dollars.
+    hidden = ("total_cost_usd", "policy_cost_usd") if credits else ()
     return {
-        USD_TOTAL: _total(usage),
-        USD_POLICY: usage.get("policy_cost_usd"),
-        COST_SOURCE: cost_source,
+        USD_TOTAL: None if credits else _total(usage),
+        USD_POLICY: None if credits else usage.get("policy_cost_usd"),
+        CREDITS_TOTAL: _total(usage) if credits else None,
+        COST_SOURCE: COST_UNIT_CREDITS if credits else cost_source,
         # True/false only on the native path; null elsewhere, never false.
         NATIVE_COST_COMPLETE: (usage.get(NATIVE_COST_COMPLETE) is True) if native else None,
-        "session_usage": {key: usage[key] for key in _SNAPSHOT_KEYS if key in usage},
+        "session_usage": {
+            key: usage[key] for key in _SNAPSHOT_KEYS if key in usage and key not in hidden
+        },
     }
 
 
@@ -380,9 +404,10 @@ def record_cost(
 
     Writes nothing when *usage* has no total.
 
-    :param source: Where this report's cost came from: ``"harness"`` (reported
-        by the harness or provider), ``"catalog"`` (priced from tokens), or
-        ``None`` when this report added no cost.
+    :param source: What this report's cost is: ``"harness"`` (reported by the
+        harness or provider), ``"catalog"`` (priced from tokens), ``"credits"``
+        (a non-dollar meter), ``"unknown"`` (undeclared), or ``None`` when this
+        report added no cost.
     :param native: Whether *usage* came from a native-harness cumulative report.
     """
     if _total(usage) is None:
@@ -492,8 +517,10 @@ def _sum_known(values: list[float | None]) -> float | None:
 
 def _combine_session_sources(sources: set[str]) -> str:
     """Reduce per-line ``cost_source`` values; any disagreement is ``mixed``."""
-    return "mixed" if "mixed" in sources or len(sources - {"none"}) > 1 else (
-        next(iter(sources - {"none"}), "none")
+    return (
+        "mixed"
+        if "mixed" in sources or len(sources - {"none"}) > 1
+        else (next(iter(sources - {"none"}), "none"))
     )
 
 
@@ -520,6 +547,7 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
                 "sessions": {},
                 USD_TOTAL: None,
                 USD_POLICY: None,
+                CREDITS_TOTAL: None,
                 COST_SOURCE: "none",
                 NATIVE_COST_COMPLETE: None,
                 "ended_at": None,
@@ -537,10 +565,17 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
         if event in ("cost", "ended"):
             entry = per_session.setdefault(decision_id, {}).setdefault(
                 session_id,
-                {USD_TOTAL: None, USD_POLICY: None, "sources": set(), "native": []},
+                {
+                    USD_TOTAL: None,
+                    USD_POLICY: None,
+                    CREDITS_TOTAL: None,
+                    "sources": set(),
+                    "native": [],
+                },
             )
             entry[USD_TOTAL] = _max_number(entry[USD_TOTAL], record.get(USD_TOTAL))
             entry[USD_POLICY] = _max_number(entry[USD_POLICY], record.get(USD_POLICY))
+            entry[CREDITS_TOTAL] = _max_number(entry[CREDITS_TOTAL], record.get(CREDITS_TOTAL))
             if isinstance(record.get(COST_SOURCE), str):
                 entry["sources"].add(record[COST_SOURCE])
             if isinstance(record.get(NATIVE_COST_COMPLETE), bool):
@@ -569,6 +604,7 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
             summary["sessions"][session_id] = {
                 USD_TOTAL: entry[USD_TOTAL],
                 USD_POLICY: entry[USD_POLICY],
+                CREDITS_TOTAL: entry[CREDITS_TOTAL],
                 COST_SOURCE: _combine_session_sources(entry["sources"]),
                 NATIVE_COST_COMPLETE: session_native,
             }
@@ -577,6 +613,7 @@ def summarize_outcomes(path: Path | None = None) -> dict[str, dict[str, Any]]:  
                 native.append(session_native)
         summary[USD_TOTAL] = _sum_known([entry[USD_TOTAL] for entry in sessions.values()])
         summary[USD_POLICY] = _sum_known([entry[USD_POLICY] for entry in sessions.values()])
+        summary[CREDITS_TOTAL] = _sum_known([entry[CREDITS_TOTAL] for entry in sessions.values()])
         summary[COST_SOURCE] = _combine_session_sources(sources)
         summary[NATIVE_COST_COMPLETE] = all(native) if native else None
     return summaries

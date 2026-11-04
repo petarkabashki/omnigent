@@ -371,7 +371,12 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_managed_runner_tunnel,
     _wait_for_runner_client,
 )
-from omnigent.server.routing_outcomes import record_cost
+from omnigent.server.routing_outcomes import (
+    COST_UNIT_CREDITS,
+    COST_UNIT_KEY,
+    DECLARED_COST_SOURCES,
+    record_cost,
+)
 from omnigent.server.runner_session_init import RunnerSessionInitializer
 from omnigent.server.sandbox_profile_launch import prepare_profile, record_profile, saved_profile
 from omnigent.server.schemas import (
@@ -1908,6 +1913,10 @@ def _persist_native_cumulative_usage(
       (exact billing; used directly). Stored in ``total_cost_usd``, which
       drives the badge and the per-user daily rollup, so the badge matches
       ``/cost`` in the Claude TUI.
+    - ``cost_source`` — what ``cumulative_cost_usd`` is: ``"harness"`` (the
+      harness's or provider's own figure), ``"catalog"`` (tokens priced from a
+      price list), or ``"credits"`` (a non-dollar meter). Anything else, or
+      nothing, is recorded as ``"unknown"``: only the reporter can know this.
     - ``cost_complete`` — whether the reporter priced all accumulated usage.
       Native Pi uses this to distinguish a resumable cost baseline from a
       display subtotal that excludes unpriced turns.
@@ -2098,7 +2107,11 @@ def _persist_native_cumulative_usage(
         if cost is not None:
             # Monotonic: a reported total below the persisted one is ignored.
             current["total_cost_usd"] = max(old_cost, base_cost + float(cost))
-            cost_source = "harness"
+            declared = data.get("cost_source")
+            known = isinstance(declared, str) and declared in DECLARED_COST_SOURCES
+            cost_source = declared if known else "unknown"
+            if cost_source == COST_UNIT_CREDITS:
+                current[COST_UNIT_KEY] = COST_UNIT_CREDITS
         elif has_tokens and pricing is not None:
             # SET (cumulative) — price the running token totals.
             # ``current`` carries the cache-read split when the harness
@@ -2154,9 +2167,7 @@ def _persist_native_cumulative_usage(
     current = conversation_store.update_session_usage(session_id, apply_report)
     if not applied:
         return _priced_cost_for_display(current)
-    record_cost(
-        session_id, current, source=cost_source, native=True, context_epoch=stored_epoch
-    )
+    record_cost(session_id, current, source=cost_source, native=True, context_epoch=stored_epoch)
     # Per-user daily rollup. Native reports cumulative totals, so the turn's
     # delta is the increase in cumulative cost. Uses the authoritative
     # ``total_cost_usd`` (= statusLine S), NOT ``policy_cost_usd`` — the

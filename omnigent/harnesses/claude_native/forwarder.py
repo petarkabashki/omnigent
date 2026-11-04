@@ -3278,6 +3278,8 @@ async def _forward_session_cost(
     # of the TOKEN USAGE breakdown while the session total still counts it. Sent
     # only when the display cost moves: that is the value being attributed
     # (``policy_cost_usd``-only mid-turn posts carry no new display cost).
+    if "cumulative_cost_usd" in payload:
+        payload["cost_source"] = "harness"
     if "cumulative_cost_usd" in payload and isinstance(status_state, dict):
         model = status_state.get("model")
         if isinstance(model, str) and model:

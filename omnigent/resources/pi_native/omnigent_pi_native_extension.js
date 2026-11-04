@@ -2051,7 +2051,11 @@ module.exports = function (pi) {
       cumulative_output_tokens: cumulativeOutputTokens,
       cumulative_cache_read_input_tokens: cumulativeCacheReadTokens,
     };
-    if (completeCost) data.cumulative_cost_usd = cumulativeCostUsd;
+    if (completeCost) {
+      data.cumulative_cost_usd = cumulativeCostUsd;
+      // Pi multiplies tokens by its model price list; nothing here is billed.
+      data.cost_source = "catalog";
+    }
     if (usageModel) data.model = usageModel;
     await postEvent(config, { type: "external_session_usage", data });
   }

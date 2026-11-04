@@ -171,12 +171,15 @@ def test_cost_source_and_native_completeness(data_dir: Path) -> None:
     assert _lines("cost")[-1]["cost_source"] == "mixed"
     _log_decision("s2", "d2")
     ro.record_cost("s2", {"total_cost_usd": 1.0}, source="catalog", native=True)
-    ro.record_ended("s2", {"total_cost_usd": 1.0, "native_cost_complete": True},
-                    reason="stop", native=True)
+    ro.record_ended(
+        "s2", {"total_cost_usd": 1.0, "native_cost_complete": True}, reason="stop", native=True
+    )
     assert [r["native_cost_complete"] for r in _lines("cost")][-1] is False
     assert _lines("ended")[-1]["native_cost_complete"] is True
     summary = ro.summarize_outcomes()
-    assert summary["d1"]["cost_source"] == "mixed" and summary["d1"]["native_cost_complete"] is None
+    assert (
+        summary["d1"]["cost_source"] == "mixed" and summary["d1"]["native_cost_complete"] is None
+    )
 
 
 def test_rotation_keeps_decision_and_sums_sessions(data_dir: Path) -> None:
@@ -256,7 +259,7 @@ def test_short_write_is_finished_and_failed_write_ends_the_fragment(
     monkeypatch.setattr(sr.os, "write", short_write)
     sr.append_jsonl_line(target, '{"a":1,"pad":"' + "x" * 40 + '"}')
     sr.append_jsonl_line(target, '{"b":2}')
-    assert [list(r) for r in sr.iter_jsonl_records(target)][0][0] == "a"
+    assert next(iter(next(sr.iter_jsonl_records(target)))) == "a"
     assert len(list(sr.iter_jsonl_records(target))) == 2
 
     def failing(fd: int, data: bytes) -> int:
@@ -271,7 +274,7 @@ def test_short_write_is_finished_and_failed_write_ends_the_fragment(
         sr.append_jsonl_line(target, '{"c":3,"pad":"yyyyyyyy"}')
     monkeypatch.setattr(sr.os, "write", real_write)
     sr.append_jsonl_line(target, '{"d":4}')
-    assert [list(r)[0] for r in sr.iter_jsonl_records(target)] == ["a", "b", "d"]
+    assert [next(iter(r)) for r in sr.iter_jsonl_records(target)] == ["a", "b", "d"]
 
 
 def test_reader_survives_invalid_utf8(data_dir: Path) -> None:
@@ -297,14 +300,82 @@ def test_native_report_snapshot_carries_completeness(data_dir: Path, db_uri: str
     conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
     _log_decision(conv.id, "d1")
     _persist_native_cumulative_usage(
-        conv.id, {"cumulative_cost_usd": 3.0, "cost_complete": True}, store
+        conv.id,
+        {"cumulative_cost_usd": 3.0, "cost_source": "harness", "cost_complete": True},
+        store,
     )
-    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 4.0}, store)
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 4.0, "cost_source": "harness"}, store
+    )
     cost = _lines("cost")
     assert [(r["cost_source"], r["native_cost_complete"]) for r in cost] == [
         ("harness", True),
         ("harness", False),
     ]
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ({"cost_source": "harness"}, "harness"),
+        ({"cost_source": "catalog"}, "catalog"),
+        ({}, "unknown"),
+        ({"cost_source": "billed"}, "unknown"),
+        ({"cost_source": ["harness"]}, "unknown"),
+    ],
+)
+def test_native_cost_is_labelled_by_its_reporter_never_by_default(
+    data_dir: Path, db_uri: str, declared: dict[str, object], expected: str
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 50.0, **declared}, store)
+    (cost,) = _lines("cost")
+    assert (cost["usd_total"], cost["cost_source"]) == (50.0, expected)
+    assert ro.summarize_outcomes()["d1"]["cost_source"] == expected
+
+
+def test_token_priced_native_report_stays_catalog_whatever_it_declares(
+    data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window
+
+    monkeypatch.setattr(
+        context_window, "fetch_model_pricing_with_provider", lambda *a, **k: {"priced": True}
+    )
+    monkeypatch.setattr(context_window, "compute_llm_cost", lambda *a, **k: 0.25)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    _persist_native_cumulative_usage(
+        conv.id,
+        {"cumulative_input_tokens": 2, "model": "priced", "cost_source": "harness"},
+        store,
+    )
+    assert [r["cost_source"] for r in _lines("cost")] == ["catalog"]
+
+
+def test_credits_never_reach_a_dollar_field(data_dir: Path, db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    report = {"cumulative_cost_usd": 50.0, "cost_source": "credits"}
+    _persist_native_cumulative_usage(conv.id, report, store)
+    # A later report and a process restart must not turn the total back into dollars.
+    ro._sources_seen.clear()
+    _persist_native_cumulative_usage(conv.id, {"policy_cost_usd": 60.0}, store)
+    usage = store.get_conversation(conv.id).session_usage
+    ro.record_ended(conv.id, usage, reason="stop", native=True)
+    records = [*_lines("cost"), *_lines("ended")]
+    assert len(records) == 3
+    for record in records:
+        assert (record["usd_total"], record["usd_policy"]) == (None, None)
+        assert (record["credits_total"], record["cost_source"]) == (50.0, "credits")
+        assert not {"total_cost_usd", "policy_cost_usd"} & set(record["session_usage"])
+    summary = ro.summarize_outcomes()["d1"]
+    assert (summary["usd_total"], summary["usd_policy"]) == (None, None)
+    assert (summary["credits_total"], summary["cost_source"]) == (50.0, "credits")
 
 
 def _relay_response(**usage: object) -> dict[str, object]:
@@ -354,7 +425,9 @@ def test_relay_unpriced_turn_writes_no_cost_line(
     assert _lines("cost") == []
 
 
-async def test_failed_launch_closes_the_outcome_with_its_reason(data_dir: Path, db_uri: str) -> None:
+async def test_failed_launch_closes_the_outcome_with_its_reason(
+    data_dir: Path, db_uri: str
+) -> None:
     from omnigent.server.startup_inputs import ManagedStartupInputs
 
     store = SqlAlchemyConversationStore(db_uri)
