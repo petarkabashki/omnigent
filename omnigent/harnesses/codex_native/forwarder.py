@@ -2810,14 +2810,13 @@ async def _create_thread_replacement_session(
     state = read_bridge_state(bridge_dir)
     if CODEX_NATIVE_BRIDGE_ID_LABEL_KEY not in labels:
         labels[CODEX_NATIVE_BRIDGE_ID_LABEL_KEY] = old_session_id
+    create_body: _JsonObject = {"agent_id": agent_id, "labels": labels}
+    # A runner relaunch of the replacement takes its cwd from the session workspace.
+    workspace = old.get("workspace")
+    if isinstance(workspace, str) and workspace:
+        create_body["workspace"] = workspace
 
-    create_resp = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent_id,
-            "labels": labels,
-        },
-    )
+    create_resp = await client.post("/v1/sessions", json=create_body)
     create_resp.raise_for_status()
     created = create_resp.json()
     new_session_id = created.get("id")

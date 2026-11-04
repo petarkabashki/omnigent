@@ -116,6 +116,7 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
                     "id": "conv_old",
                     "agent_id": "ag_codex",
                     "runner_id": "runner_123",
+                    "workspace": "/repos/project",
                     "labels": {
                         "omnigent.wrapper": "codex-native-ui",
                         "omnigent.codex_native.bridge_id": "bridge_shared",
@@ -241,6 +242,7 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
                 "omnigent.wrapper": "codex-native-ui",
                 "omnigent.codex_native.bridge_id": "bridge_shared",
             },
+            "workspace": "/repos/project",
         },
     ) in requests
     assert (
