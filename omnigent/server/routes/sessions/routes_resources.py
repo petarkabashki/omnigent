@@ -188,6 +188,10 @@ class _RunnerStreamResponse(StreamingResponse):
 # budget for all of its ``gh`` calls, so a slow edit that GitHub applied is not
 # reported as failed.
 _PR_EDIT_PROXY_TIMEOUT_S = 20.0
+_TERMINAL_PROXY_TIMEOUT_S = 10.0
+# A Codex launch waits up to 60s for its app-server and 30s for its thread, and a
+# timeout here reads as an unreachable runner while that launch is still going.
+_CODEX_ENSURE_PROXY_TIMEOUT_S = 120.0
 # Runner wait for a PR attachment upload, above the runner's 110-second budget for it.
 _PR_ATTACHMENT_PROXY_TIMEOUT_S = 120.0
 # The largest PR attachment, a video; the runner checks each type's limit. Both
@@ -1616,11 +1620,15 @@ def register_resources_routes(
         router = runner_router or get_server_runner_router()
         if router is not None:
             await asyncio.to_thread(router.require_mcp_registry_support, conv)
+        is_codex_ensure = body.get("ensure_native_terminal") and body.get("terminal") == "codex"
         status, payload = await _proxy_post_to_runner(
             session_id,
             path,
             body,
             conv,
+            timeout=_CODEX_ENSURE_PROXY_TIMEOUT_S
+            if is_codex_ensure
+            else _TERMINAL_PROXY_TIMEOUT_S,
         )
         if status >= 400:
             error = payload.get("error", {})

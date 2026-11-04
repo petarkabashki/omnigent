@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import click
 import httpx
@@ -465,29 +466,149 @@ async def test_prepare_codex_terminal_joins_the_bound_runners_relaunch_after_a_r
     assert read_bridge_state(bridge_dir_for_bridge_id("conv_test")) == runner_state
 
 
+class _ReachedTheLaunch(Exception):
+    pass
+
+
+def _serve_runner_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    ensure_statuses: list[int],
+    status_replies: list[httpx.Response | httpx.TransportError],
+) -> AsyncMock:
+    """Script a reset session's ensures and runner lookups, with no real waits."""
+    _stub_session_without_thread(
+        monkeypatch, tmp_path, context_epoch=1, terminal=None, runner_id="runner_1"
+    )
+
+    def _reached_the_launch(**_kwargs: object) -> object:
+        raise _ReachedTheLaunch
+
+    monkeypatch.setattr(codex_native, "build_codex_native_server", _reached_the_launch)
+    monkeypatch.setattr(codex_native, "_RESET_JOIN_RETRY_INTERVAL_S", 0.0)
+    monkeypatch.setattr(codex_native, "_RUNNER_RECONNECT_GRACE_S", 0.0)
+    monkeypatch.setattr(
+        codex_native,
+        "_wait_for_codex_terminal_ready",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                terminal_id="terminal_codex_main", tmux_socket=None, tmux_target=None
+            )
+        ),
+    )
+    ensures = AsyncMock(
+        side_effect=[
+            httpx.Response(status, json={"error": {"message": "Runner unavailable"}})
+            for status in ensure_statuses
+        ]
+    )
+    monkeypatch.setattr(httpx.AsyncClient, "post", ensures)
+    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(side_effect=status_replies))
+    return ensures
+
+
+def _runner_status(*, online: bool) -> httpx.Response:
+    return httpx.Response(200, json={"runner_id": "runner_1", "online": online})
+
+
 @pytest.mark.asyncio
-async def test_prepare_codex_terminal_launches_itself_when_the_bound_runner_is_gone(
+async def test_prepare_codex_terminal_launches_itself_when_the_bound_runner_stays_gone(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    _stub_session_without_thread(
-        monkeypatch, tmp_path, context_epoch=1, terminal=None, runner_id="runner_gone"
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[502, 503],
+        status_replies=[_runner_status(online=False), _runner_status(online=False)],
     )
 
-    class _Sentinel(Exception):
-        pass
-
-    def _reached_the_launch(**_kwargs: object) -> object:
-        raise _Sentinel
-
-    monkeypatch.setattr(codex_native, "build_codex_native_server", _reached_the_launch)
-    response = httpx.Response(502, json={"error": {"message": "Runner unavailable"}})
-    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=response))
-
-    with pytest.raises(_Sentinel):
+    with pytest.raises(_ReachedTheLaunch):
         await _prepare_existing_session()
+
+    assert ensures.await_count == 2
+
+
+_RUNNER_MAY_BE_ALIVE_STATUS_REPLIES = [
+    pytest.param(_runner_status(online=True), id="online"),
+    pytest.param(httpx.Response(500, text="boom"), id="status-error"),
+    pytest.param(httpx.Response(200, text="<html>"), id="unreadable-status"),
+    pytest.param(httpx.ConnectError("server gone"), id="status-unreachable"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_ensure", [502, 503])
+@pytest.mark.parametrize("status_reply", _RUNNER_MAY_BE_ALIVE_STATUS_REPLIES)
+async def test_prepare_codex_terminal_keeps_waiting_on_a_runner_that_may_be_alive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failed_ensure: int,
+    status_reply: httpx.Response | httpx.TransportError,
+) -> None:
+    """
+    A 502 or 503 can come from a live runner mid-relaunch, and a failed lookup proves nothing.
+
+    A launch here would wipe its bridge state and kill its pane.
+    """
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[failed_ensure, failed_ensure, 200],
+        status_replies=[status_reply, status_reply],
+    )
+
+    prepared = await _prepare_existing_session()
+
+    assert ensures.await_count == 3
+    assert prepared.reattached is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_waits_out_a_tunnel_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[502, 502, 200],
+        status_replies=[_runner_status(online=False), _runner_status(online=False)],
+    )
+    monkeypatch.setattr(codex_native, "_RUNNER_RECONNECT_GRACE_S", 3600.0)
+
+    prepared = await _prepare_existing_session()
+
+    assert ensures.await_count == 3
+    assert prepared.reattached is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_reply", _RUNNER_MAY_BE_ALIVE_STATUS_REPLIES)
+async def test_prepare_codex_terminal_stops_rather_than_launching_over_a_live_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_reply: httpx.Response | httpx.TransportError,
+) -> None:
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[502],
+        status_replies=[status_reply],
+    )
+    monkeypatch.setattr(codex_native, "_RESET_JOIN_TIMEOUT_S", 0.0)
+
+    with pytest.raises(click.ClickException, match="may still be alive, so nothing was launched"):
+        await _prepare_existing_session()
+
+    assert ensures.await_count == 1
+
+
+def test_codex_ensure_outwaits_the_servers_proxy_budget() -> None:
+    from omnigent.server.routes.sessions import routes_resources
+
+    assert codex_native._CODEX_ENSURE_TIMEOUT_S > routes_resources._CODEX_ENSURE_PROXY_TIMEOUT_S
 
 
 @pytest.mark.asyncio

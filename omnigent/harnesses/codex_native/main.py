@@ -1056,8 +1056,17 @@ async def _prepare_codex_terminal_via_daemon(
     )
 
 
-# The server answers these when the session's runner is gone, not refusing.
+# The server answers these when it can't reach the runner, which may still be
+# alive: its tunnel can drop mid-ensure and a slow launch can outlast the proxy.
 _RUNNER_UNREACHABLE_STATUS_CODES = frozenset({502, 503})
+# Past the server's own ensure budget, so a slow launch reaches this CLI as an answer.
+_CODEX_ENSURE_TIMEOUT_S = 130.0
+# How long a CLI opening a reset session waits for the bound runner's terminal.
+_RESET_JOIN_TIMEOUT_S = 150.0
+_RESET_JOIN_RETRY_INTERVAL_S = 2.0
+# Past the runner's reconnect backoff (10s cap, +50% jitter), so a tunnel drop
+# on a live runner never reads as a runner that left.
+_RUNNER_RECONNECT_GRACE_S = 20.0
 
 
 class _CodexRunnerUnreachableError(click.ClickException):
@@ -1067,19 +1076,22 @@ class _CodexRunnerUnreachableError(click.ClickException):
 async def _ensure_codex_terminal_on_runner(
     client: httpx.AsyncClient,
     session_id: str,
+    *,
+    timeout_s: float = _CODEX_ENSURE_TIMEOUT_S,
 ) -> None:
     """
     Ask the bound runner to ensure the Codex app-server and terminal exist.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param timeout_s: Seconds to wait for the runner's answer, e.g. ``130.0``.
     :returns: None.
     :raises click.ClickException: If the runner rejects the ensure request.
     """
     resp = await client.post(
         f"/v1/sessions/{url_component(session_id)}/resources/terminals",
         json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
-        timeout=60.0,
+        timeout=timeout_s,
     )
     if resp.status_code >= 400:
         error_type = (
@@ -1128,6 +1140,28 @@ def _reattached_codex_terminal(
     )
 
 
+async def _session_runner_is_unregistered(client: httpx.AsyncClient, session_id: str) -> bool:
+    """
+    Return whether the server positively says the session has no live runner.
+
+    The session is read again because a failed ensure may have rebound it. A
+    failed lookup says nothing about the runner, so it answers ``False``.
+
+    :param client: HTTP client pointed at the Omnigent server.
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :returns: ``True`` only for an unbound session or a runner reported offline.
+    """
+    try:
+        session = await _fetch_codex_session(client, session_id)
+        runner_id = session.get("runner_id")
+        if not isinstance(runner_id, str) or not runner_id:
+            return True
+        status = await client.get(f"/v1/runners/{url_component(runner_id)}/status")
+        return status.status_code == 200 and status.json().get("online") is False
+    except (click.ClickException, httpx.TransportError, ValueError):
+        return False
+
+
 async def _join_runner_terminal_after_reset(
     client: httpx.AsyncClient,
     session_id: str,
@@ -1137,18 +1171,44 @@ async def _join_runner_terminal_after_reset(
     Attach to the terminal the session's bound runner owns after a reset.
 
     The ensure takes the runner's lock, so it waits for a relaunch in flight
-    rather than racing it.
+    rather than racing it. A failed ensure proves nothing about the runner, so
+    this retries until the runner has stayed unregistered past its reconnect
+    backoff, or the budget runs out.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
     :param bridge_id: The session's bridge id, e.g. ``"conv_abc123"``.
     :returns: The runner's terminal, or ``None`` when that runner is gone and
         this CLI may launch the session itself.
+    :raises click.ClickException: If the runner may be alive when the budget
+        runs out; a launch here would destroy its pane.
     """
-    try:
-        await _ensure_codex_terminal_on_runner(client, session_id)
-    except _CodexRunnerUnreachableError:
-        return None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RESET_JOIN_TIMEOUT_S
+    unregistered_since: float | None = None
+    while True:
+        try:
+            await _ensure_codex_terminal_on_runner(
+                client,
+                session_id,
+                timeout_s=min(_CODEX_ENSURE_TIMEOUT_S, deadline - loop.time()),
+            )
+            break
+        except _CodexRunnerUnreachableError:
+            pass
+        if not await _session_runner_is_unregistered(client, session_id):
+            unregistered_since = None
+        elif unregistered_since is None:
+            unregistered_since = loop.time()
+        elif loop.time() - unregistered_since >= _RUNNER_RECONNECT_GRACE_S:
+            return None
+        if loop.time() + _RESET_JOIN_RETRY_INTERVAL_S >= deadline:
+            raise click.ClickException(
+                f"Timed out waiting for the runner to bring up Codex for {session_id!r}. "
+                "The runner may still be alive, so nothing was launched here. "
+                "Check the runner, then run this command again."
+            )
+        await asyncio.sleep(_RESET_JOIN_RETRY_INTERVAL_S)
     terminal = await _wait_for_codex_terminal_ready(
         client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S
     )
