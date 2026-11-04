@@ -321,6 +321,7 @@ def _stub_session_without_thread(
     *,
     context_epoch: int,
     terminal: object | None,
+    runner_id: str | None = None,
 ) -> None:
     """Serve a codex-native session whose thread id is unset, as after a reset."""
     from unittest.mock import AsyncMock
@@ -334,6 +335,7 @@ def _stub_session_without_thread(
                 "labels": {codex_native._WRAPPER_LABEL_KEY: codex_native._WRAPPER_LABEL_VALUE},
                 "external_session_id": None,
                 "context_epoch": context_epoch,
+                "runner_id": runner_id,
             }
         ),
     )
@@ -394,6 +396,88 @@ async def test_prepare_codex_terminal_starts_fresh_after_a_reset_with_no_termina
         await _prepare_existing_session()
 
     assert read_launch_epoch(bridge_dir_for_bridge_id("conv_test")) == 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_joins_the_bound_runners_relaunch_after_a_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A CLI opening a reset session mid-relaunch must not launch its own Codex.
+
+    Its launch would wipe the runner's bridge state and, sharing the fixed terminal
+    id, delete the runner's pane when its own thread never starts.
+    """
+    from unittest.mock import AsyncMock
+
+    from omnigent.harnesses.codex_native.bridge import (
+        CodexNativeBridgeState,
+        prepare_bridge_dir,
+        read_bridge_state,
+        write_bridge_state,
+    )
+
+    _stub_session_without_thread(
+        monkeypatch, tmp_path, context_epoch=1, terminal=None, runner_id="runner_1"
+    )
+    runner_state = CodexNativeBridgeState(
+        session_id="conv_test",
+        socket_path="ws://127.0.0.1:9876",
+        thread_id="thread_runner",
+        codex_home="/codex-home",
+        cwd="/repos/project",
+    )
+    write_bridge_state(prepare_bridge_dir("conv_test"), runner_state)
+    ensure = AsyncMock()
+    monkeypatch.setattr(codex_native, "_ensure_codex_terminal_on_runner", ensure)
+    monkeypatch.setattr(
+        codex_native,
+        "_wait_for_codex_terminal_ready",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                terminal_id="terminal_codex_main", tmux_socket=None, tmux_target=None
+            )
+        ),
+    )
+
+    def no_launch_of_its_own(**_kwargs: object) -> object:
+        raise AssertionError("the CLI started a second app-server")
+
+    monkeypatch.setattr(codex_native, "build_codex_native_server", no_launch_of_its_own)
+
+    prepared = await _prepare_existing_session()
+
+    ensure.assert_awaited_once()
+    assert prepared.reattached is True
+    assert prepared.app_server is None
+    assert prepared.app_server_url == "ws://127.0.0.1:9876"
+    assert read_bridge_state(bridge_dir_for_bridge_id("conv_test")) == runner_state
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_launches_itself_when_the_bound_runner_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    _stub_session_without_thread(
+        monkeypatch, tmp_path, context_epoch=1, terminal=None, runner_id="runner_gone"
+    )
+
+    class _Sentinel(Exception):
+        pass
+
+    def _reached_the_launch(**_kwargs: object) -> object:
+        raise _Sentinel
+
+    monkeypatch.setattr(codex_native, "build_codex_native_server", _reached_the_launch)
+    response = httpx.Response(502, json={"error": {"message": "Runner unavailable"}})
+    monkeypatch.setattr(httpx.AsyncClient, "post", AsyncMock(return_value=response))
+
+    with pytest.raises(_Sentinel):
+        await _prepare_existing_session()
 
 
 @pytest.mark.asyncio

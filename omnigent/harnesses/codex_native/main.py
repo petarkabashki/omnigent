@@ -1057,6 +1057,14 @@ async def _prepare_codex_terminal_via_daemon(
     )
 
 
+# The server answers these when the session's runner is gone, not refusing.
+_RUNNER_UNREACHABLE_STATUS_CODES = frozenset({502, 503})
+
+
+class _CodexRunnerUnreachableError(click.ClickException):
+    """The server could not reach the runner to ensure the Codex terminal."""
+
+
 async def _ensure_codex_terminal_on_runner(
     client: httpx.AsyncClient,
     session_id: str,
@@ -1075,9 +1083,77 @@ async def _ensure_codex_terminal_on_runner(
         timeout=60.0,
     )
     if resp.status_code >= 400:
-        raise click.ClickException(
-            f"Codex terminal ensure failed ({resp.status_code}): {error_text(resp)}"
+        error_type = (
+            _CodexRunnerUnreachableError
+            if resp.status_code in _RUNNER_UNREACHABLE_STATUS_CODES
+            else click.ClickException
         )
+        raise error_type(f"Codex terminal ensure failed ({resp.status_code}): {error_text(resp)}")
+
+
+def _reattached_codex_terminal(
+    session_id: str,
+    terminal: LaunchedCodexTerminal,
+    bridge_id: str,
+    *,
+    thread_id: str | None,
+) -> PreparedCodexTerminal:
+    """
+    Describe a running terminal this CLI attaches to without launching anything.
+
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param terminal: The running Codex terminal.
+    :param bridge_id: The session's bridge id, e.g. ``"conv_abc123"``.
+    :param thread_id: The session's Codex thread id, if it has one yet.
+    :returns: Prepared details with no app-server or event client of its own.
+    """
+    bridge_dir = bridge_dir_for_bridge_id(bridge_id)
+    # The running terminal's real transport lives in its bridge state (``ws://``
+    # for terminals launched by current code). Reattach starts no app-server,
+    # forwarder or initial turn, so this is informational; fall back to the
+    # legacy unix path.
+    state = read_bridge_state(bridge_dir)
+    return PreparedCodexTerminal(
+        session_id=session_id,
+        terminal_id=terminal.terminal_id,
+        tmux_socket=terminal.tmux_socket,
+        tmux_target=terminal.tmux_target,
+        bridge_dir=bridge_dir,
+        thread_id=thread_id,
+        app_server_url=(
+            state.socket_path if state is not None else str(socket_path_for_bridge_dir(bridge_dir))
+        ),
+        app_server=None,
+        event_client=None,
+        reattached=True,
+    )
+
+
+async def _join_runner_terminal_after_reset(
+    client: httpx.AsyncClient,
+    session_id: str,
+    bridge_id: str,
+) -> PreparedCodexTerminal | None:
+    """
+    Attach to the terminal the session's bound runner owns after a reset.
+
+    The ensure takes the runner's lock, so it waits for a relaunch in flight
+    rather than racing it.
+
+    :param client: HTTP client pointed at the Omnigent server.
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param bridge_id: The session's bridge id, e.g. ``"conv_abc123"``.
+    :returns: The runner's terminal, or ``None`` when that runner is gone and
+        this CLI may launch the session itself.
+    """
+    try:
+        await _ensure_codex_terminal_on_runner(client, session_id)
+    except _CodexRunnerUnreachableError:
+        return None
+    terminal = await _wait_for_codex_terminal_ready(
+        client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S
+    )
+    return _reattached_codex_terminal(session_id, terminal, bridge_id, thread_id=None)
 
 
 async def _wait_for_codex_terminal_ready(
@@ -1174,36 +1250,23 @@ async def _prepare_codex_terminal(
             # A reset clears the thread id until the relaunch records a new one.
             was_reset = isinstance(context_epoch, int) and context_epoch > 0
             if existing_terminal is not None and (thread_id is not None or was_reset):
-                reattach_bridge_dir = bridge_dir_for_bridge_id(bridge_id)
-                reattach_unix_socket = socket_path_for_bridge_dir(reattach_bridge_dir)
-                # The running terminal's real transport lives in its bridge
-                # state (``ws://`` for terminals launched by current code).
-                # Reattach starts no app-server/forwarder/initial-turn, so
-                # app_server_url is unused here, but populate it accurately
-                # from bridge state and fall back to the legacy unix path.
-                reattach_state = read_bridge_state(reattach_bridge_dir)
-                reattach_transport = (
-                    reattach_state.socket_path
-                    if reattach_state is not None
-                    else str(reattach_unix_socket)
-                )
                 _update_startup_progress(startup_progress, "Codex terminal ready.")
-                return PreparedCodexTerminal(
-                    session_id=session_id,
-                    terminal_id=existing_terminal.terminal_id,
-                    tmux_socket=existing_terminal.tmux_socket,
-                    tmux_target=existing_terminal.tmux_target,
-                    bridge_dir=reattach_bridge_dir,
-                    thread_id=thread_id,
-                    app_server_url=reattach_transport,
-                    app_server=None,
-                    event_client=None,
-                    reattached=True,
+                return _reattached_codex_terminal(
+                    session_id, existing_terminal, bridge_id, thread_id=thread_id
                 )
             if thread_id is None and not was_reset:
                 raise click.ClickException(
                     f"Conversation {session_id!r} is missing its Codex thread id."
                 )
+            bound_runner = payload.get("runner_id")
+            if thread_id is None and isinstance(bound_runner, str) and bound_runner:
+                # The runner relaunches a reset session in this same bridge dir,
+                # so a launch here would clear its state and share its terminal id.
+                _update_startup_progress(startup_progress, "Waiting for the runner's Codex...")
+                joined = await _join_runner_terminal_after_reset(client, session_id, bridge_id)
+                if joined is not None:
+                    _update_startup_progress(startup_progress, "Codex terminal ready.")
+                    return joined
 
         bridge_dir = prepare_bridge_dir(bridge_id)
         if isinstance(context_epoch, int):
