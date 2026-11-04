@@ -104,6 +104,7 @@ class SessionUpdatesSocket {
   private hiddenRetryPending = false;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
+  private everConnected = false;
 
   /** Open the connection (idempotent). */
   start(): void {
@@ -152,6 +153,16 @@ class SessionUpdatesSocket {
    */
   isConnected(): boolean {
     return this.connected;
+  }
+
+  /**
+   * Whether the stream has opened at least once since the page loaded, so
+   * "not connected" can be told apart from "still starting up".
+   *
+   * @returns `true` once any socket has opened.
+   */
+  hasConnected(): boolean {
+    return this.everConnected;
   }
 
   /**
@@ -213,6 +224,7 @@ class SessionUpdatesSocket {
     ws.onopen = () => {
       this.openedAt = Date.now();
       this.failedAttempts = 0;
+      this.everConnected = true;
       this.setConnected(true);
       // Start the silence watchdog: from here we expect at least a
       // heartbeat within the window or we treat the link as dead.
