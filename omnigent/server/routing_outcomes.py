@@ -5,8 +5,10 @@ Events are appended to ``<data dir>/routing/outcomes.jsonl`` beside
 The decision log stays write-once; every later fact about the session lands
 here. Emitters know only a session id, so the decision id is resolved from the
 decision log (or a ``rotated`` line). Emitting never raises. An event that
-lands before its decision is logged is buffered and written once the decision
-appears; one that cannot be joined is counted in a ``dropped`` line.
+lands before its expected decision is logged is buffered and written once the
+decision appears; one that cannot be joined lost its decision and is counted in
+a ``dropped`` line. A session never routed (scheduler, fork) has no decision to
+wait for, so its events are only counted in ``unrouted_outcomes``.
 
 Events (``event`` field), each with ``at`` (epoch seconds) and ``session_id``:
 
@@ -22,8 +24,9 @@ Events (``event`` field), each with ``at`` (epoch seconds) and ``session_id``:
   figure), ``catalog`` (tokens priced from a price list), ``credits`` (a
   non-dollar meter: ``usd_total`` is null and the amount is ``credits_total``),
   ``unknown`` (the reporter did not declare a source), ``mixed`` or ``none``.
-* ``ended``: a ``cost`` snapshot plus ``reason`` (stop, delete) taken when the
-  session stops or is deleted. ``usd_total`` is always present; null means no
+* ``ended``: a ``cost`` snapshot plus ``reason`` (stop, delete, launch_failed)
+  taken when the session stops, is deleted, or its create launch failed.
+  ``usd_total`` is always present; null means no
   data. ``cost_source`` is null when this process never saw the session's spend.
 * ``rotated``: ``from_session``, ``to_session``. A native ``/clear`` moved the
   terminal to a new session; its lines keep the original ``decision_id``.
@@ -53,7 +56,9 @@ from typing import Any
 from omnigent.server.shadow_routing import (
     SCHEMA_VERSION,
     append_jsonl_line,
+    decision_expected,
     decisions_path,
+    expect_decision,
     iter_jsonl_records,
     shadow_backend_names,
 )
@@ -96,6 +101,7 @@ _PENDING_TTL_S = 120.0
 _PENDING_MAX = 2000
 _SOURCE_SESSIONS_MAX = 4096
 dropped_outcomes = 0
+unrouted_outcomes = 0
 
 
 def outcomes_path() -> Path:
@@ -285,8 +291,9 @@ def record_session_outcome(
 ) -> bool:
     """Append *event* for the decision logged for *session_id*; never raises.
 
-    With no decision yet the event is buffered (when shadow routing is on, or
-    *path* is given) and written once the decision is logged.
+    With no decision yet, an event of a session this process routed is buffered
+    (when shadow routing is on, or *path* is given) and written once the
+    decision is logged. A session never routed has none to wait for.
 
     :returns: ``True`` when a record was written now, ``False`` when it was
         buffered, the session has no decision, or the write failed.
@@ -299,6 +306,10 @@ def record_session_outcome(
             _write_pending(item, decision_id)
             return True
         if path is not None or shadow_backend_names():
+            if not decision_expected(session_id):
+                global unrouted_outcomes
+                unrouted_outcomes += 1
+                return False
             item.fields.setdefault("at", time.time())
             _buffer(item)
         return False
@@ -324,8 +335,12 @@ def record_rotation(from_session: str, to_session: str, *, path: Path | None = N
     try:
         decisions = path.with_name("decisions.jsonl") if path else None
         known = decision_id_for_session(to_session, decisions)
-        if known is not None and known == decision_id_for_session(from_session, decisions):
+        source = decision_id_for_session(from_session, decisions)
+        if known is not None and known == source:
             return False
+        # The new session joins its source's decision, which may still be on its way.
+        if source is not None or decision_expected(from_session):
+            expect_decision(to_session)
     except Exception:
         _logger.warning("routing rotation lookup failed", exc_info=True)
     return record_session_outcome(

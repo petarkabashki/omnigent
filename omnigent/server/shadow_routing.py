@@ -19,8 +19,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -408,6 +410,25 @@ def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # typ
 
 # custom-lint: disable-next=workspace-scoped-cache -- holds task objects
 _background_tasks: set[asyncio.Task[None]] = set()
+_EXPECTED_MAX = 4096
+_expected_lock = threading.Lock()
+# custom-lint: disable-next=workspace-scoped-cache -- bounded, keyed by unique session id
+_expected_decisions: OrderedDict[str, None] = OrderedDict()
+
+
+def expect_decision(session_id: str) -> None:
+    """Note that a decision for *session_id* is on its way to the log."""
+    with _expected_lock:
+        _expected_decisions[session_id] = None
+        _expected_decisions.move_to_end(session_id)
+        while len(_expected_decisions) > _EXPECTED_MAX:
+            _expected_decisions.popitem(last=False)
+
+
+def decision_expected(session_id: str) -> bool:
+    """Whether this process routed *session_id*, so its decision can still land."""
+    with _expected_lock:
+        return session_id in _expected_decisions
 
 
 def shadow_backend_names() -> list[str]:
@@ -527,12 +548,15 @@ def shadow_route_created_session(  # type: ignore[explicit-any]  # schema object
 
         actual_harness = harness or getattr(resp, "harness", None)
         family_models = infer_models(actual_harness)
+        session_id = getattr(resp, "id", None) or getattr(resp, "session_id", None)
+        if session_id:
+            expect_decision(session_id)
         schedule_shadow_routing(
             DecisionRequest(
                 message=first_message_text(
                     getattr(body, "initial_input", None), getattr(body, "initial_items", ())
                 ),
-                session_id=getattr(resp, "id", None) or getattr(resp, "session_id", None),
+                session_id=session_id,
                 project=getattr(resp, "project_id", None) or getattr(body, "project_id", None),
                 alias=getattr(body, "alias", None),
                 actual=ActualChoice(

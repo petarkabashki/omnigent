@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -221,6 +222,7 @@ def test_rotation_keeps_decision_and_sums_sessions(data_dir: Path) -> None:
 
 
 def test_event_before_decision_is_buffered_then_written(data_dir: Path) -> None:
+    sr.expect_decision("s1")
     assert not ro.record_override("s1", "interrupt", "owner", path=ro.outcomes_path())
     assert not ro.outcomes_path().exists()
     _log_decision("s1", "d1")
@@ -231,11 +233,65 @@ def test_event_before_decision_is_buffered_then_written(data_dir: Path) -> None:
 def test_unjoinable_event_is_counted_not_lost_silently(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    sr.expect_decision("ghost")
     ro.record_accept("ghost", "owner", path=ro.outcomes_path())
     monkeypatch.setattr(ro, "_PENDING_TTL_S", -1.0)
     ro.flush_pending_outcomes()
     assert ro.count_dropped() == {"no_decision": 1}
     assert ro.dropped_outcomes >= 1
+
+
+def test_never_routed_session_neither_buffers_nor_drops(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_ROUTER_SHADOW", "rules")
+    monkeypatch.setattr(ro, "_PENDING_TTL_S", -1.0)
+    monkeypatch.setattr(ro, "unrouted_outcomes", 0)
+    for _ in range(3):
+        assert ro.record_cost("scheduled", {"total_cost_usd": 1.0}, source="harness") is False
+    assert ro.record_ended("scheduled", None, reason="launch_failed") is False
+    assert "scheduled" not in {item.session_id for item in ro._pending}
+    ro.flush_pending_outcomes()
+    assert ro.count_dropped() == {}
+    assert ro.unrouted_outcomes == 4
+
+
+def test_rotation_from_a_routed_session_waits_for_the_decision(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_ROUTER_SHADOW", "rules")
+    sr.expect_decision("routed")
+    ro.record_rotation("routed", "rotated-to")
+    ro.record_accept("rotated-to", "owner")
+    _log_decision("routed", "d1")
+    ro.flush_pending_outcomes()
+    ro.flush_pending_outcomes()
+    assert [r["decision_id"] for r in _lines("accept")] == ["d1"]
+
+
+def test_rotation_from_a_never_routed_session_stays_unrouted(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_ROUTER_SHADOW", "rules")
+    ro.record_rotation("scheduled-2", "scheduled-2-rotated")
+    ro.record_accept("scheduled-2-rotated", "owner")
+    assert not {"scheduled-2", "scheduled-2-rotated"} & {item.session_id for item in ro._pending}
+
+
+def test_created_session_expects_its_decision(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_ROUTER_SHADOW", "rules")
+    monkeypatch.setattr(sr, "schedule_shadow_routing", lambda *a, **k: None)
+    sr.shadow_route_created_session(SimpleNamespace(), SimpleNamespace(id="created"))
+    assert sr.decision_expected("created") and not sr.decision_expected("other")
+
+
+def test_expected_decisions_stay_bounded(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sr, "_EXPECTED_MAX", 2)
+    for session_id in ("s1", "s2", "s3"):
+        sr.expect_decision(session_id)
+    assert not sr.decision_expected("s1") and sr.decision_expected("s3")
 
 
 def test_emitters_never_raise(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -476,8 +532,10 @@ async def test_failed_launch_closes_the_outcome_with_its_reason(
     store = SqlAlchemyConversationStore(db_uri)
     conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
     _log_decision(conv.id, "d1")
+    store.set_session_usage(conv.id, {"native_cost_complete": True})
     await ManagedStartupInputs(store, hosts=None).record_launch_failure(conv.id, "no capacity")  # type: ignore[arg-type]
     (ended,) = _lines("ended")
+    assert ended["native_cost_complete"] is True
     assert (ended["reason"], ended["usd_total"], ended["session_id"]) == (
         "launch_failed",
         None,
