@@ -1086,13 +1086,20 @@ async def _ensure_codex_terminal_on_runner(
     :param session_id: Session id, e.g. ``"conv_abc123"``.
     :param timeout_s: Seconds to wait for the runner's answer, e.g. ``130.0``.
     :returns: None.
-    :raises click.ClickException: If the runner rejects the ensure request.
+    :raises click.ClickException: If the runner rejects the ensure request or
+        does not answer in time.
     """
-    resp = await client.post(
-        f"/v1/sessions/{url_component(session_id)}/resources/terminals",
-        json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
-        timeout=timeout_s,
-    )
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{url_component(session_id)}/resources/terminals",
+            json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
+            timeout=timeout_s,
+        )
+    except httpx.ReadTimeout as exc:
+        raise _CodexRunnerUnreachableError(
+            f"The runner did not finish starting Codex within {timeout_s:.0f}s. "
+            "It may still be starting; check the runner, then run this command again."
+        ) from exc
     if resp.status_code >= 400:
         error_type = (
             _CodexRunnerUnreachableError

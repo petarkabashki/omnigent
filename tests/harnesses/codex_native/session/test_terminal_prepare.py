@@ -605,6 +605,38 @@ async def test_prepare_codex_terminal_stops_rather_than_launching_over_a_live_ru
     assert ensures.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_codex_ensure_timeout_tells_the_user_the_runner_may_still_be_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        httpx.AsyncClient, "post", AsyncMock(side_effect=httpx.ReadTimeout("slow relaunch"))
+    )
+
+    async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
+        with pytest.raises(click.ClickException, match="did not finish starting Codex within 5s"):
+            await codex_native._ensure_codex_terminal_on_runner(client, "conv_test", timeout_s=5.0)
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_does_not_launch_after_an_ensure_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A relaunch slower than the CLI's read timeout is still a live runner."""
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[],
+        status_replies=[_runner_status(online=True)],
+    )
+    ensures.side_effect = httpx.ReadTimeout("slow relaunch")
+    monkeypatch.setattr(codex_native, "_RESET_JOIN_TIMEOUT_S", 0.0)
+
+    with pytest.raises(click.ClickException, match="may still be alive, so nothing was launched"):
+        await _prepare_existing_session()
+
+
 def test_codex_ensure_outwaits_the_servers_proxy_budget() -> None:
     from omnigent.server.routes.sessions import routes_resources
 
