@@ -2517,7 +2517,7 @@ function AppShellImpl() {
         sidebar below the traffic lights and supplies a drag strip in the
         freed space. */}
           <div
-            className="app-shell relative flex h-dvh bg-sidebar text-foreground"
+            className="app-shell relative flex h-dvh bg-sidebar pt-[var(--server-banner-height,0px)] text-foreground"
             style={
               {
                 "--app-sidebar-width": `${sidebarOpen ? sidebarWidth : 0}px`,

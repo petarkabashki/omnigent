@@ -74,4 +74,15 @@ describe("ServerUnreachableBanner", () => {
     advance(SERVER_UNREACHABLE_DELAY_MS * 2);
     expect(screen.queryByRole("status")).toBeNull();
   });
+
+  it("reserves its height for the shell while shown and releases it on reconnect", () => {
+    const root = document.documentElement;
+    render(<ServerUnreachableBanner />);
+    expect(root.style.getPropertyValue("--server-banner-height")).toBe("");
+    setConnected(false);
+    advance(SERVER_UNREACHABLE_DELAY_MS);
+    expect(root.style.getPropertyValue("--server-banner-height")).not.toBe("");
+    setConnected(true);
+    expect(root.style.getPropertyValue("--server-banner-height")).toBe("");
+  });
 });
