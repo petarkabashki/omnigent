@@ -48,6 +48,7 @@ from omnigent.entities.conversation import (
     FunctionCallOutputData,
     parse_item_data,
 )
+from omnigent.entities.pagination import PagedList
 from omnigent.entities.permission import SessionPermission
 from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError
 from omnigent.harness_availability import (
@@ -439,6 +440,7 @@ from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY, resolve_client_
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
+    has_closed_title_marker,
     labels_with_closed_status,
     title_without_closed_marker,
 )
@@ -12640,6 +12642,109 @@ def _create_session_from_bundle(
         inference_model=inference_model,
         created_by=created_by,
     )
+
+
+# Pages walked to fill one child-list page when closed rows are dropped.
+_OPEN_CHILD_PAGE_MAX_FETCHES = 10
+
+
+def _list_open_child_page(
+    conv_store: ConversationStore,
+    parent_session_id: str,
+    *,
+    limit: int,
+    after: str | None = None,
+    before: str | None = None,
+    order: str = "desc",
+    title: str | None = None,
+) -> PagedList[Conversation]:
+    """
+    One page of a parent's children without legacy closed rows.
+
+    Closed rows are dropped after the store builds a page, so a page can come
+    back short or empty while older open rows remain. Forward paging keeps
+    fetching until ``limit`` open rows are held, and ``has_more`` is true only
+    when open rows may remain, so a client never sees "more" followed by nothing.
+
+    :param conv_store: Store to list children from.
+    :param parent_session_id: Parent session, e.g. ``"conv_parent"``.
+    :param limit: Open rows wanted in the page.
+    :param after: Cursor to resume from (forward paging).
+    :param before: Backward cursor; backward pages are not refilled.
+    :param order: ``"desc"`` or ``"asc"`` by creation time.
+    :param title: Exact title filter, e.g. ``"researcher:auth"``.
+    :returns: The open rows, with ``last_id`` the last row returned.
+    """
+
+    def fetch(cursor: str | None) -> PagedList[Conversation]:
+        return conv_store.list_conversations(
+            limit=limit,
+            after=cursor,
+            before=before,
+            kind="sub_agent",
+            parent_conversation_id=parent_session_id,
+            order=order,
+            sort_by="created_at",
+            title=title,
+        )
+
+    page = fetch(after)
+    open_rows = [row for row in page.data if not has_closed_title_marker(row.title)]
+    has_more = page.has_more
+    if before is None:
+        fetches = 1
+        while has_more and len(open_rows) < limit and fetches < _OPEN_CHILD_PAGE_MAX_FETCHES:
+            page = fetch(page.last_id)
+            fetches += 1
+            open_rows += [row for row in page.data if not has_closed_title_marker(row.title)]
+            has_more = page.has_more
+        if len(open_rows) > limit:
+            open_rows = open_rows[:limit]
+            has_more = True
+    return PagedList(
+        data=open_rows,
+        first_id=open_rows[0].id if open_rows else None,
+        last_id=open_rows[-1].id if open_rows else page.last_id,
+        has_more=has_more,
+    )
+
+
+# Children a stream connect replays; older ones are reached by paging.
+_CHILD_SNAPSHOT_LIMIT = 20
+
+
+async def _child_snapshot_events(
+    conv_store: ConversationStore,
+    parent_session_id: str,
+) -> list[dict[str, Any]]:
+    """
+    ``session.child_session.updated`` events for the newest open children.
+
+    One page only, like the child_sessions route, so the stream never hands a
+    client more children than its first page; legacy closed rows are left out.
+
+    :param conv_store: Store to list children from.
+    :param parent_session_id: Parent session, e.g. ``"conv_parent"``.
+    :returns: One event per child, newest first.
+    """
+    page = await asyncio.to_thread(
+        _list_open_child_page,
+        conv_store,
+        parent_session_id,
+        limit=_CHILD_SNAPSHOT_LIMIT,
+    )
+    summaries = await _child_session_summaries_from_conversations(
+        page.data, parent_session_id, conv_store
+    )
+    return [
+        {
+            "type": "session.child_session.updated",
+            "conversation_id": parent_session_id,
+            "child_session_id": summary.id,
+            "child": summary.model_dump(mode="json"),
+        }
+        for summary in summaries
+    ]
 
 
 async def _child_session_summaries_from_conversations(

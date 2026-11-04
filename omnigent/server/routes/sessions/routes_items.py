@@ -39,6 +39,7 @@ from omnigent.server.routes._sessions.common import (
 )
 from omnigent.server.routes._sessions.orchestration import (
     _child_session_summaries_from_conversations,
+    _list_open_child_page,
 )
 from omnigent.server.schemas import (
     ChildSessionList,
@@ -186,23 +187,20 @@ def register_items_routes(
         title_filter: str | None = None
         if tool and session_name:
             title_filter = f"{tool}:{session_name}"
+        # Closed children are archived (hidden by the store); legacy rows closed
+        # before archiving only carry the title marker, so drop those here and
+        # refill the page. Label-only closes (read-only side chats) stay listed.
         page = await asyncio.to_thread(
-            conversation_store.list_conversations,
+            _list_open_child_page,
+            conversation_store,
+            session_id,
             limit=limit,
             after=after,
             before=before,
-            kind="sub_agent",
-            parent_conversation_id=session_id,
             order=order,
-            sort_by="created_at",
             title=title_filter,
         )
-        # Closed children are archived (hidden above); legacy rows closed
-        # before archiving only carry the title marker, so drop those here.
-        # Label-only closes (read-only side chats) stay listed. The
-        # cursors and has_more stay those of the unfiltered page, so a short
-        # page with has_more=True still pages onward.
-        open_children = [child for child in page.data if not has_closed_title_marker(child.title)]
+        open_children = page.data
         data = await _child_session_summaries_from_conversations(
             open_children,
             session_id,

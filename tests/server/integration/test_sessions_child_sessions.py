@@ -1077,6 +1077,88 @@ async def test_child_sessions_after_cursor_reaches_every_open_child(
     assert body["has_more"] is False
 
 
+async def test_child_sessions_has_more_false_when_only_closed_rows_remain(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A page of closed rows over one open child reports no further page.
+
+    The store builds the page before closed rows are dropped, so its own
+    ``has_more`` would claim older agents the next page cannot show.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    oldest = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:oldest",
+        agent_id=session["agent_id"],
+    )
+    for suffix in ("closed1", "closed2"):
+        closed = _seed_child(
+            conv_store=conv_store,
+            parent_id=session["id"],
+            title=f"researcher:{suffix}",
+            agent_id=session["agent_id"],
+        )
+        conv_store.update_conversation(closed.id, title=f"researcher:{suffix}:closed:{closed.id}")
+
+    body = (
+        await client.get(f"/v1/sessions/{session['id']}/child_sessions", params={"limit": 2})
+    ).json()
+
+    assert [row["id"] for row in body["data"]] == [oldest.id]
+    assert body["has_more"] is False
+
+
+async def test_stream_snapshot_replays_one_page_of_open_children(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    The stream-connect snapshot carries the newest 20 open children only.
+
+    Closed legacy rows are skipped and older children are left to paging, so
+    connecting never hands the client more than the first page.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    from omnigent.server.routes._sessions.orchestration import _child_snapshot_events
+
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    seeded = [
+        _seed_child(
+            conv_store=conv_store,
+            parent_id=session["id"],
+            title=f"researcher:n{index:02d}",
+            agent_id=session["agent_id"],
+        )
+        for index in range(25)
+    ]
+    newest_closed = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:gone",
+        agent_id=session["agent_id"],
+    )
+    conv_store.update_conversation(
+        newest_closed.id, title=f"researcher:gone:closed:{newest_closed.id}"
+    )
+
+    events = await _child_snapshot_events(conv_store, session["id"])
+
+    assert [event["child_session_id"] for event in events] == [
+        child.id for child in reversed(seeded[5:])
+    ]
+    assert {event["type"] for event in events} == {"session.child_session.updated"}
+
+
 async def test_child_sessions_keeps_label_only_closed_child(
     client: httpx.AsyncClient,
     db_uri: str,
