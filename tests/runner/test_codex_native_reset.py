@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -134,38 +135,81 @@ async def test_a_runner_launch_catches_up_on_a_reset_no_runner_ran(
     assert read_child_usage_baselines(bridge_dir) == {}
 
 
+def _dead_letter(
+    bridge_dir: Path, session_id: str, source_id: str, *, epoch: int | None = None
+) -> None:
+    append_dead_letter(
+        bridge_dir,
+        session_id=session_id,
+        event_type="external_conversation_item",
+        payload={"item_type": "message", "source_id": source_id},
+        reason="transient HTTP failure after retries",
+        http_status=503,
+        context_epoch=epoch,
+    )
+
+
+async def _replay_against_epochs(
+    bridge_dir: Path, epochs: dict[str, int]
+) -> list[tuple[str, str]]:
+    """Replay the bridge's letters; returns each ``(session id, source id)`` posted."""
+    reposted: list[tuple[str, str]] = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        session_id = request.url.path.split("/")[3]
+        if request.method == "GET":
+            return httpx.Response(200, json={"context_epoch": epochs[session_id]})
+        reposted.append((session_id, json.loads(request.content)["data"]["source_id"]))
+        return httpx.Response(202, json={"queued": False})
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(server)
+    ) as client:
+        await _replay_dead_letters_before_resume(client, bridge_dir)
+    return reposted
+
+
 @pytest.mark.asyncio
 async def test_a_dead_letter_from_before_a_reset_does_not_replay_after_the_boundary(
     tmp_path: Path,
 ) -> None:
-    def dead_letter(source_id: str) -> None:
-        append_dead_letter(
-            tmp_path,
-            session_id="conv_a",
-            event_type="external_conversation_item",
-            payload={"item_type": "message", "source_id": source_id},
-            reason="transient HTTP failure after retries",
-            http_status=503,
-        )
-
-    dead_letter("item_rotated_out")
+    _dead_letter(tmp_path, "conv_a", "item_rotated_out")
     (tmp_path / "dead_letter.jsonl").replace(tmp_path / "dead_letter.jsonl.1")
-    dead_letter("item_old")
-    reposted: list[bytes] = []
-
-    def repost(request: httpx.Request) -> httpx.Response:
-        reposted.append(request.content)
-        return httpx.Response(202, json={"queued": False})
+    _dead_letter(tmp_path, "conv_a", "item_old")
 
     wipe_codex_resume_state(tmp_path)
 
-    async with httpx.AsyncClient(
-        base_url="http://test", transport=httpx.MockTransport(repost)
-    ) as client:
-        await _replay_dead_letters_before_resume(client, tmp_path)
+    assert await _replay_against_epochs(tmp_path, {"conv_a": 1}) == []
+    assert all(not path.read_text() for path in tmp_path.glob("dead_letter*"))
 
-    assert reposted == []
-    assert list(tmp_path.glob("dead_letter*")) == []
+
+@pytest.mark.asyncio
+async def test_resetting_a_rotated_session_keeps_the_letters_of_the_session_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """Replay routes each letter to its own session, so only the reset one's are stale."""
+    _dead_letter(tmp_path, "conv_original", "item_still_deliverable", epoch=3)
+    _dead_letter(tmp_path, "conv_rotated", "item_before_the_reset", epoch=0)
+
+    wipe_codex_resume_state(tmp_path)
+
+    assert await _replay_against_epochs(tmp_path, {"conv_original": 3, "conv_rotated": 1}) == [
+        ("conv_original", "item_still_deliverable")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_reset_keeps_letters_proven_undelivered(tmp_path: Path) -> None:
+    """``prepare`` runs before the boundary, and the server may never write one."""
+    _dead_letter(tmp_path, "conv_a", "item_undelivered", epoch=2)
+    reset, _ = _codex_reset(tmp_path, [])
+
+    await reset.prepare("conv_a")
+    reset._release("conv_a")
+
+    assert await _replay_against_epochs(tmp_path, {"conv_a": 2}) == [
+        ("conv_a", "item_undelivered")
+    ]
 
 
 def _codex_reset(

@@ -12,20 +12,20 @@ from pathlib import Path
 
 from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
 from omnigent.harnesses.codex_native.forwarder import reset_codex_forward_state
-from omnigent.native._native_post_delivery import clear_dead_letters
 from omnigent.runner.turn_routing import clear_pending_replay
 
 
 def wipe_codex_resume_state(bridge_dir: Path) -> None:
     """Remove the local state that would replay the pre-reset conversation.
 
+    Dead letters stay: this runs before the boundary exists and the file also holds
+    letters of the session this one replaced. Replay compares their epochs instead.
+
     :param bridge_dir: The session's Codex bridge directory.
     """
     reset_codex_forward_state(bridge_dir)
     # A routed prompt a previous launch blocked belongs before the boundary.
     clear_pending_replay(bridge_dir)
-    # The forwarder is stopped, so every dead letter predates the boundary.
-    clear_dead_letters(bridge_dir)
 
 
 def stamp_codex_launch_epoch(
