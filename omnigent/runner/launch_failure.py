@@ -666,6 +666,7 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
         "The agent's terminal exited unexpectedly, so the session can't continue."
     ),
     "terminal_launch_failed": "The agent's terminal couldn't be started on the host.",
+    "native_terminal_start_failed": "The agent's terminal didn't start.",
     "runner_error": "Something went wrong setting up the turn on the host.",
     "runner_disconnected": "The connection to the host dropped unexpectedly.",
     "runner_unavailable": "The session's runner isn't connected to the server.",

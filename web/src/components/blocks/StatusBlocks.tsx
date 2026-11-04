@@ -79,6 +79,7 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   required_terminal_exited:
     "The agent's terminal exited unexpectedly, so the session can't continue.",
   terminal_launch_failed: "The agent's terminal couldn't be started on the host.",
+  native_terminal_start_failed: "The agent's terminal didn't start.",
   runner_error: "Something went wrong setting up the turn on the host.",
   runner_disconnected: "The connection to the host dropped unexpectedly.",
   runner_unavailable: "The session's runner isn't connected to the server.",
@@ -168,6 +169,9 @@ const SIGN_IN_PENDING_CODES = new Set(["databricks_sign_in_pending"]);
 // A sign-in that completed. Its one line of body shows without a click: the
 // headline alone ("Signed in to Databricks") does not say what to do next.
 const SIGN_IN_COMPLETED_CODES = new Set(["databricks_sign_in_completed"]);
+// A start failure's body says whether the chat is safe and what to do next, so
+// it opens without a click.
+const OPEN_BY_DEFAULT_CODES = new Set(["native_terminal_start_failed"]);
 
 /** Render text with each address as a link that opens in a new tab. */
 function linkify(text: string): ReactNode[] {
@@ -354,7 +358,7 @@ export function ErrorBanner({
   // The hint already shows this card's error and cause, so its Message section would repeat them.
   const inlineMessage = code === COMPACTION_MODEL_FAILED_CODE && Boolean(cause);
   const expandable = !inlineMessage || relatedDetails.length > 0 || diagnostics.length > 0;
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => OPEN_BY_DEFAULT_CODES.has(code));
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [activeDiagnostics, setActiveDiagnostics] = useState(diagnostics[0]?.id ?? "terminal");
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);

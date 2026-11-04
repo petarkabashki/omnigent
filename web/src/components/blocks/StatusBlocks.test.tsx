@@ -393,6 +393,18 @@ describe("ErrorBanner", () => {
     expect(screen.queryByRole("button", { name: "Open sign-in link" })).toBeNull();
   });
 
+  it("shows a native start failure's guidance without expanding it", () => {
+    render(
+      <ErrorBanner
+        message="Your session and chat are safe and nothing was changed."
+        source="harness"
+        code="native_terminal_start_failed"
+      />,
+    );
+    expect(screen.getByTestId("error-headline")).toHaveTextContent("didn't start");
+    expect(screen.getByText(/Your session and chat are safe/)).toBeDefined();
+  });
+
   it("explains when no sign-in is pending any more instead of opening a dead link", async () => {
     useChatStore.setState({ conversationId: "conv_live" });
     const tab = { location: { href: "" }, close: vi.fn() };
