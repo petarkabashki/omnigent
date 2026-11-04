@@ -12078,6 +12078,8 @@ async def test_ensure_local_codex_resume_rollout_replays_before_history_fetch(
                 }
             )
             return httpx.Response(200)
+        if request.url.path == "/v1/sessions/conv_codex":
+            return httpx.Response(200, json={"context_epoch": 0})
         assert request.url.path == "/v1/sessions/conv_codex/items"
         return httpx.Response(200, json={"data": server_items, "has_more": False})
 
@@ -12095,7 +12097,7 @@ async def test_ensure_local_codex_resume_rollout_replays_before_history_fetch(
         )
 
     records = [json.loads(line) for line in rollout.read_text().splitlines()]
-    assert request_order == ["POST", "GET"]
+    assert request_order == ["GET", "POST", "GET"]
     assert not (tmp_path / "dead_letter.jsonl").exists()
     assert any(
         record["type"] == "response_item" and record["payload"].get("id") == "msg_recovered"
