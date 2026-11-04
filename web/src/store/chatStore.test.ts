@@ -10549,19 +10549,16 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
       expect(row?.last_task_error).toBeNull();
     });
 
-    it("initializes a cold child-sessions cache from a full delta", () => {
-      // Snapshot-on-connect / spawn deltas carry full rows, so a cold
-      // cache is seeded (lets child status update without a mounted hook).
+    it("leaves a cold child-sessions cache empty so the hook's first fetch owns paging", () => {
       handleSessionEvent({
         type: "session_child_session_updated",
         conversationId: "conv_parent",
         childSessionId: "conv_child1",
         child: child(),
       });
-      const cached = client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"));
-      expect(cached).toHaveLength(1);
-      expect(cached?.[0].id).toBe("conv_child1");
-      expect(cached?.[0].busy).toBe(true);
+      expect(
+        client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent")),
+      ).toBeUndefined();
     });
 
     it("refetches the parent's child list when a child goes idle without a preview", () => {
