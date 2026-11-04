@@ -39,7 +39,11 @@ from omnigent.harness_availability import (
     HARNESS_VERSION_TOO_LOW,
     HarnessUnavailableReason,
 )
-from omnigent.harnesses.claude_native.bridge import record_launch_epoch, url_component
+from omnigent.harnesses.claude_native.bridge import (
+    read_launch_epoch,
+    record_launch_epoch,
+    url_component,
+)
 from omnigent.harnesses.claude_native.main import (
     _attach_with_reconnect,
     attach_local_terminal,
@@ -73,6 +77,7 @@ from omnigent.harnesses.codex_native.bridge import (
 from omnigent.harnesses.codex_native.forwarder import (
     _replay_dead_letters_before_resume,
     codex_rollout_last_turn_model,
+    patch_codex_external_session_id,
     supervise_forwarder,
 )
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
@@ -1147,6 +1152,8 @@ async def _prepare_codex_terminal(
             _update_startup_progress(startup_progress, "Creating Codex session...")
             bridge_id = secrets.token_urlsafe(24)
             session_id = await _create_codex_session(client, session_bundle, bridge_id=bridge_id)
+            # A reset can only refuse this launch's late reports if they carry an epoch.
+            context_epoch = 0
         else:
             _update_startup_progress(startup_progress, "Loading Codex session...")
             payload = await _fetch_codex_session(client, session_id)
@@ -1503,7 +1510,12 @@ async def _initialize_fresh_terminal_thread(
         headers=headers,
         timeout=httpx.Timeout(30.0),
     ) as client:
-        await _patch_external_session_id(client, prepared.session_id, thread_id)
+        await _patch_external_session_id(
+            client,
+            prepared.session_id,
+            thread_id,
+            context_epoch=read_launch_epoch(prepared.bridge_dir),
+        )
     write_bridge_state(
         prepared.bridge_dir,
         CodexNativeBridgeState(
@@ -2940,6 +2952,8 @@ async def _patch_external_session_id(
     client: httpx.AsyncClient,
     session_id: str,
     thread_id: str,
+    *,
+    context_epoch: int | None,
 ) -> None:
     """
     Persist the native Codex thread id on the Omnigent session.
@@ -2947,11 +2961,11 @@ async def _patch_external_session_id(
     :param client: HTTP client pointed at AP.
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
     :param thread_id: Codex thread id.
+    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
     :returns: None.
     """
-    resp = await client.patch(
-        f"/v1/sessions/{url_component(session_id)}",
-        json={"external_session_id": thread_id},
+    resp = await patch_codex_external_session_id(
+        client, session_id=session_id, thread_id=thread_id, context_epoch=context_epoch
     )
     if resp.status_code >= 400:
         raise click.ClickException(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,11 +12,13 @@ import click
 import httpx
 import pytest
 
+from omnigent.harnesses.claude_native.bridge import record_launch_epoch
 from omnigent.harnesses.codex_native import main as codex_native
 from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     write_bridge_state,
 )
+from omnigent.harnesses.codex_native.forwarder import patch_codex_external_session_id
 from tests.harnesses.codex_native.session._support import (
     _FakeCodexAppServerClient,
 )
@@ -308,6 +311,73 @@ def test_attach_with_forwarder_uses_direct_tmux_when_socket_is_local(
     )
 
     assert attached == [(socket_path, "main")]
+
+
+def test_fresh_thread_bind_is_stamped_with_the_launch_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    record_launch_epoch(tmp_path, 2)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "conv_abc"})
+
+    async def fake_wait_for_thread_started(_client: object) -> str:
+        return "thread_new"
+
+    def fake_open_server_client(base_url: str, **_kwargs: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=base_url, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(codex_native, "_wait_for_thread_started", fake_wait_for_thread_started)
+    monkeypatch.setattr("omnigent.cli_auth.open_server_client", fake_open_server_client)
+
+    thread_id = asyncio.run(
+        codex_native._initialize_fresh_terminal_thread(
+            base_url="http://127.0.0.1:8000",
+            headers={},
+            prepared=codex_native.PreparedCodexTerminal(
+                session_id="conv_abc",
+                terminal_id="terminal_codex_main",
+                tmux_socket=None,
+                tmux_target=None,
+                bridge_dir=tmp_path,
+                thread_id=None,
+                app_server_url="ws://127.0.0.1:9876",
+                app_server=None,
+                event_client=SimpleNamespace(),
+                reattached=False,
+            ),
+        )
+    )
+
+    assert thread_id == "thread_new"
+    assert bodies == [{"external_session_id": "thread_new", "context_epoch": 2}]
+
+
+@pytest.mark.asyncio
+async def test_thread_bind_retries_without_the_epoch_on_a_server_that_forbids_it() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def older_server(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        status = 422 if "context_epoch" in body else 200
+        return httpx.Response(status, json={"id": "conv_abc"})
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(older_server)
+    ) as client:
+        response = await patch_codex_external_session_id(
+            client, session_id="conv_abc", thread_id="thread_new", context_epoch=1
+        )
+
+    assert response.status_code == 200
+    assert bodies == [
+        {"external_session_id": "thread_new", "context_epoch": 1},
+        {"external_session_id": "thread_new"},
+    ]
 
 
 def test_attach_with_forwarder_attaches_before_waiting_for_fresh_thread(

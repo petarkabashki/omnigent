@@ -2358,6 +2358,37 @@ def _launch_usage_coalescer(
     return _SessionUsageCoalescer(client, session_id, context_epoch=read_launch_epoch(bridge_dir))
 
 
+async def patch_codex_external_session_id(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    thread_id: str,
+    context_epoch: int | None,
+) -> httpx.Response:
+    """
+    Record a Codex thread id on the session, stamped with the launch's context epoch.
+
+    The server refuses (409) a thread id from before a context reset.
+
+    :param client: Omnigent server client.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :param thread_id: Codex thread id to record.
+    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
+    :returns: The server response.
+    """
+    url = f"/v1/sessions/{url_component(session_id)}"
+    fields: dict[str, str | int] = {"external_session_id": thread_id}
+    if context_epoch is not None:
+        fields["context_epoch"] = context_epoch
+    response = await client.patch(url, json=fields, params={"include_usage": "false"})
+    if response.status_code == 422 and context_epoch is not None:
+        # An older server rejects the unknown field; losing the id is worse.
+        response = await client.patch(
+            url, json={"external_session_id": thread_id}, params={"include_usage": "false"}
+        )
+    return response
+
+
 async def supervise_forwarder(
     *,
     base_url: str,

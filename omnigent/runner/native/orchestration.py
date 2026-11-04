@@ -6563,37 +6563,6 @@ async def _apply_codex_launch_plan_mode(
         raise RuntimeError(message) from exc
 
 
-async def _patch_codex_external_session_id(
-    client: httpx.AsyncClient,
-    *,
-    session_id: str,
-    thread_id: str,
-    context_epoch: int | None,
-) -> httpx.Response:
-    """
-    Record a Codex thread id on the session, stamped with the launch's context epoch.
-
-    The server refuses (409) a thread id from before a context reset.
-
-    :param client: Omnigent server client.
-    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
-    :param thread_id: Codex thread id to record.
-    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
-    :returns: The server response.
-    """
-    url = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
-    fields: dict[str, str | int] = {"external_session_id": thread_id}
-    if context_epoch is not None:
-        fields["context_epoch"] = context_epoch
-    response = await client.patch(url, json=fields, params={"include_usage": "false"})
-    if response.status_code == 422 and context_epoch is not None:
-        # An older server rejects the unknown field; losing the id is worse.
-        response = await client.patch(
-            url, json={"external_session_id": thread_id}, params={"include_usage": "false"}
-        )
-    return response
-
-
 async def _codex_discover_thread_and_forward(
     *,
     session_id: str,
@@ -6937,6 +6906,7 @@ async def _codex_discover_thread_and_forward(
         # degrades.
         from omnigent.cli_auth import open_server_client
         from omnigent.harnesses.claude_native.bridge import read_launch_epoch
+        from omnigent.harnesses.codex_native.forwarder import patch_codex_external_session_id
 
         try:
             async with open_server_client(
@@ -6945,7 +6915,7 @@ async def _codex_discover_thread_and_forward(
                 auth=_RunnerDatabricksAuth(auth_factory),
                 timeout=httpx.Timeout(10.0),
             ) as _ext_client:
-                _ext_resp = await _patch_codex_external_session_id(
+                _ext_resp = await patch_codex_external_session_id(
                     _ext_client,
                     session_id=session_id,
                     thread_id=thread_id,

@@ -14,7 +14,9 @@ import httpx
 import pytest
 
 from omnigent._runner_startup import RunnerStartupProgress
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch
 from omnigent.harnesses.codex_native import main as codex_native
+from omnigent.harnesses.codex_native.bridge import bridge_dir_for_bridge_id
 from tests.harnesses.codex_native.session._support import (
     _write_source_rollout,
 )
@@ -57,8 +59,11 @@ async def test_prepare_codex_terminal_fresh_session_passes_developer_instruction
         "omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path / "codex-bridge"
     )
 
+    created_bridge_ids: list[str] = []
+
     async def _fake_create_session(_client: object, _bundle: bytes, *, bridge_id: str) -> str:
-        del _client, _bundle, bridge_id
+        del _client, _bundle
+        created_bridge_ids.append(bridge_id)
         return "conv_fresh_di"
 
     captured: dict[str, Any] = {}
@@ -88,6 +93,8 @@ async def test_prepare_codex_terminal_fresh_session_passes_developer_instruction
 
     assert captured.get("developer_instructions") == "Be a concise, careful coding assistant."
     assert captured["session_id"] == "conv_fresh_di"
+    # Unstamped reports would be added to the base after a later reset.
+    assert read_launch_epoch(bridge_dir_for_bridge_id(created_bridge_ids[0])) == 0
 
 
 @pytest.mark.asyncio
