@@ -2284,6 +2284,13 @@ def _codex_rollout_records_from_session_items(
             remaining_function_outputs[item_call_id] -= 1
             if remaining_function_outputs[item_call_id] <= 0:
                 del remaining_function_outputs[item_call_id]
+        # A context reset starts a new epoch: nothing before it is model context.
+        if item.get("type") == "context_reset":
+            records = [r for r in records if r.get("type") == "session_meta"]
+            seen_turn_ids.clear()
+            open_function_calls.clear()
+            emitted_call_ids.clear()
+            continue
         # Compaction items carry the post-compaction context. Emit a
         # Compacted rollout record and discard all prior records — the
         # replacement_history replaces them.

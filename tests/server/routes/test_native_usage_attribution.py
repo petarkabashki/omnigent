@@ -10,6 +10,8 @@ double-counted the shared baseline once the active model changed).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from omnigent.errors import OmnigentError
@@ -893,8 +895,8 @@ def test_codex_token_priced_total_survives_a_reset_and_grows_by_the_new_threads_
 ) -> None:
     """Codex reports tokens only; a fresh thread restarts them but the total keeps growing.
 
-    The cost is the token-priced list-price estimate the badge already shows. The
-    codex forwarder does not stamp a context epoch on its reports.
+    The cost is the token-priced list-price estimate the badge already shows. Reports
+    here are unstamped, as an older forwarder sends them.
     """
     monkeypatch.setattr(
         "omnigent.llms.context_window.fetch_model_pricing_with_provider",
@@ -944,3 +946,55 @@ def test_codex_token_priced_total_survives_a_reset_and_grows_by_the_new_threads_
     usage = _usage(store, conv.id)
     assert usage["total_cost_usd"] == pytest.approx(13.8)
     assert usage["by_model"]["gpt-5.6"]["total_cost_usd"] == pytest.approx(13.8)
+
+
+async def _codex_usage_post(
+    epoch: int | None, input_tokens: int, output_tokens: int
+) -> dict[str, object]:
+    """Return the usage body the real codex coalescer posts at ``epoch``."""
+    import httpx
+
+    from omnigent.harnesses.codex_native.forwarder import _SessionUsageCoalescer
+
+    bodies: list[dict[str, object]] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content)["data"])
+        return httpx.Response(202, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_capture), base_url="http://ap.test"
+    ) as client:
+        coalescer = _SessionUsageCoalescer(client, "conv_x", context_epoch=epoch)
+        coalescer.record(
+            {
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": input_tokens,
+                        "outputTokens": output_tokens,
+                        "cachedInputTokens": 0,
+                    }
+                }
+            },
+            model="gpt-5.6",
+        )
+        await coalescer.flush()
+    return bodies[-1]
+
+
+async def test_late_codex_usage_from_before_a_reset_is_dropped_and_new_epoch_adds(
+    db_uri: str,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="codex-late", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(conv.id, await _codex_usage_post(0, 1000, 200), store)
+    store.append_context_reset(conv.id, response_id="reset_1")
+    total_after_reset = _usage(store, conv.id)["total_tokens"]
+    assert total_after_reset == 1200
+
+    # The old forwarder flushes once more after the reset.
+    _persist_native_cumulative_usage(conv.id, await _codex_usage_post(0, 1100, 220), store)
+    assert _usage(store, conv.id)["total_tokens"] == total_after_reset
+
+    _persist_native_cumulative_usage(conv.id, await _codex_usage_post(1, 100, 20), store)
+    assert _usage(store, conv.id)["total_tokens"] == total_after_reset + 120

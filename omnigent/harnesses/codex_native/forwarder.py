@@ -22,7 +22,7 @@ import httpx
 from omnigent.codex_approval_modes import codex_permission_preset_from_thread_settings
 from omnigent.debug_logging import debug_event
 from omnigent.entities.session_resources import terminal_resource_id
-from omnigent.harnesses.claude_native.bridge import url_component
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch, url_component
 from omnigent.harnesses.codex_egress import (
     CERTIFICATE_REMEDIATION,
     certificate_failure_message,
@@ -1909,6 +1909,7 @@ class _SessionUsageCoalescer:
         session_id: str,
         model: str | None = None,
         baseline: _UsageTotals | None = None,
+        context_epoch: int | None = None,
     ) -> None:
         """
         Initialize the usage coalescer.
@@ -1923,8 +1924,12 @@ class _SessionUsageCoalescer:
         :param baseline: ``(input, cached input, output)`` token totals a forked
             child thread inherited, subtracted from its cumulative counts so the
             child posts only its own usage. ``None`` posts Codex's totals as-is.
+        :param context_epoch: The launch's context epoch, stamped on every post so
+            the server drops a late report from before a reset. ``None`` leaves
+            posts unstamped.
         :returns: None.
         """
+        self._context_epoch = context_epoch
         self._client = client
         self._session_id = session_id
         self._pending: dict[str, int] = {}
@@ -1989,6 +1994,8 @@ class _SessionUsageCoalescer:
         payload: _JsonObject = dict(data)
         if self._model:
             payload["model"] = self._model
+        if self._context_epoch is not None:
+            payload["context_epoch"] = self._context_epoch
         response = await _post_session_event(
             self._client,
             self._session_id,
@@ -2398,7 +2405,9 @@ async def supervise_forwarder(
             session_id=session_id,
             thread_id=thread_id,
             delta_coalescer=_OutputTextDeltaCoalescer(ap_client, session_id),
-            usage_coalescer=_SessionUsageCoalescer(ap_client, session_id),
+            usage_coalescer=_SessionUsageCoalescer(
+                ap_client, session_id, context_epoch=read_launch_epoch(bridge_dir)
+            ),
             elicitation_tracker=_CodexElicitationTaskTracker(),
         )
         forwarder_state = _CodexForwarderState(
@@ -2692,7 +2701,9 @@ async def _maybe_rotate_session_on_thread_started(
     target.session_id = new_session_id
     target.thread_id = new_thread_id
     target.delta_coalescer = _OutputTextDeltaCoalescer(ap_client, new_session_id)
-    target.usage_coalescer = _SessionUsageCoalescer(ap_client, new_session_id)
+    target.usage_coalescer = _SessionUsageCoalescer(
+        ap_client, new_session_id, context_epoch=read_launch_epoch(bridge_dir)
+    )
     target.elicitation_tracker = _CodexElicitationTaskTracker()
     await old_delta_coalescer.close()
     await old_usage_coalescer.close()

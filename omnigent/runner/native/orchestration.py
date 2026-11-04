@@ -690,6 +690,7 @@ class _CodexNativeLaunchConfig:
     turn_routing: bool = False
     reasoning_effort: str | None = None
     bridge_id: str | None = None
+    context_epoch: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1662,7 +1663,8 @@ async def _codex_native_launch_config(
         _bid = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
         if isinstance(_bid, str) and _bid:
             bridge_id = _bid
-    if snapshot.get("context_epoch"):
+    _snapshot_epoch = snapshot.get("context_epoch")
+    if _snapshot_epoch:
         # A crash can leave fork labels behind a reset; a fork starts at epoch 0.
         fork_source_id = None
         fork_source_external_id = None
@@ -1690,6 +1692,7 @@ async def _codex_native_launch_config(
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
         bridge_id=bridge_id,
+        context_epoch=_snapshot_epoch if isinstance(_snapshot_epoch, int) else None,
     )
 
 
@@ -5448,6 +5451,7 @@ async def _auto_create_codex_terminal(
     # old process: the first launch loads the resume/fork module graph too.
     import omnigent.harnesses.codex_native.main as _codex_native_main  # noqa: F401
     import omnigent.harnesses.codex_native.process_registry as _process_registry  # noqa: F401
+    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
     from omnigent.harnesses.codex_native.app_server import (
         CodexAppServerClient,
         CodexAppServerResponseError,
@@ -5482,6 +5486,9 @@ async def _auto_create_codex_terminal(
     original_external_session_id = launch_config.external_session_id
     workspace = str(launch_config.workspace)
     bridge_dir = prepare_bridge_dir(launch_config.bridge_id or session_id)
+    if launch_config.context_epoch is not None:
+        # Late reports from this launch are stamped so a reset can refuse them.
+        await asyncio.to_thread(record_launch_epoch, bridge_dir, launch_config.context_epoch)
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
@@ -6530,6 +6537,37 @@ async def _apply_codex_launch_plan_mode(
         raise RuntimeError(message) from exc
 
 
+async def _patch_codex_external_session_id(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    thread_id: str,
+    context_epoch: int | None,
+) -> httpx.Response:
+    """
+    Record a Codex thread id on the session, stamped with the launch's context epoch.
+
+    The server refuses (409) a thread id from before a context reset.
+
+    :param client: Omnigent server client.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :param thread_id: Codex thread id to record.
+    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
+    :returns: The server response.
+    """
+    url = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
+    fields: dict[str, str | int] = {"external_session_id": thread_id}
+    if context_epoch is not None:
+        fields["context_epoch"] = context_epoch
+    response = await client.patch(url, json=fields, params={"include_usage": "false"})
+    if response.status_code == 422 and context_epoch is not None:
+        # An older server rejects the unknown field; losing the id is worse.
+        response = await client.patch(
+            url, json={"external_session_id": thread_id}, params={"include_usage": "false"}
+        )
+    return response
+
+
 async def _codex_discover_thread_and_forward(
     *,
     session_id: str,
@@ -6872,6 +6910,7 @@ async def _codex_discover_thread_and_forward(
         # leaves chat streaming working — only fork-history carry-over
         # degrades.
         from omnigent.cli_auth import open_server_client
+        from omnigent.harnesses.claude_native.bridge import read_launch_epoch
 
         try:
             async with open_server_client(
@@ -6880,12 +6919,21 @@ async def _codex_discover_thread_and_forward(
                 auth=_RunnerDatabricksAuth(auth_factory),
                 timeout=httpx.Timeout(10.0),
             ) as _ext_client:
-                _ext_resp = await _ext_client.patch(
-                    f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-                    json={"external_session_id": thread_id},
-                    params={"include_usage": "false"},
+                _ext_resp = await _patch_codex_external_session_id(
+                    _ext_client,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    context_epoch=await asyncio.to_thread(read_launch_epoch, bridge_dir),
                 )
-            if _ext_resp.status_code >= 400:
+            if _ext_resp.status_code == 409:
+                _logger.info(
+                    "AP refused codex external_session_id PATCH from before a context reset; "
+                    "session=%s thread=%s",
+                    session_id,
+                    thread_id,
+                    extra={"session_id": session_id},
+                )
+            elif _ext_resp.status_code >= 400:
                 _logger.warning(
                     "AP rejected codex external_session_id PATCH (%s); session=%s thread=%s — "
                     "a fork of this session will resume fresh",
