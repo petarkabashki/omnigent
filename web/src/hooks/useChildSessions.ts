@@ -2,6 +2,8 @@ import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-quer
 import { useCallback, useState, useSyncExternalStore } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
+import { apiErrorFromResponse } from "@/lib/sessionsApi";
+import { isStaleCursorError } from "@/lib/staleCursor";
 import { isTempConvId } from "@/lib/tempConversationId";
 
 /**
@@ -219,6 +221,43 @@ interface UseChildSessionsResult {
   /** Fetch the next page of older children into ``children``. */
   loadMore: () => Promise<void>;
   isLoadingMore: boolean;
+  /** Why the last Load more failed, for the UI to show; cleared on the next attempt. */
+  loadMoreError: string | null;
+}
+
+/** Upper bound on pages re-fetched to restore the loaded depth after a refetch. */
+const MAX_RESTORE_PAGES = 50;
+
+function mergeNewChildren(
+  current: ChildSessionInfo[],
+  incoming: ChildSessionInfo[],
+): ChildSessionInfo[] {
+  const known = new Set(current.map((child) => child.id));
+  return [...current, ...incoming.filter((child) => !known.has(child.id))];
+}
+
+/**
+ * Fetch the newest page, then follow the cursor until ``loadedCount`` rows are
+ * back, so a refetch keeps the pages the user already loaded. A cursor that
+ * went stale ends the walk with the rows fetched so far.
+ */
+async function fetchChildSessionsRestoringDepth(
+  sessionId: string,
+  loadedCount: number,
+): Promise<{ children: ChildSessionInfo[]; page: ChildSessionsPageState }> {
+  let { children, page } = await fetchChildSessionsPage(sessionId);
+  for (let requests = 0; children.length < loadedCount && page.hasMore; requests++) {
+    if (requests >= MAX_RESTORE_PAGES) break;
+    try {
+      const next = await fetchChildSessionsPage(sessionId, page.cursor);
+      children = mergeNewChildren(children, next.children);
+      page = next.page;
+    } catch (error) {
+      if (isStaleCursorError(error)) break;
+      throw error;
+    }
+  }
+  return { children, page };
 }
 
 /**
@@ -238,7 +277,7 @@ export async function fetchChildSessionsPage(
   const res = await authenticatedFetch(
     `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
   );
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw await apiErrorFromResponse(res);
   const json = (await res.json()) as ChildSessionsResponse;
   // Children run on this session's runner: record the link so their
   // session-scoped requests key by this session's host before their own
@@ -297,7 +336,13 @@ export function useChildSessions(
         ? ["conversation", null, "child_sessions"]
         : childSessionsQueryKey(sessionId),
     queryFn: async () => {
-      const { children, page } = await fetchChildSessionsPage(sessionId as string);
+      const loadedCount =
+        queryClient.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey(sessionId as string))
+          ?.length ?? 0;
+      const { children, page } = await fetchChildSessionsRestoringDepth(
+        sessionId as string,
+        loadedCount,
+      );
       queryClient.setQueryData(childSessionsPageStateKey(sessionId as string), page);
       return children;
     },
@@ -316,16 +361,25 @@ export function useChildSessions(
     enabled: false,
   });
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const loadMore = useCallback(async () => {
     if (sessionId === null || !pageState.hasMore || isLoadingMore) return;
     setIsLoadingMore(true);
+    setLoadMoreError(null);
     try {
       const next = await fetchChildSessionsPage(sessionId, pageState.cursor);
-      queryClient.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey(sessionId), (current) => {
-        const known = new Set((current ?? []).map((child) => child.id));
-        return [...(current ?? []), ...next.children.filter((child) => !known.has(child.id))];
-      });
+      queryClient.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey(sessionId), (current) =>
+        mergeNewChildren(current ?? [], next.children),
+      );
       queryClient.setQueryData(childSessionsPageStateKey(sessionId), next.page);
+    } catch (error) {
+      if (isStaleCursorError(error)) {
+        // The cursor row was deleted; a refetch walks from the newest page again.
+        setLoadMoreError("The agent list changed while loading. Refreshing.");
+        void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sessionId) });
+      } else {
+        setLoadMoreError(error instanceof Error ? error.message : "Could not load older agents.");
+      }
     } finally {
       setIsLoadingMore(false);
     }
@@ -337,6 +391,7 @@ export function useChildSessions(
     hasMore: sessionId !== null && pageState.hasMore,
     loadMore,
     isLoadingMore,
+    loadMoreError,
   };
 }
 
