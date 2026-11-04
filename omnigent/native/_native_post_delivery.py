@@ -53,6 +53,7 @@ def append_dead_letter(
     delivered_ambiguous: bool = False,
     http_status: int | None = None,
     transport_error: str | None = None,
+    context_epoch: int | None = None,
 ) -> None:
     """
     Append one undeliverable forward payload to ``{bridge_dir}/dead_letter.jsonl`` (#1120).
@@ -81,6 +82,8 @@ def append_dead_letter(
         ``503`` or ``400``; ``None`` for a transport failure that saw no response.
     :param transport_error: Transport-error class name when the POST raised without a
         response, e.g. ``"ConnectError"``; ``None`` when the server responded.
+    :param context_epoch: The session's context epoch when the item was produced, so
+        replay can drop it once a reset has passed; ``None`` leaves the record unstamped.
     :returns: None.
     """
     try:
@@ -98,18 +101,19 @@ def append_dead_letter(
                 _DEAD_LETTER_BACKUP_FILE,
                 session_id,
             )
-        line = json.dumps(
-            {
-                "ts": time.time(),
-                "session_id": session_id,
-                "event_type": event_type,
-                "reason": reason,
-                "delivered_ambiguous": delivered_ambiguous,
-                "http_status": http_status,
-                "transport_error": transport_error,
-                "payload": payload,
-            }
-        )
+        record: dict[str, object] = {
+            "ts": time.time(),
+            "session_id": session_id,
+            "event_type": event_type,
+            "reason": reason,
+            "delivered_ambiguous": delivered_ambiguous,
+            "http_status": http_status,
+            "transport_error": transport_error,
+            "payload": payload,
+        }
+        if context_epoch is not None:
+            record["context_epoch"] = context_epoch
+        line = json.dumps(record)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except Exception as exc:  # noqa: BLE001 - dead-lettering must never disrupt forwarding.
@@ -362,11 +366,14 @@ class RepostResult:
     :param http_status: Final HTTP status code when the server responded, or
         ``None`` for a transport failure that saw no response. Used to refresh
         the retained record's classification.
+    :param discarded: ``True`` when the record must never be delivered, e.g. it
+        predates a context reset. The record is removed without a POST.
     """
 
     delivered: bool
     delivered_ambiguous: bool = False
     http_status: int | None = None
+    discarded: bool = False
 
 
 def _dead_letter_record_replayable(
@@ -574,6 +581,9 @@ async def replay_dead_letters(
             assert isinstance(entry, dict)  # narrowed by _dead_letter_record_replayable
             attempted += 1
             result = await repost(entry)
+            if result.discarded:
+                changed = True
+                continue
             if result.delivered:
                 replayed += 1
                 changed = True

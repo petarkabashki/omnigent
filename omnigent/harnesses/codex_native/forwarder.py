@@ -2427,6 +2427,8 @@ async def supervise_forwarder(
     """
     # Bind bridge dir so failed durable-event posts can be dead-lettered (#1120).
     _dead_letter_dir.set(bridge_dir)
+    launch_epoch = read_launch_epoch(bridge_dir)
+    _dead_letter_epochs.set({} if launch_epoch is None else {session_id: launch_epoch})
     # Resume backfill and live notifications can post concurrently. Serialize
     # durable items per AP session so an older retry cannot land after a newer item.
     _conversation_item_locks.set({})
@@ -2747,6 +2749,8 @@ async def _maybe_rotate_session_on_thread_started(
     )
     target.session_id = new_session_id
     target.thread_id = new_thread_id
+    if (dead_letter_epochs := _dead_letter_epochs.get()) is not None:
+        dead_letter_epochs[new_session_id] = 0
     target.delta_coalescer = _OutputTextDeltaCoalescer(ap_client, new_session_id)
     target.usage_coalescer = _launch_usage_coalescer(ap_client, new_session_id, bridge_dir)
     target.elicitation_tracker = _CodexElicitationTaskTracker()
@@ -7450,6 +7454,7 @@ async def _post_external_item(
                 payload=data,
                 reason="delivery interrupted before acknowledgement",
                 delivered_ambiguous=True,
+                context_epoch=_dead_letter_epoch(session_id),
             )
         raise
     if response is None:
@@ -8210,6 +8215,11 @@ _forward_health = _ForwardHealth()
 
 # Bridge dir for dead-lettering undeliverable durable events; set per-forwarder (#1120).
 _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir", default=None)
+# This forwarder's context epoch per session, pinned at start: a reset moves the
+# bridge's shared stamp while an abandoned forwarder may still be dead-lettering.
+_dead_letter_epochs: ContextVar[dict[str, int] | None] = ContextVar(
+    "_codex_dead_letter_epochs", default=None
+)
 
 
 class _ReentrantAsyncLock:
@@ -8326,6 +8336,38 @@ def _note_forward_failure(event_type: str, result: _PostResult, session_id: str)
         _forward_health.degraded_logged = True
 
 
+def _dead_letter_epoch(session_id: str) -> int | None:
+    """
+    Return the context epoch a dead letter for *session_id* belongs to.
+
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :returns: The epoch this forwarder launched under, or ``None`` for a session it
+        did not launch, such as a sub-agent child.
+    """
+    epochs = _dead_letter_epochs.get()
+    return None if epochs is None else epochs.get(session_id)
+
+
+async def _current_context_epoch(client: httpx.AsyncClient, session_id: str) -> int | None:
+    """
+    Read a session's context epoch for dead-letter replay.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :returns: The current epoch, ``0`` from a server that predates resets, or ``None``
+        when the server could not say.
+    """
+    try:
+        response = await client.get(
+            f"/v1/sessions/{url_component(session_id)}", timeout=_REPLAY_POST_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        epoch = response.json().get("context_epoch", 0)
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    return epoch if isinstance(epoch, int) else 0
+
+
 async def _replay_dead_letters_before_resume(
     ap_client: httpx.AsyncClient,
     bridge_dir: Path,
@@ -8340,12 +8382,17 @@ async def _replay_dead_letters_before_resume(
     :func:`replay_dead_letters` drain, supplying a re-POST that routes each
     record to its recorded session via :func:`_post_session_event_inner` (the
     inner so a re-failure does not double dead-letter through the wrapper).
+    A record from before its session's latest context reset is dropped instead:
+    conversation items carry no epoch, so the server would accept it past the
+    boundary. A record whose session's epoch is unknown waits for a later resume.
     Never raises: a replay failure must not block resume.
 
     :param ap_client: HTTP client for Omnigent event posts.
     :param bridge_dir: Native Codex bridge directory holding the dead-letter files.
     :returns: None.
     """
+
+    current_epochs: dict[str, int | None] = {}
 
     async def _repost(record: dict[str, object]) -> RepostResult:
         session_id = record["session_id"]
@@ -8354,6 +8401,19 @@ async def _replay_dead_letters_before_resume(
         assert isinstance(session_id, str)
         assert isinstance(event_type, str)
         assert isinstance(payload, dict)
+        if session_id not in current_epochs:
+            current_epochs[session_id] = await _current_context_epoch(ap_client, session_id)
+        current_epoch = current_epochs[session_id]
+        if current_epoch is None:
+            http_status = record.get("http_status")
+            return RepostResult(
+                delivered=False,
+                delivered_ambiguous=record["delivered_ambiguous"] is True,
+                http_status=http_status if isinstance(http_status, int) else None,
+            )
+        record_epoch = record.get("context_epoch", 0)
+        if not isinstance(record_epoch, int) or record_epoch < current_epoch:
+            return RepostResult(delivered=False, discarded=True)
         result = await _post_session_event_inner(
             ap_client,
             session_id,
@@ -8479,6 +8539,7 @@ async def _post_session_event(
                 delivered_ambiguous=result.delivered_ambiguous,
                 http_status=http_status,
                 transport_error=result.transport_error,
+                context_epoch=_dead_letter_epoch(session_id),
             )
     return response
 

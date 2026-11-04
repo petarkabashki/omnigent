@@ -143,6 +143,9 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
             json={"error": f"unexpected {request.method} {request.url.path}"},
         )
 
+    dead_letter_epochs = {"conv_old": 2}
+    epochs_token = codex_native_forwarder._dead_letter_epochs.set(dead_letter_epochs)
+
     async def run() -> None:
         """
         Drive the real rotation and event handlers.
@@ -221,6 +224,8 @@ def test_forwarder_rotates_session_on_new_codex_thread_and_posts_to_new_session(
 
     asyncio.run(run())
 
+    codex_native_forwarder._dead_letter_epochs.reset(epochs_token)
+    assert dead_letter_epochs == {"conv_old": 2, "conv_new": 0}
     state = read_bridge_state(tmp_path)
     assert state is not None
     assert state.session_id == "conv_new"

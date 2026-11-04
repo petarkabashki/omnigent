@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -325,6 +326,7 @@ async def test_cancelled_idempotent_item_is_dead_lettered_for_safe_replay(tmp_pa
 
     client = _BlockingPostClient()
     dead_letter_token = fwd._dead_letter_dir.set(tmp_path)
+    epochs_token = fwd._dead_letter_epochs.set({"conv_x": 4})
     locks_token = fwd._conversation_item_locks.set({})
     try:
         task = asyncio.create_task(
@@ -344,12 +346,14 @@ async def test_cancelled_idempotent_item_is_dead_lettered_for_safe_replay(tmp_pa
     finally:
         fwd._conversation_item_locks.reset(locks_token)
         fwd._dead_letter_dir.reset(dead_letter_token)
+        fwd._dead_letter_epochs.reset(epochs_token)
 
     import json as _json
 
     record = _json.loads((tmp_path / "dead_letter.jsonl").read_text().splitlines()[0])
     assert record["delivered_ambiguous"] is True
     assert record["payload"]["source_id"] == "thread_1:turn_1:item_1"
+    assert record["context_epoch"] == 4
 
 
 @pytest.mark.asyncio
@@ -490,7 +494,7 @@ async def test_replay_dead_letters_before_resume_reposts_proven_undelivered(
         )
 
     monkeypatch.setattr(fwd, "_post_session_event_inner", _ok_inner)
-    await fwd._replay_dead_letters_before_resume(MagicMock(), tmp_path)
+    await fwd._replay_dead_letters_before_resume(_client_with_epochs({}), tmp_path)
 
     assert len(posted) == 1
     assert posted[0]["session_id"] == "conv_codex1"
@@ -502,6 +506,123 @@ async def test_replay_dead_letters_before_resume_reposts_proven_undelivered(
     assert posted[0]["timeout"] == fwd._REPLAY_POST_TIMEOUT_SECONDS
     # Delivered → record removed.
     assert not (tmp_path / "dead_letter.jsonl").exists()
+
+
+def _client_with_epochs(epochs: dict[str, int | None]) -> httpx.AsyncClient:
+    """
+    Serve session snapshots with the given context epochs.
+
+    :param epochs: ``session id -> epoch``; ``None`` makes that lookup fail.
+    :returns: A client that also accepts every event POST.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"queued": False})
+        epoch = epochs.get(request.url.path.rsplit("/", 1)[-1], 0)
+        if epoch is None:
+            return httpx.Response(503, json={})
+        return httpx.Response(200, json={"context_epoch": epoch})
+
+    return httpx.AsyncClient(base_url="http://test", transport=httpx.MockTransport(handler))
+
+
+def _undelivered_item(
+    bridge_dir: Path, session_id: str, source_id: str, epoch: int | None = None
+) -> None:
+    fwd.append_dead_letter(
+        bridge_dir,
+        session_id=session_id,
+        event_type="external_conversation_item",
+        payload={"item_type": "message", "source_id": source_id},
+        reason="transient HTTP failure after retries",
+        http_status=503,
+        context_epoch=epoch,
+    )
+
+
+def _dead_lettered_source_ids(bridge_dir: Path) -> list[str]:
+    path = bridge_dir / "dead_letter.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)["payload"]["source_id"] for line in path.read_text().splitlines() if line
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_drops_a_letter_written_after_the_reset_it_predates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A cancelled forwarder can dead-letter once the reset's wipe has run.
+
+    Items carry no epoch, so only the letter's own stamp keeps the server from
+    accepting it past the boundary.
+    """
+    _undelivered_item(tmp_path, "conv_a", "item_before_reset", epoch=1)
+    _undelivered_item(tmp_path, "conv_a", "item_unstamped")
+    _undelivered_item(tmp_path, "conv_a", "item_after_reset", epoch=2)
+    posted: list[object] = []
+
+    async def _ok_inner(_client, _session_id, *, data, **_kwargs):
+        posted.append(data["source_id"])
+        return fwd._PostResult(
+            response=httpx.Response(200, request=httpx.Request("POST", "http://test"))
+        )
+
+    monkeypatch.setattr(fwd, "_post_session_event_inner", _ok_inner)
+    async with _client_with_epochs({"conv_a": 2}) as client:
+        await fwd._replay_dead_letters_before_resume(client, tmp_path)
+
+    assert posted == ["item_after_reset"]
+    assert _dead_lettered_source_ids(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_replay_keeps_a_letter_whose_session_epoch_is_unknown(tmp_path: Path) -> None:
+    _undelivered_item(tmp_path, "conv_a", "item_kept", epoch=1)
+
+    async with _client_with_epochs({"conv_a": None}) as client:
+        await fwd._replay_dead_letters_before_resume(client, tmp_path)
+
+    assert _dead_lettered_source_ids(tmp_path) == ["item_kept"]
+
+
+@pytest.mark.asyncio
+async def test_dead_letters_keep_the_epoch_their_forwarder_launched_under(
+    tmp_path: Path,
+) -> None:
+    """The shared stamp moves on at the next launch; a late letter must not follow it."""
+    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+
+    failing = httpx.AsyncClient(
+        base_url="http://test",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(400, json={})),
+    )
+    record_launch_epoch(tmp_path, 3)
+    dir_token = fwd._dead_letter_dir.set(tmp_path)
+    epochs_token = fwd._dead_letter_epochs.set({"conv_a": 2})
+    try:
+        for session_id in ("conv_a", "conv_child"):
+            await fwd._post_session_event(
+                failing,
+                session_id,
+                event_type="external_conversation_item",
+                data={"item_type": "message"},
+            )
+    finally:
+        fwd._dead_letter_epochs.reset(epochs_token)
+        fwd._dead_letter_dir.reset(dir_token)
+        await failing.aclose()
+
+    records = [
+        json.loads(line) for line in (tmp_path / "dead_letter.jsonl").read_text().splitlines()
+    ]
+    assert [(record["session_id"], record.get("context_epoch")) for record in records] == [
+        ("conv_a", 2),
+        ("conv_child", None),
+    ]
 
 
 @pytest.mark.asyncio
