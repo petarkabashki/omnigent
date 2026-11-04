@@ -2016,8 +2016,9 @@ export function AgentHarnessPicker({
 
 // In-memory draft for the new-session landing screen, so a half-composed
 // message, attachments and picker selections survive the unmount that happens
-// when the user navigates into an existing session and back. Module-scoped,
-// not persisted to storage (a page refresh starts clean); cleared on create.
+// when the user navigates into an existing session and back. Module-scoped;
+// only the message text also goes to sessionStorage so a reload keeps it.
+// Cleared on create.
 interface LandingDraft {
   mcpRegistryServices: string[];
   // `?project=` context the draft was composed under ("" = plain visit).
@@ -2057,9 +2058,29 @@ interface LandingDraft {
 let landingDraft: LandingDraft | null = null;
 let landingDraftRevision = 0;
 
+const LANDING_MESSAGE_KEY = "omnigent.landingDraftMessage";
+
+function storeLandingMessage(message: string): void {
+  try {
+    if (message === "") window.sessionStorage.removeItem(LANDING_MESSAGE_KEY);
+    else window.sessionStorage.setItem(LANDING_MESSAGE_KEY, message);
+  } catch {
+    // Storage unavailable: the in-memory draft still works.
+  }
+}
+
+function readStoredLandingMessage(): string {
+  try {
+    return window.sessionStorage.getItem(LANDING_MESSAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function writeLandingDraft(draft: LandingDraft | null): void {
   landingDraft = draft;
   landingDraftRevision += 1;
+  storeLandingMessage(draft?.message ?? "");
 }
 
 // Test-only: clears the preserved landing draft so each case starts from a
@@ -2282,8 +2303,10 @@ export function NewChatLandingScreen() {
         };
 
   const [message, setMessage] = useState<string>(() =>
-    linkedPrompt?.trim() ? linkedPrompt : (restoredDraft?.message ?? ""),
+    linkedPrompt?.trim() ? linkedPrompt : (restoredDraft?.message ?? readStoredLandingMessage()),
   );
+  // Keep the text in storage as it is typed: a reload skips the unmount write.
+  useEffect(() => storeLandingMessage(message), [message]);
   useEffect(() => {
     if (!searchParams.has("prompt")) return;
     if (linkedPrompt?.trim()) setMessage(linkedPrompt);
