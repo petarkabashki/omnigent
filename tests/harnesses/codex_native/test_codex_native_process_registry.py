@@ -545,21 +545,25 @@ def test_registry_lock_serializes_read_modify_write(tmp_path: Path) -> None:
 
 def test_reap_state_dir_kills_matching_app_server_and_spares_others(tmp_path: Path) -> None:
     """
-    Reaping by state dir kills only processes carrying dir + "app-server".
+    Reaping by state dir kills only the launch's ``app-server --listen``.
 
     The stale-holder incident shape: an app-server from a dead runner still
     runs with the session state dir in its command line. A process carrying
-    the dir WITHOUT the "app-server" marker (e.g. the pytest process's own
-    tree) must survive.
+    the dir without that subcommand (the pytest process's own tree, or a
+    ``tail -f`` of the session's log) must survive.
     """
     state_dir = tmp_path / "deadbeefdeadbeefdeadbeefdeadbeef"
     sleeper = "import time; time.sleep(300)"
     victim = subprocess.Popen(
-        [sys.executable, "-c", sleeper, str(state_dir), "app-server"],
+        [sys.executable, "-c", sleeper, str(state_dir), "app-server", "--listen", "ws://x"],
         start_new_session=True,
     )
     bystander = subprocess.Popen(
         [sys.executable, "-c", sleeper, str(state_dir)],
+        start_new_session=True,
+    )
+    log_reader = subprocess.Popen(
+        [sys.executable, "-c", sleeper, f"{state_dir}/app-server.log"],
         start_new_session=True,
     )
     try:
@@ -568,8 +572,9 @@ def test_reap_state_dir_kills_matching_app_server_and_spares_others(tmp_path: Pa
         # SIGTERM (or the SIGKILL escalation) must actually end the process.
         victim.wait(timeout=5.0)
         assert bystander.poll() is None, "process without the app-server marker was killed"
+        assert log_reader.poll() is None, "a reader of the session's log was killed"
     finally:
-        for proc in (victim, bystander):
+        for proc in (victim, bystander, log_reader):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):

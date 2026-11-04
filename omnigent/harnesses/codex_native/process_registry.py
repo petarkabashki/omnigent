@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import logging
 import os
@@ -490,6 +491,16 @@ def _kill_tmux_session(tmux_session_name: str) -> None:
         )
 
 
+def _runs_app_server(command: str) -> bool:
+    """
+    Report whether a ``ps`` command line carries the native launch's subcommand.
+
+    :param command: Space-joined argv, e.g. ``"codex -c a=b app-server --listen ws://x"``.
+    :returns: ``True`` when ``app-server --listen`` appear as adjacent arguments.
+    """
+    return ("app-server", "--listen") in itertools.pairwise(command.split())
+
+
 def _live_codex_app_server_processes(state_dir: Path) -> dict[int, int] | None:
     """
     Map live Codex app-server pids to pgids for *state_dir*'s session.
@@ -539,10 +550,11 @@ def _live_codex_app_server_processes(state_dir: Path) -> dict[int, int] | None:
             pid, pgid = int(pid_text), int(pgid_text)
         except ValueError:
             continue
-        # "app-server" scopes the match to the codex app-server itself (the
-        # session's bridge MCP child also carries the state dir, but it is a
-        # member of the app-server's process group and dies with it).
-        if "app-server" not in command or not any(n in command for n in needles):
+        # The launch's subcommand scopes the match to the codex app-server itself:
+        # a substring would also match ``tail -f <state_dir>/app-server.log``. The
+        # session's bridge MCP child carries the state dir too, but it is a member
+        # of the app-server's process group and dies with it.
+        if not _runs_app_server(command) or not any(n in command for n in needles):
             continue
         if pid == os.getpid() or pgid <= 0 or pgid == own_pgid:
             continue
