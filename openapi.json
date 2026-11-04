@@ -15796,7 +15796,7 @@
             }
           },
           {
-            "description": "Sort direction, `\"desc\"` (newest-first, default) or `\"asc\"`. Sort column is `created_at`.",
+            "description": "Sort direction, `\"desc\"` (newest-first, default) or `\"asc\"`. Sort column is `created_at`. Closed children are never listed. `has_more` says older children exist; pass the response `last_id` as `after` to fetch them (a page may hold fewer than `limit` rows).",
             "in": "query",
             "name": "order",
             "required": false,

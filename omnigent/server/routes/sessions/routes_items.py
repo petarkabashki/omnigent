@@ -46,6 +46,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.util.session_lifecycle import is_session_closed
 
 
 def register_items_routes(
@@ -156,6 +157,9 @@ def register_items_routes(
         :param before: Cursor — return children before this one.
         :param order: Sort direction, ``"desc"`` (newest-first,
             default) or ``"asc"``. Sort column is ``created_at``.
+            Closed children are never listed. ``has_more`` says older
+            children exist; pass the response ``last_id`` as ``after``
+            to fetch them (a page may hold fewer than ``limit`` rows).
         :param tool: When set, only return children whose title
             starts with this agent type (the segment before the
             ``":"``). Combined with ``session_name`` to form the
@@ -193,8 +197,15 @@ def register_items_routes(
             sort_by="created_at",
             title=title_filter,
         )
+        # Closed children are archived (hidden above); legacy rows closed
+        # before archiving only carry the marker, so drop them here. The
+        # cursors and has_more stay those of the unfiltered page, so a short
+        # page with has_more=True still pages onward.
+        open_children = [
+            child for child in page.data if not is_session_closed(child.labels, child.title)
+        ]
         data = await _child_session_summaries_from_conversations(
-            page.data,
+            open_children,
             session_id,
             conversation_store,
         )

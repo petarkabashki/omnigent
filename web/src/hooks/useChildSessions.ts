@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { authenticatedFetch } from "@/lib/identity";
 import { setSessionParent } from "@/lib/sessionHost";
 import { isTempConvId } from "@/lib/tempConversationId";
@@ -87,7 +87,18 @@ interface ChildSessionWire {
 interface ChildSessionsResponse {
   object: "list";
   data: ChildSessionWire[];
+  last_id?: string | null;
+  has_more?: boolean;
 }
+
+/** Whether older children exist beyond the loaded ones, and where to resume. */
+export interface ChildSessionsPageState {
+  hasMore: boolean;
+  /** ``last_id`` of the newest fetched page, passed as ``after`` for the next. */
+  cursor: string | null;
+}
+
+const FIRST_PAGE_STATE: ChildSessionsPageState = { hasMore: false, cursor: null };
 
 /**
  * TanStack Query key for a session's child sessions.
@@ -97,6 +108,14 @@ interface ChildSessionsResponse {
  */
 export function childSessionsQueryKey(conversationId: string): readonly unknown[] {
   return ["conversation", conversationId, "child_sessions"];
+}
+
+/**
+ * Cache key for the paging state of a session's child list. Kept beside the
+ * list so the list stays a plain array for the cache readers.
+ */
+export function childSessionsPageStateKey(conversationId: string): readonly unknown[] {
+  return ["conversation", conversationId, "child_sessions_page"];
 }
 
 /** True for any key built by ``childSessionsQueryKey``. */
@@ -195,17 +214,29 @@ interface UseChildSessionsResult {
   children: ChildSessionInfo[];
   isLoading: boolean;
   error: Error | null;
+  /** True when the server holds older children than ``children`` lists. */
+  hasMore: boolean;
+  /** Fetch the next page of older children into ``children``. */
+  loadMore: () => Promise<void>;
+  isLoadingMore: boolean;
 }
 
 /**
- * Fetch child sessions for a parent session.
+ * Fetch one page of child sessions for a parent session.
  *
  * Exported for unit testing of the HTTP-shape contract; production
  * code should call ``useChildSessions``.
+ *
+ * @param sessionId - Parent session, e.g. ``"conv_parent"``.
+ * @param after - ``last_id`` of the previous page; omit for the newest page.
  */
-export async function fetchChildSessions(sessionId: string): Promise<ChildSessionInfo[]> {
+export async function fetchChildSessionsPage(
+  sessionId: string,
+  after?: string | null,
+): Promise<{ children: ChildSessionInfo[]; page: ChildSessionsPageState }> {
+  const query = after ? `?after=${encodeURIComponent(after)}` : "";
   const res = await authenticatedFetch(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions`,
+    `/v1/sessions/${encodeURIComponent(sessionId)}/child_sessions${query}`,
   );
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = (await res.json()) as ChildSessionsResponse;
@@ -213,7 +244,7 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
   // session-scoped requests key by this session's host before their own
   // snapshot loads.
   for (const row of json.data) setSessionParent(row.id, sessionId);
-  return json.data.map((row) => ({
+  const children = json.data.map((row) => ({
     id: row.id,
     title: row.title,
     task_summary: row.task_summary ?? null,
@@ -227,6 +258,15 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
     pending_elicitations_count: row.pending_elicitations_count ?? 0,
     routed_model: row.routed_model ?? null,
   }));
+  return {
+    children,
+    page: { hasMore: json.has_more === true, cursor: json.last_id ?? null },
+  };
+}
+
+/** Newest page of child sessions; see ``fetchChildSessionsPage``. */
+export async function fetchChildSessions(sessionId: string): Promise<ChildSessionInfo[]> {
+  return (await fetchChildSessionsPage(sessionId)).children;
 }
 
 /**
@@ -249,23 +289,54 @@ export function useChildSessions(
   conversationId: string | null,
   pollMs?: number | null,
 ): UseChildSessionsResult {
+  const queryClient = useQueryClient();
   const sessionId = isTempConvId(conversationId) ? null : conversationId;
   const { data, isLoading, error } = useQuery({
     queryKey:
       sessionId === null
         ? ["conversation", null, "child_sessions"]
         : childSessionsQueryKey(sessionId),
-    queryFn: () => fetchChildSessions(sessionId as string),
+    queryFn: async () => {
+      const { children, page } = await fetchChildSessionsPage(sessionId as string);
+      queryClient.setQueryData(childSessionsPageStateKey(sessionId as string), page);
+      return children;
+    },
     enabled: sessionId !== null,
     staleTime: 60_000,
     retry: false,
     refetchOnMount: false,
     refetchInterval: pollMs ?? false,
   });
+  const { data: pageState = FIRST_PAGE_STATE } = useQuery<ChildSessionsPageState>({
+    queryKey:
+      sessionId === null
+        ? ["conversation", null, "child_sessions_page"]
+        : childSessionsPageStateKey(sessionId),
+    queryFn: () => FIRST_PAGE_STATE,
+    enabled: false,
+  });
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const loadMore = useCallback(async () => {
+    if (sessionId === null || !pageState.hasMore || isLoadingMore) return;
+    setIsLoadingMore(true);
+    try {
+      const next = await fetchChildSessionsPage(sessionId, pageState.cursor);
+      queryClient.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey(sessionId), (current) => {
+        const known = new Set((current ?? []).map((child) => child.id));
+        return [...(current ?? []), ...next.children.filter((child) => !known.has(child.id))];
+      });
+      queryClient.setQueryData(childSessionsPageStateKey(sessionId), next.page);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [sessionId, pageState, isLoadingMore, queryClient]);
   return {
     children: data ?? [],
     isLoading,
     error: (error as Error | null) ?? null,
+    hasMore: sessionId !== null && pageState.hasMore,
+    loadMore,
+    isLoadingMore,
   };
 }
 

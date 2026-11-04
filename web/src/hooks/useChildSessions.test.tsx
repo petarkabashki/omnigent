@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -62,5 +62,46 @@ describe("useDescendantSession", () => {
     expect(result.current).toBeNull();
     await waitFor(() => expect(result.current?.task_summary).toBe("Investigate auth flow"));
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/sessions/conv_parent/child_sessions");
+  });
+});
+
+describe("useChildSessions paging", () => {
+  const page = (ids: string[], hasMore: boolean) =>
+    new Response(
+      JSON.stringify({
+        object: "list",
+        data: ids.map((id) => ({
+          id,
+          title: `researcher:${id}`,
+          tool: "researcher",
+          session_name: id,
+          current_task_status: null,
+          busy: false,
+        })),
+        last_id: ids[ids.length - 1],
+        has_more: hasMore,
+      }),
+    );
+
+  it("reports older children and appends the next page after the cursor", async () => {
+    // WHY: the server caps a page; the hook must surface has_more and resume
+    // from last_id so the UI can say so and fetch the rest.
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(page(["conv_old"], false));
+    const { result } = renderHook(() => useChildSessions("conv_parent"), { wrapper });
+
+    await waitFor(() => expect(result.current.hasMore).toBe(true));
+    expect(result.current.children.map((child) => child.id)).toEqual(["conv_new"]);
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(authenticatedFetch).toHaveBeenLastCalledWith(
+      "/v1/sessions/conv_parent/child_sessions?after=conv_new",
+    );
+    expect(result.current.children.map((child) => child.id)).toEqual(["conv_new", "conv_old"]);
+    expect(result.current.hasMore).toBe(false);
   });
 });

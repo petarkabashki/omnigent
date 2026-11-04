@@ -108,11 +108,17 @@ function collapseToggleFor(container: HTMLElement, childId: string): HTMLElement
  *  fetches a list per rendered row (the tree levels), so ids absent
  *  from the map — every leaf the recursive rows probe — get no
  *  children, mirroring the real hook's empty default. */
-function mockChildTree(tree: Record<string, ChildSessionInfo[]>) {
+function mockChildTree(
+  tree: Record<string, ChildSessionInfo[]>,
+  paging: { moreFor?: string[]; loadMore?: () => Promise<void> } = {},
+) {
   useChildSessionsMock.mockImplementation((id) => ({
     children: id !== null ? (tree[id] ?? []) : [],
     isLoading: false,
     error: null,
+    hasMore: id !== null && (paging.moreFor ?? []).includes(id),
+    loadMore: paging.loadMore ?? (async () => {}),
+    isLoadingMore: false,
   }));
 }
 
@@ -1591,5 +1597,44 @@ describe("SubagentsPanel", () => {
 
     expect(childRow(container, "conv_grandchild").className.split(/\s+/)).toContain("bg-accent");
     expect(childRow(container, "conv_child").className.split(/\s+/)).not.toContain("bg-accent");
+  });
+});
+
+describe("SubagentsPanel older children", () => {
+  it("says older agents are not shown and loads them on request", () => {
+    // WHY: the server returns one page of children; without this notice the
+    // rest are silently absent from the rail.
+    const loadMore = vi.fn(async () => {});
+    mockChildTree(
+      { conv_parent: [childInfo({ id: "conv_a", tool: "researcher" })] },
+      { moreFor: ["conv_parent"], loadMore },
+    );
+    renderPanel();
+
+    const notice = screen.getByTestId("subagent-more-notice");
+    expect(notice.textContent).toContain("Showing 1");
+    expect(notice.textContent).toContain("older agents not shown");
+    fireEvent.click(within(notice).getByTestId("subagent-load-more"));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no notice when every child is loaded", () => {
+    mockChildTree({ conv_parent: [childInfo({ id: "conv_a" })] });
+    renderPanel();
+
+    expect(screen.queryByTestId("subagent-more-notice")).toBeNull();
+  });
+
+  it("flags a nested level that has older children", () => {
+    mockChildTree(
+      {
+        conv_parent: [childInfo({ id: "conv_a" })],
+        conv_a: [childInfo({ id: "conv_a1" })],
+      },
+      { moreFor: ["conv_a"] },
+    );
+    renderPanel();
+
+    expect(screen.getAllByTestId("subagent-more-notice")).toHaveLength(1);
   });
 });
