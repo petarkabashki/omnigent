@@ -197,6 +197,7 @@ describe("project folder header context menu", () => {
         id: PROJECT_ID,
         oldName: PROJECT_NAME,
         newName: "Sprint 43",
+        parentId: null,
       }),
     );
   });
@@ -218,7 +219,7 @@ describe("project folder header context menu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
 
     expect(mocks.deleteProject.mutate).toHaveBeenCalledWith(
-      { id: PROJECT_ID, name: PROJECT_NAME },
+      { id: PROJECT_ID, name: PROJECT_NAME, parent_id: null },
       expect.anything(),
     );
   });

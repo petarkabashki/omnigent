@@ -32,6 +32,8 @@ class Project:
         empty dict when none are stored. The key vocabulary is owned by the
         client; the store persists and returns it whole. These are hints the
         new-chat dialog pre-fills, not enforced requirements.
+    :param parent_id: Parent project id, or ``None`` for a root. The namespace
+        path is computed by walking parents (see ``project_path``).
     """
 
     id: str
@@ -40,3 +42,4 @@ class Project:
     created_at: int
     updated_at: int | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    parent_id: str | None = None

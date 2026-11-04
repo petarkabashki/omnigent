@@ -45,6 +45,7 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderInputIcon,
+  FolderPlusIcon,
   FolderMinusIcon,
   FolderOpenIcon,
   GitBranchIcon,
@@ -166,6 +167,7 @@ import {
   useMoveToProject,
   useDeleteProject,
   useRenameProject,
+  type ProjectSummary,
   useProjectConfig,
   useUpdateProjectConfig,
   PROJECT_LABEL_KEY,
@@ -189,6 +191,19 @@ import { unpinWithUndo } from "./unpinUndoToast";
 import { useArchiveWorktreePrompt } from "./ArchiveWorktreeDialog";
 import { PermissionsModal } from "@/components/PermissionsModal";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
+import {
+  CreateChildProjectDialog,
+  MoveProjectDialog,
+  type ParentOption,
+} from "./ProjectTreeDialogs";
+import {
+  buildProjectTree,
+  canCreateProjectNamed,
+  flattenProjectTree,
+  projectPathOf,
+  projectSubtreeIds,
+  type ProjectTreeNode,
+} from "@/lib/projectTree";
 import { ProjectRowIcon } from "./ProjectPicker";
 import { EmojiPicker } from "@/components/ProjectIconPicker";
 import { SessionStateBadge } from "@/components/SessionStateBadge";
@@ -1483,6 +1498,11 @@ const PROJECT_FOLDER_PAGE_SIZE = 5;
  */
 function ProjectFolder({
   name,
+  pathKey,
+  depth,
+  parentId,
+  parentOptions,
+  hidden,
   projectId,
   icon,
   windowConversations,
@@ -1513,7 +1533,18 @@ function ProjectFolder({
     first: boolean;
     last: boolean;
   };
+  /** Leaf name shown in the header and used for rename. */
   name: string;
+  /** Stable folder key: the namespace path (the name for a root). */
+  pathKey: string;
+  /** Nesting level in the project tree; 0 for roots. */
+  depth: number;
+  /** Parent project id; null for roots. */
+  parentId: string | null;
+  /** Projects this one may move under (its own subtree excluded). */
+  parentOptions: ParentOption[];
+  /** True while an enclosing folder is collapsed, so this nested one is not drawn. */
+  hidden: boolean;
   /** First-class project id, or null for a label-only folder. */
   projectId: string | null;
   /** Chosen emoji icon (unicode grapheme), or null/absent for the default
@@ -1555,15 +1586,16 @@ function ProjectFolder({
 }) {
   const { registerFolder, sortBy, customOrder } = useSidebarData();
   const viewerId = useViewerId();
-  const query = useProjectSessions(name, expanded, sortBy, archived);
+  const loaded = expanded && !hidden;
+  const query = useProjectSessions(name, loaded, sortBy, archived, parentId ? projectId : null);
   const watchedRows = useMemo(
     () => query.data?.pages.flatMap((page) => page.data) ?? [],
     [query.data],
   );
   useEffect(() => {
-    if (expanded) registerFolder(name, watchedRows);
-  }, [expanded, name, watchedRows, registerFolder]);
-  useEffect(() => () => registerFolder(name, null), [expanded, name, registerFolder]);
+    if (loaded) registerFolder(pathKey, watchedRows);
+  }, [loaded, pathKey, watchedRows, registerFolder]);
+  useEffect(() => () => registerFolder(pathKey, null), [loaded, pathKey, registerFolder]);
   const pinnedSet = useMemo(() => new Set(pinnedConversationIds), [pinnedConversationIds]);
   const conversations = useMemo(() => {
     // Union the folder's own pages with its members from the globally-loaded
@@ -1578,7 +1610,7 @@ function ProjectFolder({
       [...byId.values()].filter(
         (c) =>
           (c.archived === true) === archived &&
-          sessionBelongsToProject(c, { id: projectId, name }, viewerId) &&
+          sessionBelongsToProject(c, { id: projectId, name, parent_id: parentId }, viewerId) &&
           (archived || !pinnedSet.has(c.id)),
       ),
       activeOverride,
@@ -1597,6 +1629,7 @@ function ProjectFolder({
     archived,
     projectId,
     name,
+    parentId,
     viewerId,
   ]);
   // Each expansion starts at one page; the open session is never left hidden.
@@ -1643,8 +1676,8 @@ function ProjectFolder({
   // resolves them (the parent sources its action set from these, not the global
   // paginated window), and the visible count for keyboard and range selection.
   useEffect(() => {
-    onConversationsLoaded?.(name, conversations, visibleCount);
-  }, [name, conversations, visibleCount, onConversationsLoaded]);
+    onConversationsLoaded?.(pathKey, conversations, visibleCount);
+  }, [pathKey, conversations, visibleCount, onConversationsLoaded]);
 
   // While the first page loads, show a "Loading…" footer instead of the "No
   // chats" empty state (which would otherwise flash before rows arrive).
@@ -1655,23 +1688,25 @@ function ProjectFolder({
   // `project:` prefix keeps the droppable id clear of conversation ids (the
   // draggable ids) and the ungroup sentinel.
   const { setNodeRef, isOver } = useDroppable({
-    id: `project:${name}`,
-    data: { type: "project", name },
+    id: `project:${pathKey}`,
+    data: { type: "project", name: pathKey },
   });
 
   const { actions: menuActions, dialogs: menuDialogs } = useProjectFolderMenu(
     name,
     projectId,
     icon,
+    { parentId, path: pathKey, parentOptions },
   );
 
   const headerDrag = useSortable({
-    id: projectDragId(name),
-    data: { type: "project-order", name },
+    id: projectDragId(pathKey),
+    data: { type: "project-order", name: pathKey },
     disabled: ordering.disabled,
   });
   const orderedMenuActions = { ...menuActions, ordering };
 
+  if (hidden) return null;
   return (
     <div
       ref={setNodeRef}
@@ -1680,6 +1715,10 @@ function ProjectFolder({
         // Subtle background tint on drag-over — no border, no shadow.
         isOver && DROP_TARGET_HIGHLIGHT,
       )}
+      data-testid={`project-folder-${pathKey}`}
+      data-depth={depth}
+      title={depth > 0 ? pathKey : undefined}
+      style={depth > 0 ? { paddingLeft: depth * 12 } : undefined}
     >
       {ordering.insertion && (
         <span
@@ -1725,7 +1764,7 @@ function ProjectFolder({
         selectedIds={selectedIds}
         onToggleSelected={onToggleSelected}
         onProjectAssigned={onProjectAssigned}
-        reorderGroup={reorderable ? `project:${name}` : undefined}
+        reorderGroup={reorderable ? `project:${pathKey}` : undefined}
         emptyMessage={
           loadingFirstPage ? undefined : archived ? (
             "No archived sessions"
@@ -1733,7 +1772,7 @@ function ProjectFolder({
             <span className="block">
               No sessions. Start a{" "}
               <Link
-                to={`/?project=${encodeURIComponent(name)}`}
+                to={`/?project=${encodeURIComponent(pathKey)}`}
                 className="font-medium text-primary underline-offset-4 hover:underline"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1750,6 +1789,7 @@ function ProjectFolder({
         headerAction={
           <ProjectFolderActions
             projectName={name}
+            projectPath={pathKey}
             onNavigate={onRowClick}
             actions={orderedMenuActions}
           />
@@ -1759,6 +1799,7 @@ function ProjectFolder({
             <ProjectFolderMenuItems
               components={contextBundle}
               projectName={name}
+              projectPath={pathKey}
               onNavigate={onRowClick}
               actions={orderedMenuActions}
             />
@@ -2027,7 +2068,7 @@ function ConversationList({
   const { mutate: reorderPins } = useReorderPinnedConversations();
   const moveProject = (name: string, destination: "up" | "down" | "top" | "bottom") => {
     if (saveOrder.isPending) return;
-    const from = projects.findIndex((p) => p.name === name);
+    const from = projects.findIndex((p) => (p.path ?? p.name) === name);
     const to =
       destination === "top"
         ? 0
@@ -2040,12 +2081,48 @@ function ConversationList({
     saveOrder.mutate(arrayMove(projects, from, to));
   };
 
+  // Drag-reorder only works among siblings; nesting changes through "Move under…".
+  const sameParent = useCallback(
+    (firstKey: string, secondKey: string) => {
+      const parentOf = (key: string) =>
+        projects.find((p) => projectPathOf(p) === key)?.parent_id ?? null;
+      return parentOf(firstKey) === parentOf(secondKey);
+    },
+    [projects],
+  );
+
+  // Projects in tree order (parents before their children, siblings in the saved
+  // order) with the keys the folders expand and report under. A root's key is its
+  // name, so persisted expansion state from before nesting keeps working.
+  const treeProjects = useMemo(() => {
+    const out: (ProjectSummary & {
+      key: string;
+      depth: number;
+      ancestorKeys: string[];
+      parentId: string | null;
+    })[] = [];
+    const walk = (nodes: ProjectTreeNode<ProjectSummary>[], ancestorKeys: string[]) => {
+      for (const node of nodes) {
+        out.push({
+          ...node.project,
+          key: node.path,
+          depth: node.depth,
+          ancestorKeys,
+          parentId: node.project.parent_id ?? null,
+        });
+        walk(node.children, [...ancestorKeys, node.path]);
+      }
+    };
+    walk(buildProjectTree(projects), []);
+    return out;
+  }, [projects]);
+
   // id → name for the rows' project_id lookup, built once here and shared via
   // context so a row doesn't subscribe to useProjects() itself.
   const projectNamesById = useMemo(() => {
     const map = new Map<string, string>();
     for (const p of projects) {
-      if (p.id !== null) map.set(p.id, p.name);
+      if (p.id !== null) map.set(p.id, projectPathOf(p));
     }
     return map;
   }, [projects]);
@@ -2175,28 +2252,43 @@ function ConversationList({
       id: string | null;
       name: string;
       icon?: string | null;
+      /** Stable folder key: the namespace path (the name for a root). */
+      key: string;
+      /** Nesting level in the project tree; 0 for roots. */
+      depth: number;
+      /** Keys of the enclosing folders, outermost first. */
+      ancestorKeys: string[];
+      parentId: string | null;
       conversations: Conversation[];
-    }[] = (grouped ? [] : projects).map(({ id, name, icon }) => {
-      // Dual-read membership: a session belongs to this folder if it has
-      // the first-class id OR the legacy omni_project label of this name,
-      // and (filing being owner-only) the viewer owns it.
-      const inProject = folderCandidates.filter(
-        (c) => sessionBelongsToProject(c, { id, name }, viewerId) && !pinnedIdSet.has(c.id),
-      );
-      inProject.forEach((c) => filedIds.add(c.id));
-      return {
-        id,
-        name,
-        icon,
-        conversations: sortConversations(
-          inProject,
-          activeOverride,
-          frozenKeys,
-          sortBy,
-          customOrder,
-        ),
-      };
-    });
+    }[] = (grouped ? [] : treeProjects).map(
+      ({ id, name, icon, key, depth, ancestorKeys, parentId }) => {
+        // Dual-read membership: a session belongs to this folder if it has
+        // the first-class id OR the legacy omni_project label of this name,
+        // and (filing being owner-only) the viewer owns it.
+        const inProject = folderCandidates.filter(
+          (c) =>
+            sessionBelongsToProject(c, { id, name, parent_id: parentId }, viewerId) &&
+            !pinnedIdSet.has(c.id),
+        );
+        inProject.forEach((c) => filedIds.add(c.id));
+        return {
+          id,
+          name,
+          icon,
+          key,
+          depth,
+          ancestorKeys,
+          parentId,
+          conversations: sortConversations(
+            inProject,
+            activeOverride,
+            frozenKeys,
+            sortBy,
+            customOrder,
+          ),
+        };
+      },
+    );
     // NOTE: empty projects are intentionally NOT filtered out. A project comes
     // from the server project list (useProjects), so it can have zero *loaded*
     // conversations — either genuinely empty or because its chats live on an
@@ -2265,7 +2357,7 @@ function ConversationList({
     activeOverride,
     frozenKeys,
     frozenStatus,
-    projects,
+    treeProjects,
     activeTab,
     viewerId,
     groupingUi,
@@ -2412,6 +2504,29 @@ function ConversationList({
     });
   }, []);
 
+  // A nested folder renders only while it and every enclosing folder are expanded.
+  const projectShown = useCallback(
+    (group: { key: string; ancestorKeys: string[] }) =>
+      expandedProjects.includes(group.key) &&
+      group.ancestorKeys.every((key) => expandedProjects.includes(key)),
+    [expandedProjects],
+  );
+
+  // Where a project may move: every first-class project outside its own subtree.
+  const parentOptionsFor = useCallback(
+    (id: string | null) => {
+      if (!id) return [];
+      const tree = buildProjectTree(projects);
+      const excluded = projectSubtreeIds(tree, id);
+      return flattenProjectTree(tree).flatMap((node) =>
+        node.project.id && !excluded.has(node.project.id)
+          ? [{ id: node.project.id, path: node.path }]
+          : [],
+      );
+    },
+    [projects],
+  );
+
   // ── Drag-and-drop: file sessions into / out of projects ────────────────────
   // A session row can be dragged onto a project folder (file it there), onto the
   // "Chats" list / a fallback strip (unfile it), or onto "Pinned" (pin it, which
@@ -2487,9 +2602,18 @@ function ConversationList({
         setDraggedProject(null);
         setOverProject(null);
         if (event.over?.data.current?.type !== "project-order" || saveOrder.isPending) return;
-        const from = projects.findIndex((p) => p.name === event.active.data.current?.name);
-        const to = projects.findIndex((p) => p.name === event.over?.data.current?.name);
-        if (from >= 0 && to >= 0 && from !== to) saveOrder.mutate(arrayMove(projects, from, to));
+        const from = projects.findIndex(
+          (p) => (p.path ?? p.name) === event.active.data.current?.name,
+        );
+        const to = projects.findIndex((p) => (p.path ?? p.name) === event.over?.data.current?.name);
+        if (from < 0 || to < 0 || from === to) return;
+        if (!sameParent(projectPathOf(projects[from]), projectPathOf(projects[to]))) {
+          showToast(
+            `${projects[from].name} stayed where it was: dragging only reorders projects at the same level. Use "Move under…" in its menu to change its parent.`,
+          );
+          return;
+        }
+        saveOrder.mutate(arrayMove(projects, from, to));
         return;
       }
       const dragged = activeDrag;
@@ -2568,6 +2692,7 @@ function ConversationList({
       onTogglePinned,
       projects,
       saveOrder,
+      sameParent,
       sections.pinned,
       pinAt,
       reorderPins,
@@ -2618,8 +2743,8 @@ function ConversationList({
   // An expanded folder's rows above "Show more", in render order; the
   // window-derived membership stands in until the folder first reports.
   const folderVisibleRows = useCallback(
-    (group: { name: string; conversations: Conversation[] }) => {
-      const folder = folderConversations.get(group.name);
+    (group: { key: string; conversations: Conversation[] }) => {
+      const folder = folderConversations.get(group.key);
       return folder ? folder.conversations.slice(0, folder.visibleCount) : group.conversations;
     },
     [folderConversations],
@@ -2696,7 +2821,7 @@ function ConversationList({
     // folder are both expanded (folders start collapsed), down to its "Show more".
     const projectsCollapsed = effectiveCollapsedSections.includes("Projects");
     const projectVisible = (group: (typeof sections.projectGroups)[number]) =>
-      !projectsCollapsed && expandedProjects.includes(group.name) ? folderVisibleRows(group) : [];
+      !projectsCollapsed && projectShown(group) ? folderVisibleRows(group) : [];
     // `sections` is already scoped to the active tab, so the same Pinned /
     // Projects / Sessions walk covers both tabs (Projects is empty on shared).
     return [
@@ -2707,7 +2832,7 @@ function ConversationList({
         ? sessionGroups.flatMap((g) => visible(g.title, g.conversations))
         : visible("Chats", sections.sessions)),
     ].map((c) => c.id);
-  }, [sections, sessionGroups, effectiveCollapsedSections, expandedProjects, folderVisibleRows]);
+  }, [sections, sessionGroups, effectiveCollapsedSections, projectShown, folderVisibleRows]);
   // Shift-select range ids in render order, built at click time from the
   // selectable scope. Folders contribute the rows they list above "Show more"
   // (their own reports), so a target outside the global window still resolves.
@@ -2715,7 +2840,7 @@ function ConversationList({
     const projectIds = () => {
       if (effectiveCollapsedSections.includes("Projects")) return [];
       return sections.projectGroups.flatMap((g) =>
-        expandedProjects.includes(g.name) ? folderVisibleRows(g).map((c) => c.id) : [],
+        projectShown(g) ? folderVisibleRows(g).map((c) => c.id) : [],
       );
     };
     if (selectionScope === "projects") return projectIds();
@@ -3070,7 +3195,7 @@ function ConversationList({
                               }}
                               manualOrder={projectOrder.data?.sort_mode === "manual"}
                               orderDisabled={saveOrder.isPending || !projectOrder.data}
-                              projectNames={sections.projectGroups.map((group) => group.name)}
+                              projectNames={sections.projectGroups.map((group) => group.key)}
                               collapsed={effectiveCollapsedSections.includes("Projects")}
                               expandedProjects={expandedProjects}
                               // A unified selection starts from the header's own button.
@@ -3091,12 +3216,12 @@ function ConversationList({
                       }
                     >
                       <SortableContext
-                        items={projects.map((p) => projectDragId(p.name))}
+                        items={projects.map((p) => projectDragId(p.path ?? p.name))}
                         strategy={verticalListSortingStrategy}
                       >
                         {sections.projectGroups.map((group, index) => (
                           <ProjectFolder
-                            key={group.name}
+                            key={group.id ?? group.key}
                             ordering={{
                               disabled:
                                 !projectOrder.data ||
@@ -3105,25 +3230,35 @@ function ConversationList({
                                 editingIds.size > 0,
                               first: index === 0,
                               last: index === projects.length - 1,
-                              move: (destination) => moveProject(group.name, destination),
+                              move: (destination) => moveProject(group.key, destination),
                               insertion:
-                                overProject === group.name &&
-                                draggedProject !== group.name &&
-                                draggedProject !== null
-                                  ? projects.findIndex((p) => p.name === draggedProject) < index
+                                overProject === group.key &&
+                                draggedProject !== group.key &&
+                                draggedProject !== null &&
+                                sameParent(draggedProject, group.key)
+                                  ? projects.findIndex(
+                                      (p) => (p.path ?? p.name) === draggedProject,
+                                    ) < index
                                     ? "after"
                                     : "before"
                                   : undefined,
                             }}
                             name={group.name}
+                            pathKey={group.key}
+                            depth={group.depth}
+                            parentId={group.parentId}
+                            parentOptions={parentOptionsFor(group.id)}
                             projectId={group.id}
                             icon={group.icon}
                             windowConversations={group.conversations}
                             archived={activeTab === "archived"}
                             activeConversationId={displayedActiveId}
-                            expanded={expandedProjects.includes(group.name)}
-                            active={newSessionProjectName === group.name}
-                            onToggleCollapsed={() => toggleProjectExpanded(group.name)}
+                            expanded={expandedProjects.includes(group.key)}
+                            hidden={
+                              !group.ancestorKeys.every((key) => expandedProjects.includes(key))
+                            }
+                            active={newSessionProjectName === group.key}
+                            onToggleCollapsed={() => toggleProjectExpanded(group.key)}
                             pinnedConversationIds={pinnedConversationIds}
                             activeOverride={activeOverride}
                             frozenSortKeys={frozenKeys}
@@ -6195,10 +6330,12 @@ function PinnedProjectFlyoutContent({
 
 function ProjectFolderActions({
   projectName,
+  projectPath = projectName,
   onNavigate,
   actions,
 }: {
   projectName: string;
+  projectPath?: string;
   onNavigate: (e: MouseEvent<HTMLAnchorElement>) => void;
   actions: ProjectFolderMenuActions;
 }) {
@@ -6210,12 +6347,12 @@ function ProjectFolderActions({
             asChild
             variant="ghost"
             size="icon-xs"
-            aria-label={`New session in ${projectName}`}
+            aria-label={`New session in ${projectPath}`}
             data-testid="project-new-session"
             className="hidden text-muted-foreground [@media((hover:hover)_and_(pointer:fine))]:flex"
           >
             <Link
-              to={`/?project=${encodeURIComponent(projectName)}`}
+              to={`/?project=${encodeURIComponent(projectPath)}`}
               onClick={(e) => {
                 e.stopPropagation();
                 onNavigate(e);
@@ -6227,7 +6364,12 @@ function ProjectFolderActions({
         </TooltipTrigger>
         <TooltipContent side="bottom">New session in project</TooltipContent>
       </Tooltip>
-      <ProjectFolderMenu projectName={projectName} onNavigate={onNavigate} actions={actions} />
+      <ProjectFolderMenu
+        projectName={projectName}
+        projectPath={projectPath}
+        onNavigate={onNavigate}
+        actions={actions}
+      />
     </div>
   );
 }
@@ -6238,12 +6380,14 @@ function ProjectFolderActions({
 function ProjectFolderMenuItems({
   components: C,
   projectName,
+  projectPath = projectName,
   onNavigate,
   actions,
   hideNewSessionOnDesktop = false,
 }: {
   components: MenuComponents;
   projectName: string;
+  projectPath?: string;
   onNavigate: (e: MouseEvent<HTMLAnchorElement>) => void;
   actions: ProjectFolderMenuActions;
   hideNewSessionOnDesktop?: boolean;
@@ -6264,7 +6408,7 @@ function ProjectFolderMenuItems({
         }
       >
         <Link
-          to={`/?project=${encodeURIComponent(projectName)}`}
+          to={`/?project=${encodeURIComponent(projectPath)}`}
           onClick={(e) => {
             e.stopPropagation();
             onNavigate(e);
@@ -6278,6 +6422,18 @@ function ProjectFolderMenuItems({
         <PencilIcon className="size-3.5" />
         Rename project
       </C.Item>
+      {actions.openCreateChild && (
+        <C.Item data-testid="create-child-project" onSelect={actions.openCreateChild}>
+          <FolderPlusIcon className="size-3.5" />
+          New child project
+        </C.Item>
+      )}
+      {actions.openMoveParent && (
+        <C.Item data-testid="move-project-parent-item" onSelect={actions.openMoveParent}>
+          <FolderInputIcon className="size-3.5" />
+          Move under…
+        </C.Item>
+      )}
       <C.Item data-testid="project-settings" onSelect={actions.openSettings}>
         <Settings2Icon className="size-3.5" />
         Project settings
@@ -6325,6 +6481,9 @@ interface ProjectFolderMenuActions {
     move: (destination: "up" | "down" | "top" | "bottom") => void;
   };
   openRename: () => void;
+  /** Absent for a label-only folder, which has no project row to nest under. */
+  openCreateChild?: () => void;
+  openMoveParent?: () => void;
   openSettings: () => void;
   openDelete: () => void;
   onMenuOpen: () => void;
@@ -6337,7 +6496,10 @@ function useProjectFolderMenu(
   projectName: string,
   projectId: string | null,
   icon?: string | null,
+  tree?: { parentId: string | null; path: string; parentOptions: ParentOption[] },
 ): { actions: ProjectFolderMenuActions; dialogs: ReactNode } {
+  const [createChildOpen, setCreateChildOpen] = useState(false);
+  const [moveParentOpen, setMoveParentOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -6380,6 +6542,18 @@ function useProjectFolderMenu(
         setPendingIcon(undefined);
         setRenameOpen(true);
       },
+      openCreateChild: projectId
+        ? () => {
+            menuOpenedDialogRef.current = true;
+            setCreateChildOpen(true);
+          }
+        : undefined,
+      openMoveParent: projectId
+        ? () => {
+            menuOpenedDialogRef.current = true;
+            setMoveParentOpen(true);
+          }
+        : undefined,
       openSettings: () => {
         menuOpenedDialogRef.current = true;
         setSettingsOpen(true);
@@ -6398,11 +6572,33 @@ function useProjectFolderMenu(
         if (menuOpenedDialogRef.current) event.preventDefault();
       },
     }),
-    [projectName],
+    [projectName, projectId],
   );
 
   const dialogs = (
     <>
+      {projectId && createChildOpen && (
+        <CreateChildProjectDialog
+          open
+          onOpenChange={(o) => {
+            setCreateChildOpen(o);
+            if (!o) setMenuOpen(false);
+          }}
+          parent={{ id: projectId, path: tree?.path ?? projectName }}
+        />
+      )}
+      {projectId && moveParentOpen && (
+        <MoveProjectDialog
+          open
+          onOpenChange={(o) => {
+            setMoveParentOpen(o);
+            if (!o) setMenuOpen(false);
+          }}
+          project={{ id: projectId, path: tree?.path ?? projectName }}
+          currentParentId={tree?.parentId ?? null}
+          options={tree?.parentOptions ?? []}
+        />
+      )}
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent
           onClick={(e) => e.stopPropagation()}
@@ -6453,6 +6649,7 @@ function useProjectFolderMenu(
                     id: projectId,
                     oldName: projectName,
                     newName,
+                    parentId: tree?.parentId ?? null,
                   });
                 }
                 if (iconChanged) {
@@ -6635,7 +6832,7 @@ function useProjectFolderMenu(
               loading={deleteProject.isPending}
               onClick={() => {
                 deleteProject.mutate(
-                  { id: projectId, name: projectName },
+                  { id: projectId, name: projectName, parent_id: tree?.parentId ?? null },
                   {
                     onSuccess: () => {
                       setDeleteOpen(false);
@@ -6658,10 +6855,12 @@ function useProjectFolderMenu(
 
 function ProjectFolderMenu({
   projectName,
+  projectPath = projectName,
   onNavigate,
   actions,
 }: {
   projectName: string;
+  projectPath?: string;
   onNavigate: (e: MouseEvent<HTMLAnchorElement>) => void;
   actions: ProjectFolderMenuActions;
 }) {
@@ -6689,6 +6888,7 @@ function ProjectFolderMenu({
           components={dropdownBundle}
           hideNewSessionOnDesktop
           projectName={projectName}
+          projectPath={projectPath}
           onNavigate={onNavigate}
           actions={actions}
         />
@@ -6721,12 +6921,11 @@ function ProjectPickerMenu({
 
   const trimmed = search.trim();
   const filtered = trimmed
-    ? projects.filter((p) => p.name.toLowerCase().includes(trimmed.toLowerCase()))
+    ? projects.filter((p) => projectPathOf(p).toLowerCase().includes(trimmed.toLowerCase()))
     : projects;
-  // Offer create only when the typed name isn't already an exact project.
-  const canCreate =
-    trimmed.length > 0 && !projects.some((p) => p.name.toLowerCase() === trimmed.toLowerCase());
-  const currentProjectIcon = projects.find((p) => p.name === currentProject)?.icon;
+  // Offer create only for a single new segment that isn't already an exact project.
+  const canCreate = canCreateProjectNamed(projects, trimmed);
+  const currentProjectIcon = projects.find((p) => projectPathOf(p) === currentProject)?.icon;
 
   // Keep keystrokes inside the inputs from reaching the menu's typeahead /
   // navigation handlers (which would otherwise steal letters and arrows).
@@ -6749,14 +6948,16 @@ function ProjectPickerMenu({
       <div className="max-h-48 overflow-y-auto">
         {filtered.map((p) => (
           <C.Item
-            key={p.name}
+            key={p.id ?? p.name}
             className="px-2 py-1"
-            textValue={p.name}
-            onSelect={() => onSelect(p.name)}
+            textValue={projectPathOf(p)}
+            onSelect={() => onSelect(projectPathOf(p))}
           >
             <ProjectRowIcon icon={p.icon} />
-            <span className="flex-1 truncate text-left">{p.name}</span>
-            {currentProject === p.name && (
+            <span className="flex-1 truncate text-left" title={projectPathOf(p)}>
+              {projectPathOf(p)}
+            </span>
+            {currentProject === projectPathOf(p) && (
               <CheckMarkIcon className="size-3.5 shrink-0 text-primary" />
             )}
           </C.Item>
@@ -7141,11 +7342,13 @@ function BulkActionBar({
                     : projects
                   ).map((p) => (
                     <DropdownMenuItem
-                      key={p.name}
+                      key={p.id ?? p.name}
                       className="px-2 py-1"
                       onSelect={() => handleMoveToProject(p.name)}
                     >
-                      <span className="flex-1 truncate text-left">{p.name}</span>
+                      <span className="flex-1 truncate text-left" title={projectPathOf(p)}>
+                        {projectPathOf(p)}
+                      </span>
                     </DropdownMenuItem>
                   ))}
                   {projects.length === 0 && (

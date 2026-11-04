@@ -58,14 +58,17 @@ import {
 } from "@/shell/sidebarNav";
 import { apiErrorFromResponse, stopSession } from "@/lib/sessionsApi";
 import { isStaleCursorError, useRestartOnStaleCursor } from "@/lib/staleCursor";
+import { projectPathOf } from "@/lib/projectTree";
 import { sessionRoutingHostId, setSessionHost, setSessionParent } from "@/lib/sessionHost";
 import {
   createProject as apiCreateProject,
+  moveProject as apiMoveProject,
   deleteProject as apiDeleteProject,
   getProject as apiGetProject,
   listProjects as apiListProjects,
   type ProjectConfig,
   renameProject as apiRenameProject,
+  resolveProjectPath as apiResolveProjectPath,
   updateProjectConfig as apiUpdateProjectConfig,
 } from "@/lib/projectsApi";
 import { releaseConversation, useChatStore } from "@/store/chatStore";
@@ -2176,12 +2179,16 @@ export interface ProjectSummary {
   /** Chosen emoji icon (a unicode grapheme), or null/absent for the default
       folder glyph. Sourced from the project's `config.icon`. */
   icon?: string | null;
+  /** Parent project id for a nested first-class project; null/absent for roots. */
+  parent_id?: string | null;
+  /** Namespace path (`a/b`); two projects may share a leaf `name` but not a path. */
+  path?: string | null;
 }
 
 /**
  * Fetch the caller's projects from `GET /v1/sessions/projects`, which
- * dual-reads first-class projects (with id, incl. empty ones) and legacy
- * label-projects (id=null), unioned by name and sorted.
+ * dual-reads first-class projects (keyed by id, incl. empty ones) and legacy
+ * label-projects (id=null, merged into a same-named root), sorted.
  */
 export function useProjects({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery<ProjectSummary[]>({
@@ -2275,9 +2282,10 @@ export function useArchivedProjectNames() {
 }
 
 /**
- * Resolve a project NAME to its first-class id, creating the `projects` row on
- * demand when only a legacy label-project of that name exists (or nothing does).
- * This is how filing/renaming a label-only folder promotes it to first-class.
+ * Resolve a project path to its first-class id. A single segment that matches no
+ * project creates the `projects` row on demand (a legacy label-project of that
+ * name, or nothing, exists), which is how filing/renaming a label-only folder
+ * promotes it to first-class. A nested path never creates: it must already exist.
  *
  * Create-on-demand races: two concurrent moves to the same new name can both
  * see no existing project and both POST; the second gets a 409. Treat that as
@@ -2285,8 +2293,10 @@ export function useArchivedProjectNames() {
  */
 export async function resolveOrCreateProjectId(name: string): Promise<string> {
   const projects = await apiListProjects();
-  const existing = projects.find((p) => p.name === name);
+  const existing = projects.find((p) => projectPathOf(p) === name);
   if (existing) return existing.id;
+  // A path only ever names an existing project; the server's 404 or 409 surfaces.
+  if (name.includes("/")) return (await apiResolveProjectPath(name)).id;
   try {
     return (await apiCreateProject(name)).id;
   } catch (err) {
@@ -2296,7 +2306,7 @@ export async function resolveOrCreateProjectId(name: string): Promise<string> {
     // create really failed, so rethrow the ORIGINAL error rather than a generic
     // message, so the true cause (status, network) isn't masked.
     const after = await apiListProjects();
-    const created = after.find((p) => p.name === name);
+    const created = after.find((p) => projectPathOf(p) === name);
     if (created) return created.id;
     throw err;
   }
@@ -2468,7 +2478,7 @@ export function useMoveToProject() {
           ? null
           : (queryClient
               .getQueryData<ProjectSummary[]>(["projects"])
-              ?.find((p) => p.name === project) ?? undefined);
+              ?.find((p) => projectPathOf(p) === project) ?? undefined);
       if (target === undefined) return undefined;
       // Cancel in-flight list refetches so a response that started before the
       // overlay can't resolve after it and snap the row back to its old spot.
@@ -2499,7 +2509,9 @@ export function useMoveToProject() {
         target !== null && target.id === null
           ? { ...baseLabels, [PROJECT_LABEL_KEY]: project }
           : baseLabels;
-      overlayMembership(row, target?.id ?? null, labels, project === "" ? null : project);
+      // A nested folder's page cache is keyed by its id, a root's by its name.
+      const targetCacheKey = target?.parent_id ? target.id : project === "" ? null : project;
+      overlayMembership(row, target?.id ?? null, labels, targetCacheKey);
       return previous;
     },
     onError: (_err, { id }, previous) => {
@@ -2536,13 +2548,9 @@ export function useMoveToProject() {
   });
 }
 
-/**
- * Collect every session id filed under a project, paging through the
- * server-side `?project=` filter (archived included). Used by "Delete project"
- * so it removes ALL members, not just those in the loaded sidebar window.
- */
-async function fetchAllProjectSessionIds(project: string): Promise<string[]> {
-  const ids: string[] = [];
+/** Page through `GET /v1/sessions` for one project filter (archived included). */
+async function fetchAllSessionsWhere(filter: Record<string, string>): Promise<Conversation[]> {
+  const sessions: Conversation[] = [];
   let after: string | undefined;
   for (;;) {
     const params = new URLSearchParams({
@@ -2551,7 +2559,7 @@ async function fetchAllProjectSessionIds(project: string): Promise<string[]> {
       limit: "100",
       visibility: "all",
       include_archived: "true",
-      project,
+      ...filter,
     });
     if (after) params.set("after", after);
     // Sequential by necessity: each page's request needs the previous page's
@@ -2561,11 +2569,38 @@ async function fetchAllProjectSessionIds(project: string): Promise<string[]> {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     // eslint-disable-next-line no-await-in-loop
     const page = (await res.json()) as ConversationsPage;
-    for (const conv of page.data) ids.push(conv.id);
+    sessions.push(...page.data);
     if (!page.has_more || !page.last_id) break;
     after = page.last_id;
   }
-  return ids;
+  return sessions;
+}
+
+/**
+ * Collect every session id filed under a project, paging through the
+ * server-side filters (archived included). Used by "Delete project" and rename
+ * so they cover ALL members, not just those in the loaded sidebar window.
+ *
+ * Nested projects may share a leaf name, so a first-class folder is read by
+ * `project_id`. Only a root (or label-only) folder also sweeps the legacy
+ * `omni_project` label via `?project=<name>`, and that sweep keeps just the
+ * sessions with no first-class project, which are the label-only members.
+ */
+export async function fetchAllProjectSessionIds(project: {
+  id: string | null;
+  name: string;
+  parent_id?: string | null;
+}): Promise<string[]> {
+  const ids = new Set<string>();
+  if (project.id !== null) {
+    for (const conv of await fetchAllSessionsWhere({ project_id: project.id })) ids.add(conv.id);
+  }
+  if (project.id === null || !project.parent_id) {
+    for (const conv of await fetchAllSessionsWhere({ project: project.name })) {
+      if (!conv.project_id) ids.add(conv.id);
+    }
+  }
+  return [...ids];
 }
 
 /**
@@ -2597,14 +2632,17 @@ async function fetchProjectSessionsPage(
   limit = 20,
   sortBy: SessionSortBy = "updated_at",
   archived = false,
+  projectId: string | null = null,
 ): Promise<ConversationsPage> {
   const params = new URLSearchParams({
     order: "desc",
     sort_by: sortBy,
     limit: String(limit),
     visibility: archived ? "all" : "mine",
-    project,
   });
+  // A nested project shares its leaf name with others, so it filters by id.
+  if (projectId) params.set("project_id", projectId);
+  else params.set("project", project);
   // The all+project path resolves owned first-class projects on older servers too.
   if (archived) params.set("include_archived", "true");
   if (after) params.set("after", after);
@@ -2641,12 +2679,20 @@ export function useProjectSessions(
   enabled: boolean,
   sortBy: SessionSortBy = "updated_at",
   archived = false,
+  nestedProjectId: string | null = null,
 ) {
-  const queryKey = ["project-sessions", project, sortBy, archived];
+  const queryKey = ["project-sessions", nestedProjectId ?? project, sortBy, archived];
   const query = useInfiniteQuery({
     queryKey,
     queryFn: ({ pageParam }) =>
-      fetchProjectSessionsPage(project, pageParam as string | undefined, 20, sortBy, archived),
+      fetchProjectSessionsPage(
+        project,
+        pageParam as string | undefined,
+        20,
+        sortBy,
+        archived,
+        nestedProjectId,
+      ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) =>
       lastPage.has_more ? (lastPage.last_id ?? undefined) : undefined,
@@ -2686,8 +2732,8 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
 export function useDeleteProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, name }: ProjectSummary) => {
-      const ids = await fetchAllProjectSessionIds(name);
+    mutationFn: async ({ id, name, parent_id }: ProjectSummary) => {
+      const ids = await fetchAllProjectSessionIds({ id, name, parent_id });
       const results = await Promise.allSettled(ids.map((sid) => archiveAndUnfileConversation(sid)));
       const succeeded: string[] = [];
       const failed: string[] = [];
@@ -2736,10 +2782,23 @@ export function useDeleteProject() {
 export function useCreateProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, icon }: { name: string; icon?: string }) =>
-      apiCreateProject(name, icon ? { icon } : undefined),
+    mutationFn: ({ name, icon, parentId }: { name: string; icon?: string; parentId?: string }) =>
+      apiCreateProject(name, icon ? { icon } : undefined, parentId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+}
+
+/** Move a project under another one (or to the top level with `parentId: null`). */
+export function useMoveProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, parentId }: { id: string; parentId: string | null }) =>
+      apiMoveProject(id, parentId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
     },
   });
 }
@@ -2763,10 +2822,13 @@ export function useRenameProject() {
       id,
       oldName,
       newName,
+      parentId,
     }: {
       id: string | null;
       oldName: string;
       newName: string;
+      /** The folder's parent, so the label sweep only runs for roots. */
+      parentId?: string | null;
     }) => {
       // The target project id: rename the existing row (first-class), or
       // create one on demand (label-only folder being promoted).
@@ -2782,7 +2844,11 @@ export function useRenameProject() {
       // omni_project label; re-file each onto project_id and clear that label so
       // the rename is coherent for both membership representations and nothing
       // is left behind in an oldName folder.
-      const memberIds = await fetchAllProjectSessionIds(oldName);
+      const memberIds = await fetchAllProjectSessionIds({
+        id,
+        name: oldName,
+        parent_id: parentId,
+      });
       await Promise.all(
         memberIds.map(async (sid) => {
           const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sid)}`, {

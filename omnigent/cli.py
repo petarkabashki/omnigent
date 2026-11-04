@@ -7680,6 +7680,66 @@ def session_list(project: str | None, server: str | None) -> None:
         click.echo(f"{entry.get('handle')}\t{entry.get('session_id')}\thost={host}\t{title}")
 
 
+@cli.group("projects", invoke_without_command=True)
+@click.pass_context
+def projects_group(ctx: click.Context) -> None:
+    """Manage project namespaces.
+
+    \b
+    Examples:
+      omnigent projects migrate-slashes --dry-run
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@projects_group.command("migrate-slashes")
+@click.option(
+    "--dry-run",
+    "_dry_run",
+    is_flag=True,
+    required=True,
+    help="Print the proposed tree conversion. Required: this command never changes anything.",
+)
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def projects_migrate_slashes(_dry_run: bool, server: str | None) -> None:
+    """Propose turning projects named ``a/b`` into a namespace tree.
+
+    Read-only. Apply the printed steps yourself (create each parent, then
+    ``PATCH /v1/projects/<id>`` with the new ``name`` and ``parent_id``).
+    """
+    from omnigent.entities import Project
+    from omnigent.session_alias_client import list_projects
+    from omnigent.stores.project_store import plan_slash_migration
+
+    with _session_api_client(server) as client:
+        rows = _alias_cli_call(lambda: list_projects(client))
+    projects = [
+        Project(
+            id=row["id"],
+            name=row["name"],
+            user_id=None,
+            created_at=row.get("created_at") or 0,
+            parent_id=row.get("parent_id"),
+        )
+        for row in rows
+    ]
+    steps = plan_slash_migration(projects)
+    if not steps:
+        click.echo("No projects with '/' in their name; nothing to migrate.")
+        return
+    for step in steps:
+        click.echo(f"project {step.old_name!r} (id {step.project_id})")
+        if step.problem:
+            click.echo(f"  skip: {step.problem}")
+            continue
+        for path in step.create:
+            click.echo(f"  create namespace {path}")
+        parent = step.parent_path or "(root)"
+        click.echo(f"  rename to {step.new_name!r} and move under {parent}")
+    click.echo("Dry run only: nothing was changed.")
+
+
 @session.command("alias")
 @click.argument("role", required=False)
 @click.option(

@@ -763,7 +763,10 @@ function AppShellImpl() {
       ? projectSummaries?.find((p) => p.id === breadcrumbConv.project_id)
       : undefined;
   const headerProjectName =
-    headerProjectSummary?.name ?? breadcrumbConv?.labels?.[PROJECT_LABEL_KEY] ?? null;
+    headerProjectSummary?.path ??
+    headerProjectSummary?.name ??
+    breadcrumbConv?.labels?.[PROJECT_LABEL_KEY] ??
+    null;
   const headerProjectIcon = headerProjectSummary?.icon ?? null;
   const headerTitleLinkTo =
     isChildSession && activeSession?.parentSessionId

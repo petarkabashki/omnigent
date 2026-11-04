@@ -48,6 +48,7 @@ const {
   deleteProjectSpy,
   renameProjectSpy,
   createProjectSpy,
+  moveProjectSpy,
   fetchProjectSessionIdsMock,
   conversationsRef,
   pinnedIdsRef,
@@ -59,8 +60,12 @@ const {
   useSessionWorktreesMock,
 } = vi.hoisted(() => ({
   projectsMock: [] as string[],
-  projectRowsRef: { current: undefined as { id: string; name: string }[] | undefined },
+  projectRowsRef: {
+    current: undefined as
+      { id: string; name: string; parent_id?: string | null; path?: string | null }[] | undefined,
+  },
   moveToProjectSpy: vi.fn(),
+  moveProjectSpy: vi.fn(),
   deleteProjectSpy: vi.fn(),
   renameProjectSpy: vi.fn(),
   createProjectSpy: vi.fn(),
@@ -167,6 +172,7 @@ vi.mock("@/hooks/useConversations", async () => {
     useMoveToProject: () => ({ mutate: moveToProjectSpy }),
     useDeleteProject: () => ({ mutate: deleteProjectSpy, isPending: false, isError: false }),
     useRenameProject: () => ({ mutate: renameProjectSpy, isPending: false, isError: false }),
+    useMoveProject: () => ({ mutate: moveProjectSpy, isPending: false, isError: false }),
     useCreateProject: () => ({ mutate: createProjectSpy, isPending: false, isError: false }),
     fetchProjectSessionIds: fetchProjectSessionIdsMock,
   };
@@ -318,6 +324,8 @@ beforeEach(() => {
   projectsMock.length = 0;
   projectRowsRef.current = undefined;
   moveToProjectSpy.mockReset();
+  moveProjectSpy.mockReset();
+  createProjectSpy.mockReset();
   deleteProjectSpy.mockReset();
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
@@ -2624,7 +2632,7 @@ describe("Sidebar project sections", () => {
     expect(screen.getByText(/all of its sessions/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
     expect(deleteProjectSpy).toHaveBeenCalledWith(
-      { id: "p_Customer X", name: "Customer X" },
+      { id: "p_Customer X", name: "Customer X", parent_id: null },
       expect.anything(),
     );
   });
@@ -2673,6 +2681,102 @@ describe("Sidebar project sections", () => {
       "[@media((hover:hover)_and_(pointer:fine))]:md:pointer-events-none",
       "[@media((hover:hover)_and_(pointer:fine))]:md:group-hover/header:pointer-events-auto",
     );
+  });
+});
+
+// Nested first-class projects: a tree of folders keyed by namespace path.
+describe("Sidebar project tree", () => {
+  const treeRows = [
+    { id: "p_root", name: "acme", parent_id: null, path: "acme" },
+    { id: "p_arch", name: "Architect", parent_id: "p_root", path: "acme/Architect" },
+    { id: "p_deep", name: "Notes", parent_id: "p_arch", path: "acme/Architect/Notes" },
+    { id: "p_other", name: "other", parent_id: null, path: "other" },
+    { id: "p_other_arch", name: "Architect", parent_id: "p_other", path: "other/Architect" },
+  ];
+
+  function renderTree() {
+    projectRowsRef.current = treeRows;
+    mockConversations([conv("conv_unfiled", "Claude Code")]);
+    renderSidebar();
+  }
+
+  it("hides nested folders until every enclosing folder is expanded", () => {
+    renderTree();
+
+    expect(screen.getByTestId("project-folder-acme")).toHaveAttribute("data-depth", "0");
+    expect(screen.queryByTestId("project-folder-acme/Architect")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^acme/ }));
+    const child = screen.getByTestId("project-folder-acme/Architect");
+    expect(child).toHaveAttribute("data-depth", "1");
+    expect(child).toHaveAttribute("title", "acme/Architect");
+    // The grandchild waits for its own parent, and the other tree's same-named leaf stays hidden.
+    expect(screen.queryByTestId("project-folder-acme/Architect/Notes")).toBeNull();
+    expect(screen.queryByTestId("project-folder-other/Architect")).toBeNull();
+
+    fireEvent.click(within(child).getByRole("button", { name: /^Architect/ }));
+    expect(screen.getByTestId("project-folder-acme/Architect/Notes")).toHaveAttribute(
+      "data-depth",
+      "2",
+    );
+  });
+
+  it("collapsing the parent hides the whole subtree again", () => {
+    renderTree();
+    fireEvent.click(screen.getByRole("button", { name: /^acme/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^acme/ }));
+    expect(screen.queryByTestId("project-folder-acme/Architect")).toBeNull();
+  });
+
+  it("creates a child project under the folder's id", async () => {
+    renderTree();
+    const root = screen.getByTestId("project-folder-acme");
+    fireEvent.pointerDown(within(root).getByTestId("project-actions"), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByTestId("create-child-project"));
+    fireEvent.change(await screen.findByTestId("create-child-project-name"), {
+      target: { value: "Reviews" },
+    });
+    fireEvent.click(screen.getByTestId("create-child-project-confirm"));
+    expect(createProjectSpy).toHaveBeenCalledWith(
+      { name: "Reviews", parentId: "p_root" },
+      expect.anything(),
+    );
+  });
+
+  it("moves a project to the top level and omits its own subtree from the targets", async () => {
+    renderTree();
+    fireEvent.click(screen.getByRole("button", { name: /^acme/ }));
+    const child = screen.getByTestId("project-folder-acme/Architect");
+    fireEvent.pointerDown(within(child).getByTestId("project-actions"), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByTestId("move-project-parent-item"));
+
+    const select = (await screen.findByTestId("move-project-parent")) as HTMLSelectElement;
+    const offered = Array.from(select.options).map((option) => option.textContent);
+    expect(offered).toEqual(["Top level", "acme", "other", "other/Architect"]);
+    expect(select.value).toBe("p_root");
+
+    fireEvent.change(select, { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("move-project-confirm"));
+    expect(moveProjectSpy).toHaveBeenCalledWith(
+      { id: "p_arch", parentId: null },
+      expect.anything(),
+    );
+  });
+
+  it("offers no create-child or move for a label-only folder", async () => {
+    projectRowsRef.current = [{ id: null as unknown as string, name: "Legacy" }];
+    mockConversations([conv("conv_unfiled", "Claude Code")]);
+    renderSidebar();
+    fireEvent.pointerDown(screen.getByTestId("project-actions"), { button: 0, ctrlKey: false });
+    await screen.findByTestId("rename-project");
+    expect(screen.queryByTestId("create-child-project")).toBeNull();
+    expect(screen.queryByTestId("move-project-parent-item")).toBeNull();
   });
 });
 
@@ -3267,6 +3371,27 @@ describe("Sidebar move-to-project action", () => {
     // mutation with id + project.
     fireEvent.click(await screen.findByRole("menuitem", { name: /Sprint 42/ }));
     expect(moveToProjectSpy).toHaveBeenCalledWith({ id: "conv_move", project: "Sprint 42" });
+  });
+
+  it("files into a nested project by its path, keeping same-named projects apart", async () => {
+    projectRowsRef.current = [
+      { id: "p_a", name: "a", parent_id: null, path: "a" },
+      { id: "p_sub", name: "sub", parent_id: "p_a", path: "a/sub" },
+      { id: "p_b", name: "b", parent_id: null, path: "b" },
+      { id: "p_b_sub", name: "sub", parent_id: "p_b", path: "b/sub" },
+    ];
+    mockConversations([conv("conv_move", "Claude Code")]);
+    renderSidebar();
+
+    const row = screen.getByRole("link", { name: /conv_move/ }).closest("li")!;
+    fireEvent.pointerDown(within(row).getByRole("button", { name: "Conversation actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByTestId("move-to-project"));
+
+    fireEvent.click(await screen.findByRole("menuitem", { name: "b/sub" }));
+    expect(moveToProjectSpy).toHaveBeenCalledWith({ id: "conv_move", project: "b/sub" });
   });
 
   it("removes a session from its project immediately, with no confirmation", async () => {

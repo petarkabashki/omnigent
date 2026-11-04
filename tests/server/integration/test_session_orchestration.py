@@ -1323,6 +1323,43 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
     assert "ambiguous" in rows[0]["error"] and other["id"] in rows[0]["error"]
     assert rows[1]["session_id"] == source["id"]
 
+    # Namespace tree: nested projects, ?path=, move/cycle/delete rules, and path addressing.
+    created = await auth_client.post("/v1/projects", json={"name": "ns"})
+    assert created.status_code == 200, created.text
+    parent = created.json()
+    child = (
+        await auth_client.post("/v1/projects", json={"name": "sub", "parent_id": parent["id"]})
+    ).json()
+    assert child["path"] == "ns/sub" and child["parent_id"] == parent["id"]
+    assert (await auth_client.post("/v1/projects", json={"name": "a/b"})).status_code == 422
+    found = (await auth_client.get("/v1/projects", params={"path": "NS/Sub"})).json()["data"]
+    assert [row["id"] for row in found] == [child["id"]]
+    assert (await auth_client.get("/v1/projects", params={"path": "ns/nope"})).json()["data"] == []
+    cycle = await auth_client.patch(
+        f"/v1/projects/{parent['id']}", json={"parent_id": child["id"]}
+    )
+    assert cycle.status_code == 400
+    assert (await auth_client.delete(f"/v1/projects/{parent['id']}")).status_code == 409
+
+    store.set_conversation_project(source["id"], child["id"])
+    nested = await auth_client.get(
+        "/v1/sessions/aliases/resolve", params={"address": "ns/sub/Architect"}
+    )
+    assert nested.json()["session_id"] == source["id"] and nested.json()["handle"] == (
+        "ns/sub/Architect"
+    )
+    moved = await auth_client.patch(f"/v1/projects/{child['id']}", json={"parent_id": None})
+    assert moved.json()["path"] == "sub"
+    gone = await auth_client.get(
+        "/v1/sessions/aliases/resolve", params={"address": "ns/sub/Architect"}
+    )
+    assert gone.status_code == 404
+    again = await auth_client.get(
+        "/v1/sessions/aliases/resolve", params={"address": "sub/Architect"}
+    )
+    assert again.json()["session_id"] == source["id"]
+    assert (await auth_client.delete(f"/v1/projects/{parent['id']}")).status_code == 200
+
 
 async def test_orchestrated_session_on_named_host_with_alias(auth_client, auth_app, peers, db_uri):
     from omnigent.host.frames import HostLaunchRunnerFrame, HostStatFrame, decode_host_frame

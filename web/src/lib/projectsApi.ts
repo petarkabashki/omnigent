@@ -69,6 +69,10 @@ export interface Project {
   updated_at?: number | null;
   /** Stored default session settings; `{}` when the project has none. */
   config?: ProjectConfig;
+  /** Parent project id; `null`/absent for a root namespace. */
+  parent_id?: string | null;
+  /** Computed namespace path (`a/b/c`), joined from ancestor names. */
+  path?: string | null;
 }
 
 interface ProjectListResponse {
@@ -100,15 +104,30 @@ export async function getProject(id: string): Promise<Project> {
   return (await res.json()) as Project;
 }
 
+/** The caller's project at a namespace path; rejects when none matches or it is ambiguous. */
+export async function resolveProjectPath(path: string): Promise<Project> {
+  const res = await authenticatedFetch(`/v1/projects/resolve?path=${encodeURIComponent(path)}`);
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Project;
+}
+
 /**
  * Create a project, optionally with initial `config` defaults. Rejects with the
  * server's message on a duplicate name (409) so callers can surface it inline.
  */
-export async function createProject(name: string, config?: ProjectConfig): Promise<Project> {
+export async function createProject(
+  name: string,
+  config?: ProjectConfig,
+  parentId?: string | null,
+): Promise<Project> {
   const res = await authenticatedFetch("/v1/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config ? { name, config } : { name }),
+    body: JSON.stringify({
+      name,
+      ...(config ? { config } : {}),
+      ...(parentId ? { parent_id: parentId } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;
@@ -120,6 +139,17 @@ export async function renameProject(id: string, name: string): Promise<Project> 
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Project;
+}
+
+/** Move a project under `parentId`, or to the root with `null`. Only `parent_id` is sent. */
+export async function moveProject(id: string, parentId: string | null): Promise<Project> {
+  const res = await authenticatedFetch(`/v1/projects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_id: parentId }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;

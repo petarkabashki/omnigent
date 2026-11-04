@@ -747,6 +747,9 @@ class SqlProject(OmnigentBase):
     # can always override. Opaque and never SQL-filtered — stored compressed
     # (CompressedText).
     config: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    # Parent project (namespace tree); NULL = a root. No FK, like the other id
+    # columns. The path is computed by walking parents, never stored.
+    parent_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
 
     __table_args__ = (
         # "list my projects" — prefix scan on (workspace_id, user_id) with
@@ -774,6 +777,8 @@ class SqlProject(OmnigentBase):
             "created_at",
             "id",
         ),
+        # Child lookup and sibling-name checks under one parent.
+        Index("ix_projects_parent", "workspace_id", "user_id", "parent_id", "name"),
     )
 
 

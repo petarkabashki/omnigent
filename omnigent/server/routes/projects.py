@@ -18,7 +18,7 @@ import asyncio
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
@@ -31,13 +31,20 @@ from omnigent.server.schemas import (
     ProjectOrderResponse,
     UpdateProjectRequest,
 )
-from omnigent.stores.project_store import ProjectOrderPreference, ProjectStore, apply_project_order
+from omnigent.stores.project_store import (
+    UNSET,
+    ProjectOrderPreference,
+    ProjectStore,
+    apply_project_order,
+    project_path,
+)
 
 
-def _to_response(project: Project) -> dict[str, Any]:
+def _to_response(project: Project, path: str | None = None) -> dict[str, Any]:
     """Convert a :class:`Project` entity to a ``ProjectObject`` response dict.
 
     :param project: The entity to convert.
+    :param path: The computed namespace path, when known.
     :returns: Dict matching the :class:`ProjectObject` shape.
     """
     return {
@@ -47,6 +54,8 @@ def _to_response(project: Project) -> dict[str, Any]:
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "config": project.config,
+        "parent_id": project.parent_id,
+        "path": path,
     }
 
 
@@ -62,6 +71,20 @@ def create_projects_router(
     :returns: A configured :class:`APIRouter`.
     """
     router = APIRouter()
+
+    def _find(path: str, user_id: str | None) -> list[dict[str, Any]]:
+        """Projects at ``path`` (tree walk, then legacy flat name) as response dicts.
+
+        :raises OmnigentError: ``CONFLICT`` when sibling projects differing only by
+            case match.
+        """
+        found = project_store.find_by_path(path.strip(), user_id=user_id)
+        if len(found) > 1:
+            ids = ", ".join(p.id for p in found)
+            raise OmnigentError(
+                f"Path {path!r} matches several projects: {ids}", code=ErrorCode.CONFLICT
+            )
+        return [_to_response(p, project_store.get_path(p.id, user_id=user_id)) for p in found]
 
     @router.post("/projects")
     async def create_project(
@@ -83,32 +106,46 @@ def create_projects_router(
             body.name,
             user_id,
             body.config,
+            body.parent_id,
         )
         # Push the change to the owner's other connected clients so their
         # sidebars pick up the new folder without a reload.
         announce_projects_changed(user_id)
-        return _to_response(project)
+        path = await asyncio.to_thread(project_store.get_path, project.id, user_id=user_id)
+        return _to_response(project, path)
 
     @router.get("/projects")
-    async def list_projects(request: Request) -> dict[str, Any]:
-        """List the caller's projects.
+    async def list_projects(
+        request: Request,
+        path: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """List the caller's projects, or the one at ``?path=a/b``.
 
         :param request: The incoming request, used to identify the user.
-        :returns: ``{"object": "list", "data": [...]}``.
-        :raises OmnigentError: 401 if unauthenticated in multi-user mode.
+        :param path: When set, tree-walk this namespace path (case-insensitive
+            segments) instead of listing everything.
+        :returns: ``{"object": "list", "data": [...]}``; empty when ``path`` matches
+            nothing.
+        :raises OmnigentError: 401 if unauthenticated in multi-user mode, 409 if
+            ``path`` matches several sibling projects that differ only by case, or both
+            a tree project and a different legacy ``a/b``-named one.
         """
         user_id = require_user(request, auth_provider)
 
-        def read_projects() -> list[Project]:
-            return apply_project_order(
-                project_store.list(user_id=user_id),
+        def read_projects() -> list[dict[str, Any]]:
+            if path is not None:
+                return _find(path, user_id)
+            projects = project_store.list(user_id=user_id)
+            by_id = {p.id: p for p in projects}
+            ordered = apply_project_order(
+                projects,
                 project_store.get_order(user_id=user_id),
                 project_id=lambda p: p.id,
                 project_name=lambda p: p.name,
             )
+            return [_to_response(p, project_path(p, by_id)) for p in ordered]
 
-        projects = await asyncio.to_thread(read_projects)
-        return {"object": "list", "data": [_to_response(p) for p in projects]}
+        return {"object": "list", "data": await asyncio.to_thread(read_projects)}
 
     @router.get(
         "/projects/order", response_model=None, responses={200: {"model": ProjectOrderResponse}}
@@ -132,6 +169,22 @@ def create_projects_router(
         announce_projects_changed(user_id)
         return preference
 
+    @router.get("/projects/resolve")
+    async def resolve_project(request: Request, path: str = Query(...)) -> dict[str, Any]:
+        """Resolve a namespace path (``a/b``) to exactly one of the caller's projects.
+
+        :param request: The incoming request, used to identify the user.
+        :param path: Namespace path; segments match case-insensitively.
+        :returns: The project as a serialized dict (with its ``path``).
+        :raises OmnigentError: 401 if unauthenticated, 404 if nothing matches, 409
+            if the path is ambiguous.
+        """
+        user_id = require_user(request, auth_provider)
+        found = await asyncio.to_thread(_find, path, user_id)
+        if not found:
+            raise OmnigentError(f"No project at path {path!r}", code=ErrorCode.NOT_FOUND)
+        return found[0]
+
     @router.get("/projects/{project_id}")
     async def get_project(request: Request, project_id: str) -> dict[str, Any]:
         """Return one of the caller's projects.
@@ -146,7 +199,8 @@ def create_projects_router(
         project = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
         if project is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
-        return _to_response(project)
+        path = await asyncio.to_thread(project_store.get_path, project_id, user_id=user_id)
+        return _to_response(project, path)
 
     @router.patch("/projects/{project_id}")
     async def update_project(
@@ -171,6 +225,7 @@ def create_projects_router(
             user_id=user_id,
             name=body.name,
             config=body.config,
+            parent_id=body.parent_id if "parent_id" in body.model_fields_set else UNSET,
         )
         if project is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
@@ -178,7 +233,8 @@ def create_projects_router(
         # (another tab, the mobile app) if it is pushed; nothing else refreshes
         # their projects cache until a full reload.
         announce_projects_changed(user_id)
-        return _to_response(project)
+        path = await asyncio.to_thread(project_store.get_path, project_id, user_id=user_id)
+        return _to_response(project, path)
 
     @router.delete("/projects/{project_id}")
     async def delete_project(request: Request, project_id: str) -> dict[str, Any]:

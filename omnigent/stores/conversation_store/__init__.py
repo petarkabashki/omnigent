@@ -950,6 +950,7 @@ class ConversationStore(ABC):
         pinned_owner: str | None = None,
         title: str | None = None,
         has_label: str | None = None,
+        project_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1056,6 +1057,9 @@ class ConversationStore(ABC):
             the filter. The name→id resolution is owner-scoped (projects are
             owner-private), so pass ``owned_by`` alongside a specific name.
             See ``designs/PROJECTS_PRD.md``.
+        :param project_id: Filter to members of this first-class project id
+            (``owned_by``'s project; no legacy label match). Unambiguous when
+            nested projects share a leaf name. ``None`` disables it.
         :param pinned: When ``True``, only return sessions ``pinned_owner`` has
             pinned (their per-user ``omnigent.pinned.<user>`` label — the
             sidebar's Pinned section). ``False`` (default) disables the filter.

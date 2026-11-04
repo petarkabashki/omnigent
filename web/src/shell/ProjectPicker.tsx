@@ -1,3 +1,4 @@
+import { canCreateProjectNamed, projectPathOf } from "@/lib/projectTree";
 import { useState } from "react";
 import { CheckIcon, FolderIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -55,14 +56,17 @@ export function ProjectPicker({
   const { data: projects = [] } = useProjects();
   const [search, setSearch] = useState("");
   const trimmed = search.trim();
+  // Projects show and file by their full path, which for a root is its plain name.
   const filtered = trimmed
-    ? projects.filter((project) => project.name.toLowerCase().includes(trimmed.toLowerCase()))
+    ? projects.filter((project) =>
+        projectPathOf(project).toLowerCase().includes(trimmed.toLowerCase()),
+      )
     : projects;
-  // Offer create only when the typed name isn't already an exact project.
-  const canCreate =
-    trimmed.length > 0 &&
-    !projects.some((project) => project.name.toLowerCase() === trimmed.toLowerCase());
-  const currentProjectIcon = projects.find((project) => project.name === currentProject)?.icon;
+  // Offer create only for a single new segment that isn't already an exact project.
+  const canCreate = canCreateProjectNamed(projects, trimmed);
+  const currentProjectIcon = projects.find(
+    (project) => projectPathOf(project) === currentProject,
+  )?.icon;
 
   return (
     <>
@@ -80,14 +84,16 @@ export function ProjectPicker({
       <div className="max-h-48 overflow-y-auto">
         {filtered.map((project) => (
           <DropdownMenuItem
-            key={project.name}
+            key={project.id ?? project.name}
             className="px-2 py-1"
-            textValue={project.name}
-            onSelect={() => onSelect(project.name)}
+            textValue={projectPathOf(project)}
+            onSelect={() => onSelect(projectPathOf(project))}
           >
             <ProjectRowIcon icon={project.icon} />
-            <span className="flex-1 truncate text-left">{project.name}</span>
-            {currentProject === project.name && (
+            <span className="flex-1 truncate text-left" title={projectPathOf(project)}>
+              {projectPathOf(project)}
+            </span>
+            {currentProject === projectPathOf(project) && (
               <CheckIcon className="size-3.5 shrink-0 text-primary" />
             )}
           </DropdownMenuItem>

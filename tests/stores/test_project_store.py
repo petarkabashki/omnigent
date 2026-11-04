@@ -673,3 +673,371 @@ def test_apply_order_deduplicates_and_appends_unranked_projects() -> None:
     assert apply_project_order(
         ["b", "c", "a"], ["a", "deleted", "a"], project_id=str, project_name=str
     ) == ["a", "b", "c"]
+
+
+# ── namespace tree ────────────────────────────────────────────────────────
+
+
+def _tree(store: SqlAlchemyProjectStore, owner: str | None = "alice") -> dict[str, str]:
+    """Create ``a`` > ``b`` > ``c`` plus root ``z``; return name -> id."""
+    ids = {name: _uid(name) for name in ("a", "b", "c", "z")}
+    store.create(ids["a"], "a", owner)
+    store.create(ids["b"], "b", owner, parent_id=ids["a"])
+    store.create(ids["c"], "c", owner, parent_id=ids["b"])
+    store.create(ids["z"], "z", owner)
+    return ids
+
+
+def test_tree_walk_and_computed_path(store: SqlAlchemyProjectStore) -> None:
+    """Paths are computed from ``parent_id`` and resolved case-insensitively."""
+    ids = _tree(store)
+    assert store.get(ids["c"], user_id="alice").parent_id == ids["b"]
+    assert store.get_path(ids["c"], user_id="alice") == "a/b/c"
+    assert store.get_path(ids["z"], user_id="alice") == "z"
+    assert store.get_path(ids["c"], user_id="bob") is None
+    assert [p.id for p in store.find_by_path("A/B/c", user_id="alice")] == [ids["c"]]
+    assert store.find_by_path("a/c", user_id="alice") == []
+    assert store.find_by_path("a//c", user_id="alice") == []
+    assert store.find_by_path("a/b", user_id="bob") == []
+
+
+def test_siblings_collide_only_under_the_same_parent(store: SqlAlchemyProjectStore) -> None:
+    """The same name is fine under different parents, not under one."""
+    ids = _tree(store)
+    store.create(_uid("c2"), "c", "alice", parent_id=ids["a"])
+    with pytest.raises(OmnigentError) as caught:
+        store.create(_uid("c3"), "c", "alice", parent_id=ids["b"])
+    assert caught.value.code == ErrorCode.ALREADY_EXISTS
+    with pytest.raises(OmnigentError) as moved:
+        store.update(_uid("c2"), user_id="alice", parent_id=ids["b"])
+    assert moved.value.code == ErrorCode.ALREADY_EXISTS
+
+
+def test_move_refuses_cycles(store: SqlAlchemyProjectStore) -> None:
+    """A project cannot move under itself or a descendant."""
+    ids = _tree(store)
+    for target in (ids["a"], ids["c"]):
+        with pytest.raises(OmnigentError) as caught:
+            store.update(ids["a"], user_id="alice", parent_id=target)
+        assert caught.value.code == ErrorCode.INVALID_INPUT
+    assert store.get_path(ids["c"], user_id="alice") == "a/b/c"
+
+
+def test_move_and_rename(store: SqlAlchemyProjectStore) -> None:
+    """``parent_id=None`` moves to the root; omitting it leaves the parent alone."""
+    ids = _tree(store)
+    store.update(ids["b"], user_id="alice", name="b2")
+    assert store.get_path(ids["c"], user_id="alice") == "a/b2/c"
+    moved = store.update(ids["b"], user_id="alice", parent_id=ids["z"])
+    assert moved is not None and moved.parent_id == ids["z"]
+    assert store.get_path(ids["c"], user_id="alice") == "z/b2/c"
+    store.update(ids["b"], user_id="alice", parent_id=None)
+    assert store.get_path(ids["c"], user_id="alice") == "b2/c"
+
+
+def test_depth_cap_applies_to_create_and_to_moved_subtrees(
+    store: SqlAlchemyProjectStore,
+) -> None:
+    """Paths stop at 8 segments, counting the moved subtree's own height."""
+    chain = [_uid(f"d{i}") for i in range(8)]
+    parent = None
+    for index, project_id in enumerate(chain):
+        store.create(project_id, f"d{index}", "alice", parent_id=parent)
+        parent = project_id
+    with pytest.raises(OmnigentError) as too_deep:
+        store.create(_uid("d8"), "d8", "alice", parent_id=chain[-1])
+    assert too_deep.value.code == ErrorCode.INVALID_INPUT
+    store.create(_uid("sub"), "sub", "alice")
+    store.create(_uid("leaf"), "leaf", "alice", parent_id=_uid("sub"))
+    with pytest.raises(OmnigentError):
+        store.update(_uid("sub"), user_id="alice", parent_id=chain[-2])
+    store.update(_uid("leaf"), user_id="alice", parent_id=chain[-2])
+
+
+@pytest.mark.parametrize("bad", ["a/b", ".", ".."])
+def test_new_and_renamed_names_reject_slash_and_dots(
+    store: SqlAlchemyProjectStore, bad: str
+) -> None:
+    """Names are single path segments."""
+    with pytest.raises(OmnigentError) as created:
+        store.create(_uid("x"), bad, "alice")
+    assert created.value.code == ErrorCode.INVALID_INPUT
+    store.create(_uid("y"), "ok", "alice")
+    with pytest.raises(OmnigentError):
+        store.update(_uid("y"), user_id="alice", name=bad)
+
+
+def test_missing_or_foreign_parent_is_rejected(store: SqlAlchemyProjectStore) -> None:
+    """A parent must exist and belong to the same owner."""
+    store.create(_uid("bobs"), "bobs", "bob")
+    for parent in (_uid("nope"), _uid("bobs")):
+        with pytest.raises(OmnigentError) as caught:
+            store.create(_uid("x"), "x", "alice", parent_id=parent)
+        assert caught.value.code == ErrorCode.INVALID_INPUT
+
+
+def test_delete_with_children_conflicts_until_children_are_gone(
+    store: SqlAlchemyProjectStore,
+) -> None:
+    """A parent cannot be deleted while it has children."""
+    ids = _tree(store)
+    with pytest.raises(OmnigentError) as caught:
+        store.delete(ids["b"], user_id="alice")
+    assert caught.value.code == ErrorCode.CONFLICT
+    assert store.delete(ids["c"], user_id="alice") is True
+    assert store.delete(ids["b"], user_id="alice") is True
+
+
+def test_slash_migration_plan_reuses_existing_ancestors(
+    store: SqlAlchemyProjectStore, db_uri: str
+) -> None:
+    """Legacy ``a/b`` names map onto the tree; clashes and bad segments are flagged."""
+    from sqlalchemy.orm import Session
+
+    from omnigent.db.db_models import SqlProject
+    from omnigent.db.utils import get_or_create_engine
+    from omnigent.stores.project_store import plan_slash_migration
+
+    store.create(_uid("a"), "a", "alice")
+    store.create(_uid("ab"), "b", "alice", parent_id=_uid("a"))
+    # Legacy rows predate name validation, so write them through the ORM.
+    with Session(get_or_create_engine(db_uri)) as session:
+        for seed, name in (("l1", "a/x"), ("l2", "q/r/s"), ("l3", "a/b"), ("l4", "k//m")):
+            session.add(SqlProject(id=_uid(seed), name=name, user_id="alice", created_at=1))
+        session.commit()
+    steps = {s.old_name: s for s in plan_slash_migration(store.list(user_id="alice"))}
+    assert set(steps) == {"a/x", "q/r/s", "a/b", "k//m"}
+    assert steps["a/x"].create == () and steps["a/x"].parent_path == "a"
+    assert steps["a/x"].new_name == "x" and steps["a/x"].problem is None
+    assert steps["q/r/s"].create == ("q", "q/r")
+    assert "already project" in (steps["a/b"].problem or "")
+    assert "empty" in (steps["k//m"].problem or "")
+
+
+def _add_legacy_rows(db_uri: str, *rows: tuple[str, str, str | None]) -> None:
+    """Insert ``(seed, name, parent_id)`` rows through the ORM, bypassing name validation."""
+    from sqlalchemy.orm import Session
+
+    from omnigent.db.db_models import SqlProject
+    from omnigent.db.utils import get_or_create_engine
+
+    with Session(get_or_create_engine(db_uri)) as session:
+        for seed, name, parent_id in rows:
+            session.add(
+                SqlProject(
+                    id=_uid(seed), name=name, user_id="alice", created_at=1, parent_id=parent_id
+                )
+            )
+        session.commit()
+
+
+def test_legacy_slash_project_cannot_be_a_parent_or_move_under_one(
+    store: SqlAlchemyProjectStore, db_uri: str
+) -> None:
+    """Legacy ``x/y`` names stay roots until migrated: their subtree would be unaddressable."""
+    _add_legacy_rows(db_uri, ("legacy", "x/y", None))
+    store.create(_uid("plain"), "plain", "alice")
+    with pytest.raises(OmnigentError) as as_parent:
+        store.create(_uid("kid"), "kid", "alice", parent_id=_uid("legacy"))
+    assert as_parent.value.code == ErrorCode.INVALID_INPUT
+    with pytest.raises(OmnigentError) as moved_under:
+        store.update(_uid("plain"), user_id="alice", parent_id=_uid("legacy"))
+    assert moved_under.value.code == ErrorCode.INVALID_INPUT
+    with pytest.raises(OmnigentError) as legacy_moved:
+        store.update(_uid("legacy"), user_id="alice", parent_id=_uid("plain"))
+    assert legacy_moved.value.code == ErrorCode.INVALID_INPUT
+    assert store.get(_uid("legacy"), user_id="alice").parent_id is None
+
+
+def test_legacy_name_survives_a_save_that_echoes_it_but_not_a_rename(
+    store: SqlAlchemyProjectStore, db_uri: str
+) -> None:
+    """The segment rules apply only when the name changes."""
+    _add_legacy_rows(db_uri, ("legacy", "x/y", None))
+    echoed = store.update(_uid("legacy"), user_id="alice", name="x/y", config={"icon": "a"})
+    assert echoed is not None and echoed.config == {"icon": "a"}
+    with pytest.raises(OmnigentError) as renamed:
+        store.update(_uid("legacy"), user_id="alice", name="p/q")
+    assert renamed.value.code == ErrorCode.INVALID_INPUT
+
+
+def test_find_by_path_falls_back_to_a_legacy_flat_name_and_flags_conflicts(
+    store: SqlAlchemyProjectStore, db_uri: str
+) -> None:
+    """``x/y`` finds a legacy root named ``x/y``; a tree project at the same path conflicts."""
+    _add_legacy_rows(db_uri, ("legacy", "x/y", None))
+    assert [p.id for p in store.find_by_path("x/y", user_id="alice")] == [_uid("legacy")]
+    store.create(_uid("x"), "x", "alice")
+    store.create(_uid("y"), "y", "alice", parent_id=_uid("x"))
+    with pytest.raises(OmnigentError) as caught:
+        store.find_by_path("x/y", user_id="alice")
+    assert caught.value.code == ErrorCode.CONFLICT
+
+
+def test_orphan_is_walked_as_a_root(store: SqlAlchemyProjectStore, db_uri: str) -> None:
+    """A project whose parent row is missing resolves by the same path ``get_path`` reports."""
+    _add_legacy_rows(db_uri, ("orphan", "c", _uid("gone")))
+    assert store.get_path(_uid("orphan"), user_id="alice") == "c"
+    assert [p.id for p in store.find_by_path("c", user_id="alice")] == [_uid("orphan")]
+
+
+def test_concurrent_moves_cannot_form_a_cycle(store: SqlAlchemyProjectStore) -> None:
+    """Hold one move after its checks; the competing move waits and then sees the cycle.
+
+    Runs on SQLite (writers serialize) and on OMNIGENT_TEST_DB_URI (row locks).
+    """
+    import threading
+
+    first, second = _uid("race-a"), _uid("race-b")
+    store.create(first, "a", "alice")
+    store.create(second, "b", "alice")
+    reached, release = threading.Event(), threading.Event()
+
+    def hold_first_mover(operation: str) -> None:
+        if threading.current_thread().name == "mover-1":
+            reached.set()
+            assert release.wait(timeout=15)
+
+    store.after_checks_hook = hold_first_mover
+    outcomes: dict[str, object] = {}
+
+    def move(label: str, project_id: str, parent_id: str) -> None:
+        try:
+            store.update(project_id, user_id="alice", parent_id=parent_id)
+            outcomes[label] = "moved"
+        except OmnigentError as error:
+            outcomes[label] = error.code
+
+    movers = [
+        threading.Thread(name="mover-1", target=move, args=("1", first, second)),
+        threading.Thread(name="mover-2", target=move, args=("2", second, first)),
+    ]
+    movers[0].start()
+    assert reached.wait(timeout=15)
+    movers[1].start()
+    movers[1].join(timeout=1)
+    assert movers[1].is_alive(), "the competing move must wait for the first one's lock"
+    release.set()
+    for mover in movers:
+        mover.join(timeout=15)
+    assert outcomes == {"1": "moved", "2": ErrorCode.INVALID_INPUT}
+    assert store.get_path(first, user_id="alice") == "b/a"
+
+
+def test_create_under_a_parent_waits_for_a_concurrent_delete_of_it(
+    store: SqlAlchemyProjectStore,
+) -> None:
+    """A create racing the parent's delete is serialized: it cannot leave an orphan."""
+    import threading
+
+    parent = _uid("race-parent")
+    store.create(parent, "p", "alice")
+    reached, release = threading.Event(), threading.Event()
+
+    def hold_deleter(operation: str) -> None:
+        if threading.current_thread().name == "deleter":
+            reached.set()
+            assert release.wait(timeout=15)
+
+    store.after_checks_hook = hold_deleter
+    outcomes: dict[str, object] = {}
+
+    def delete() -> None:
+        outcomes["delete"] = store.delete(parent, user_id="alice")
+
+    def create() -> None:
+        try:
+            store.create(_uid("race-kid"), "kid", "alice", parent_id=parent)
+            outcomes["create"] = "created"
+        except OmnigentError as error:
+            outcomes["create"] = error.code
+
+    threads = [threading.Thread(name="deleter", target=delete), threading.Thread(target=create)]
+    threads[0].start()
+    assert reached.wait(timeout=15)
+    threads[1].start()
+    threads[1].join(timeout=1)
+    assert threads[1].is_alive()
+    release.set()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert outcomes == {"delete": True, "create": ErrorCode.INVALID_INPUT}
+    assert store.find_by_path("p/kid", user_id="alice") == []
+
+
+def test_delete_sees_a_child_created_while_it_waited_for_the_parent_lock(
+    store: SqlAlchemyProjectStore,
+) -> None:
+    """Create holds the lock first: the delete then waits, sees the child and refuses.
+
+    The Postgres run is the one that bites: there the waiting delete's locking read
+    keeps its older snapshot.
+    """
+    import threading
+
+    parent, kid = _uid("race-first-parent"), _uid("race-first-kid")
+    store.create(parent, "p", "alice")
+    reached, release = threading.Event(), threading.Event()
+
+    def hold_creator(operation: str) -> None:
+        if threading.current_thread().name == "creator":
+            reached.set()
+            assert release.wait(timeout=15)
+
+    store.after_checks_hook = hold_creator
+    outcomes: dict[str, object] = {}
+
+    def create() -> None:
+        store.create(kid, "kid", "alice", parent_id=parent)
+        outcomes["create"] = "created"
+
+    def delete() -> None:
+        try:
+            outcomes["delete"] = store.delete(parent, user_id="alice")
+        except OmnigentError as error:
+            outcomes["delete"] = error.code
+
+    threads = [threading.Thread(name="creator", target=create), threading.Thread(target=delete)]
+    threads[0].start()
+    assert reached.wait(timeout=15)
+    threads[1].start()
+    threads[1].join(timeout=1)
+    assert threads[1].is_alive(), "the delete must wait for the create's lock"
+    release.set()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert outcomes == {"create": "created", "delete": ErrorCode.CONFLICT}
+    assert store.get_path(kid, user_id="alice") == "p/kid"
+
+
+def test_migrate_slashes_step_applies_as_one_update(
+    store: SqlAlchemyProjectStore, db_uri: str
+) -> None:
+    """The planned rename-and-move lands in one update; a move keeping the name is refused."""
+    from omnigent.stores.project_store import plan_slash_migration
+
+    _add_legacy_rows(db_uri, ("legacy", "a/b", None))
+    parent = store.create(_uid("a"), "a", "alice")
+    [step] = plan_slash_migration(store.list(user_id="alice"))
+    assert (step.new_name, step.parent_path) == ("b", "a")
+
+    moved = store.update(step.project_id, user_id="alice", name=step.new_name, parent_id=parent.id)
+
+    assert moved is not None and moved.parent_id == parent.id
+    assert store.get_path(step.project_id, user_id="alice") == "a/b"
+
+
+def test_a_dashed_id_reaches_the_same_project_everywhere(store: SqlAlchemyProjectStore) -> None:
+    """Dashed and hex forms of one UUID agree across lookups, writes and parent links."""
+    project, kid = _uid("dashed"), _uid("dashed-kid")
+    dashed = str(uuid.UUID(project))
+    store.create(project, "n", "alice")
+    assert store.get(dashed, user_id="alice").id == project
+    assert store.get_path(dashed, user_id="alice") == "n"
+    assert store.update(dashed, user_id="alice", name="m").name == "m"
+    assert store.create(kid, "kid", "alice", parent_id=dashed).parent_id == project
+    store.update(kid, user_id="alice", parent_id=None)
+    assert store.update(kid, user_id="alice", parent_id=dashed).parent_id == project
+    store.update(kid, user_id="alice", parent_id=None)
+    assert store.delete(dashed, user_id="alice") is True
+    assert store.get(project, user_id="alice") is None

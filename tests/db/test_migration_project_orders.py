@@ -31,7 +31,9 @@ def test_project_orders_migration_round_trip(tmp_path: Path) -> None:
             connection.execute(sa.text("SELECT id FROM users WHERE id = 'local'")).scalar_one()
             == "local"
         )
-    assert store.get(project.id, user_id=None) == project
+    # The store reads columns newer than this revision, so check the row directly.
+    with engine.connect() as connection:
+        assert connection.execute(sa.text("SELECT name FROM projects")).scalar_one() == "Existing"
     with engine.begin() as connection:
         connection.execute(
             sa.text(

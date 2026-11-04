@@ -2118,7 +2118,7 @@ export function NewChatLandingScreen() {
   const configProjectId = useMemo(
     () =>
       projectParam !== ""
-        ? ((projectList ?? []).find((p) => p.name === projectParam)?.id ?? null)
+        ? ((projectList ?? []).find((p) => (p.path ?? p.name) === projectParam)?.id ?? null)
         : null,
     [projectList, projectParam],
   );

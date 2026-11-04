@@ -253,7 +253,7 @@ from omnigent.stores.conversation_store import (
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.project_store import ProjectStore, apply_project_order, project_path
 from omnigent.telemetry.surface import CLIENT_SURFACE_LABEL_KEY, resolve_client_surface
 from omnigent.util.cost_plan import (
     reserved_cost_control_keys,
@@ -266,6 +266,7 @@ from omnigent.util.reasoning_effort import (
 from omnigent.util.session_lifecycle import (
     labels_with_closed_status,
 )
+from omnigent.util.uuid import uuid_to_bytes
 from omnigent.version import VERSION
 
 
@@ -1265,16 +1266,8 @@ def register_core_routes(
                     "Only top-level sessions can claim an alias",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            from omnigent.server.session_aliases import (
-                check_alias_for_new_session,
-                session_project_name,
-            )
+            from omnigent.server.session_aliases import check_alias_for_new_session
 
-            inherited_project_name = None
-            if inherit_project:
-                inherited_project_name = await asyncio.to_thread(
-                    session_project_name, source, project_store, user_id
-                )
             await asyncio.to_thread(
                 check_alias_for_new_session,
                 conversation_store,
@@ -1282,7 +1275,7 @@ def register_core_routes(
                 alias=body.alias,
                 project_id=body.project_id,
                 user_id=user_id,
-                project_name=inherited_project_name,
+                inherit_from=source if inherit_project else None,
             )
         creation_metadata(parent_session_id=body.parent_session_id, host_type=body.host_type)
         resp, conv = await _create_session_from_existing_agent(
@@ -1775,15 +1768,16 @@ def register_core_routes(
         """
         Return the caller's project summaries in their preferred display order.
 
-        Dual-reads both project representations and unions them by name:
+        Dual-reads both project representations and unions them (first-class by
+        id, label-projects by name against root projects):
         - **First-class projects** (``project_store``) — carry an ``id`` and
           appear even when empty (the whole point of the first-class entity).
         - **Legacy label-projects** (implicit ``omni_project`` label) — exist
           while at least one owned session carries the label; ``id`` is
           ``None`` until such a project is promoted to first-class.
 
-        A name present in both sources collapses to one entry that keeps the
-        first-class ``id``. Filing is owner-only, so both halves are scoped to
+        A label name equal to a root project's name collapses into that entry,
+        which keeps the first-class ``id``. Filing is owner-only, so both halves are scoped to
         the caller (label-projects to their owned sessions, first-class to
         their owned rows) — a project shared to them but owned by another user
         does not surface as one of their own folders.
@@ -1793,24 +1787,31 @@ def register_core_routes(
         user_id = _require_user(request, auth_provider)
 
         def _list_union() -> list[SessionProjectSummary]:
-            # First-class first so its id wins when a name exists in both.
-            by_name: dict[str, SessionProjectSummary] = {}
+            # First-class rows are keyed by id (nested projects may share a leaf
+            # name); a label-project merges only into the root of the same name.
+            entries: dict[str, SessionProjectSummary] = {}
+            root_names: set[str] = set()
             if project_store is not None:
-                for proj in project_store.list(user_id=user_id):
+                owned = project_store.list(user_id=user_id)
+                by_id = {proj.id: proj for proj in owned}
+                for proj in owned:
                     icon = proj.config.get("icon")
-                    by_name[proj.name] = SessionProjectSummary(
+                    entries[proj.id] = SessionProjectSummary(
                         id=proj.id,
                         name=proj.name,
                         icon=icon if isinstance(icon, str) else None,
+                        parent_id=proj.parent_id,
+                        path=project_path(proj, by_id),
                     )
+                    if proj.parent_id is None:
+                        root_names.add(proj.name)
             # Legacy path: label-derived projects (id=None unless already first-class).
             for name in sorted(conversation_store.list_projects(owned_by=user_id)):
-                by_name.setdefault(name, SessionProjectSummary(id=None, name=name))
-            from omnigent.stores.project_store import apply_project_order
-
+                if name not in root_names:
+                    entries[f"label:{name}"] = SessionProjectSummary(id=None, name=name, path=name)
             order = project_store.get_order(user_id=user_id) if project_store is not None else None
             return apply_project_order(
-                list(by_name.values()),
+                list(entries.values()),
                 order,
                 project_id=lambda p: p.id,
                 project_name=lambda p: p.name,
@@ -1838,14 +1839,24 @@ def register_core_routes(
         project: str | None = Query(default=None),
         alias: str | None = Query(default=None),
     ) -> dict[str, Any]:
-        """List the caller's live aliased sessions, optionally by project name or alias."""
-        from omnigent.server.session_aliases import find_aliased_sessions
+        """List the caller's live aliased sessions, optionally by project path or alias."""
+        from omnigent.server.session_aliases import find_aliased_sessions, resolve_namespace
 
         user_id = _require_user(request, auth_provider)
 
         def _list() -> dict[str, Any]:
+            # A path or leaf name resolves to one tree node, like an address prefix.
+            namespace = (
+                resolve_namespace(conversation_store, project_store, project, user_id)
+                if project is not None
+                else None
+            )
             found = find_aliased_sessions(
-                conversation_store, user_id=user_id, project=project, alias=alias
+                conversation_store,
+                user_id=user_id,
+                project=project,
+                alias=alias,
+                namespace=namespace,
             )
             return {"data": [_alias_entry(session, user_id) for session in found]}
 
@@ -2176,6 +2187,7 @@ def register_core_routes(
         include_archived: bool = Query(default=False),
         kind: str = Query(default="default", pattern="^(default|sub_agent|any)$"),
         project: str | None = Query(default=None),
+        project_id: str | None = Query(default=None),
         pinned: bool = Query(default=False),
         visibility: str = Query(default="all", pattern="^(all|mine|shared|archived)$"),
     ) -> PaginatedList:
@@ -2227,6 +2239,9 @@ def register_core_routes(
             this lets the new-session agent picker discover agents
             that are only bound to sub-agent sessions (e.g. ones
             uploaded via ``sys_session_create``).
+        :param project_id: Filter to members of this first-class project id
+            (owner-scoped; no legacy label match). Unlike ``project`` it is
+            unambiguous when nested projects share a leaf name.
         :param pinned: When ``True``, return only sessions the user
             has pinned (the ``omnigent.pinned`` label). Lets the
             sidebar enumerate pinned sessions that fall outside the
@@ -2254,6 +2269,13 @@ def register_core_routes(
         # with 401 instead (user_id stays None only when auth is
         # disabled entirely — no auth_provider).
         user_id = _require_user(request, auth_provider)
+        if project_id is not None:
+            try:
+                project_id = uuid_to_bytes(project_id).hex()
+            except ValueError as error:
+                raise OmnigentError(
+                    "project_id must be a UUID", code=ErrorCode.INVALID_INPUT
+                ) from error
         normalized_query = search_query if search_query else None
         # Map the visibility filter to store-level ACL params.
         # "mine": only sessions the caller owns — no accessible_by needed
@@ -2284,7 +2306,7 @@ def register_core_routes(
             archived_only_param = False
         elif effective_visibility == "archived":
             accessible_by_param = user_id
-            owned_by_param = user_id if project else None
+            owned_by_param = user_id if (project or project_id) else None
             shared_only_param = False
             # archived_only=True implies include_archived=True — the store
             # filters to archived=True regardless of include_archived.
@@ -2299,7 +2321,7 @@ def register_core_routes(
             # the store resolves the project NAME to the caller's own project id.
             # The flat list (project=None) and Unfiled (project="") stay unscoped so
             # shared sessions still surface for the "Shared with me" tab.
-            owned_by_param = user_id if project else None
+            owned_by_param = user_id if (project or project_id) else None
             shared_only_param = False
             include_archived_param = include_archived
             archived_only_param = False
@@ -2325,6 +2347,7 @@ def register_core_routes(
             include_archived=include_archived_param,
             archived_only=archived_only_param,
             project=project,
+            project_id=project_id,
             pinned=pinned,
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,

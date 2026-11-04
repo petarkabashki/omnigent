@@ -67,12 +67,14 @@ def test_projects_indexes_at_head(db_engine: Engine) -> None:
         "created_at",
         "id",
     ]
-    # Per-owner name uniqueness moved wholly into the store (_name_taken), so no
-    # unique index remains — leaving this the table's only secondary index.
+    # Sibling-name uniqueness lives in the store (_name_taken), so no unique
+    # index remains; the only other index serves child lookups under a parent.
     assert "ix_projects_name" not in indexes, (
         f"ix_projects_name should be dropped; found {set(indexes)}"
     )
-    assert set(indexes) == {"ix_projects_user_id"}, f"Unexpected extra indexes: {set(indexes)}"
+    assert set(indexes) == {"ix_projects_user_id", "ix_projects_parent"}, (
+        f"Unexpected extra indexes: {set(indexes)}"
+    )
 
 
 def test_downgrade_restores_owner_user_id(tmp_path: Path) -> None:

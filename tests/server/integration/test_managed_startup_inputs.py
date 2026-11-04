@@ -42,6 +42,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests.server.helpers import build_agent_bundle, create_test_agent
 from tests.server.integration.test_managed_launch_failure_teardown import (
     _Env,
@@ -103,6 +104,7 @@ def auth_app(
             source="header", local_single_user=getattr(request, "param", False)
         ),
         host_store=HostStore(db_uri),
+        project_store=SqlAlchemyProjectStore(db_uri),
         sandbox_config=parse_sandbox_config(
             {
                 "provider": "modal",

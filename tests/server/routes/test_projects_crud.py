@@ -229,9 +229,15 @@ async def test_session_projects_unions_first_class_and_labels(
     resp = await project_client.get("/v1/sessions/projects")
     assert resp.status_code == 200
     assert resp.json() == [
-        {"id": both["id"], "name": "Both", "icon": None},
-        {"id": empty["id"], "name": "Empty FC", "icon": None},
-        {"id": None, "name": "Label Only", "icon": None},
+        {"id": both["id"], "name": "Both", "icon": None, "parent_id": None, "path": "Both"},
+        {
+            "id": empty["id"],
+            "name": "Empty FC",
+            "icon": None,
+            "parent_id": None,
+            "path": "Empty FC",
+        },
+        {"id": None, "name": "Label Only", "icon": None, "parent_id": None, "path": "Label Only"},
     ]
 
 
@@ -253,8 +259,8 @@ async def test_session_projects_surfaces_config_icon(
     resp = await project_client.get("/v1/sessions/projects")
     assert resp.status_code == 200
     assert resp.json() == [
-        {"id": fire["id"], "name": "Fire", "icon": "🔥"},
-        {"id": plain["id"], "name": "Plain", "icon": None},
+        {"id": fire["id"], "name": "Fire", "icon": "🔥", "parent_id": None, "path": "Fire"},
+        {"id": plain["id"], "name": "Plain", "icon": None, "parent_id": None, "path": "Plain"},
     ]
 
 

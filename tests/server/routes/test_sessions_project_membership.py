@@ -19,10 +19,17 @@ edit/read access to.
 
 from __future__ import annotations
 
+import uuid
+
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from sqlalchemy import update
+from sqlalchemy.orm import Session
 
+from omnigent.db.db_models import SqlProject
+from omnigent.db.utils import get_or_create_engine
 from omnigent.entities import MessageData, NewConversationItem
 from omnigent.errors import OmnigentError
 from omnigent.server.auth import (
@@ -33,6 +40,7 @@ from omnigent.server.auth import (
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.sessions import create_sessions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store import PROJECT_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -435,3 +443,171 @@ def test_project_listing_is_owner_scoped(db_uri: str) -> None:
     # (Bob's) does not surface: the listing is owner-scoped.
     alice_list = client.get("/v1/sessions?project=Shared", headers=_hdr(ALICE))
     assert alice_list.json()["data"] == []
+
+
+# ── Nested projects that share a leaf name ───────────────────────────────
+
+
+def _two_sub_projects(client: TestClient) -> dict[str, dict]:
+    """Create ``a/sub`` and ``b/sub``; return the four project objects by path."""
+    made: dict[str, dict] = {}
+    for path in ("a", "b"):
+        made[path] = client.post("/v1/projects", json={"name": path}).json()
+        made[f"{path}/sub"] = client.post(
+            "/v1/projects", json={"name": "sub", "parent_id": made[path]["id"]}
+        ).json()
+    return made
+
+
+def test_project_id_filter_separates_nested_projects_sharing_a_leaf_name(db_uri: str) -> None:
+    """Members and the project list go by id, so ``a/sub`` and ``b/sub`` never mix."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    first = conversations.create_conversation(title="one", agent_id=AGENT_ID)
+    second = conversations.create_conversation(title="two", agent_id=AGENT_ID)
+    client = TestClient(_single_user_app(db_uri))
+    made = _two_sub_projects(client)
+    for session, key in ((first, "a/sub"), (second, "b/sub")):
+        client.patch(f"/v1/sessions/{session.id}", json={"project_id": made[key]["id"]})
+
+    for session, key in ((first, "a/sub"), (second, "b/sub")):
+        listed = client.get("/v1/sessions", params={"project_id": made[key]["id"]})
+        assert [row["id"] for row in listed.json()["data"]] == [session.id]
+    assert client.get("/v1/sessions", params={"project_id": made["a"]["id"]}).json()["data"] == []
+
+    summaries = client.get("/v1/sessions/projects").json()
+    subs = sorted((row["path"], row["id"]) for row in summaries if row["name"] == "sub")
+    assert subs == sorted((key, made[key]["id"]) for key in ("a/sub", "b/sub"))
+    assert {row["parent_id"] for row in summaries if row["name"] == "sub"} == {
+        made["a"]["id"],
+        made["b"]["id"],
+    }
+
+
+def test_alias_list_project_filter_resolves_a_path_to_one_node(db_uri: str) -> None:
+    """``?project=a/sub`` lists only that node's aliases; a bare leaf name matches no root."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    client = TestClient(_single_user_app(db_uri))
+    made = _two_sub_projects(client)
+    handles = {}
+    for key in ("a/sub", "b/sub"):
+        session = conversations.create_conversation(title=key, agent_id=AGENT_ID)
+        client.patch(f"/v1/sessions/{session.id}", json={"project_id": made[key]["id"]})
+        assert client.put(
+            f"/v1/sessions/{session.id}/alias", json={"alias": "Architect"}
+        ).is_success
+        handles[key] = session.id
+
+    listed = client.get("/v1/sessions/aliases", params={"project": "a/sub"}).json()["data"]
+    assert [(row["session_id"], row["handle"]) for row in listed] == [
+        (handles["a/sub"], "a/sub/Architect")
+    ]
+    assert client.get("/v1/sessions/aliases", params={"project": "sub"}).json()["data"] == []
+    assert len(client.get("/v1/sessions/aliases").json()["data"]) == 2
+
+
+def test_same_alias_is_allowed_in_nested_siblings_and_rejected_within_one(db_uri: str) -> None:
+    """Alias uniqueness is scoped to the project id, not the leaf name."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    client = TestClient(_single_user_app(db_uri))
+    made = _two_sub_projects(client)
+    sessions = {}
+    for label, key in (("one", "a/sub"), ("two", "a/sub"), ("three", "b/sub")):
+        session = conversations.create_conversation(title=label, agent_id=AGENT_ID)
+        client.patch(f"/v1/sessions/{session.id}", json={"project_id": made[key]["id"]})
+        sessions[label] = session.id
+    put = lambda label: client.put(  # noqa: E731
+        f"/v1/sessions/{sessions[label]}/alias", json={"alias": "Bench"}
+    )
+    assert put("one").status_code == 200
+    assert put("three").status_code == 200
+    assert put("two").status_code == 409
+
+
+def test_resolve_endpoint_and_legacy_slash_projects(db_uri: str) -> None:
+    """``/projects/resolve`` finds one node; legacy ``x/y`` names are found but stay leaf roots."""
+    from sqlalchemy.orm import Session
+
+    from omnigent.db.db_models import SqlProject
+    from omnigent.db.utils import get_or_create_engine
+
+    client = TestClient(_single_user_app(db_uri))
+    made = _two_sub_projects(client)
+    legacy_id = "5" * 32
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.add(SqlProject(id=legacy_id, name="x/y", user_id=None, created_at=1))
+        session.commit()
+
+    resolved = client.get("/v1/projects/resolve", params={"path": "A/Sub"})
+    assert resolved.status_code == 200 and resolved.json()["id"] == made["a/sub"]["id"]
+    assert client.get("/v1/projects/resolve", params={"path": "a/nope"}).status_code == 404
+    flat = client.get("/v1/projects/resolve", params={"path": "x/y"})
+    assert flat.status_code == 200 and flat.json()["id"] == legacy_id
+    listed = client.get("/v1/projects", params={"path": "x/y"}).json()["data"]
+    assert [row["id"] for row in listed] == [legacy_id]
+
+    # A save that echoes the legacy name keeps working; a legacy project is never a parent.
+    saved = client.patch(
+        f"/v1/projects/{legacy_id}", json={"name": "x/y", "config": {"icon": "i"}}
+    )
+    assert saved.status_code == 200 and saved.json()["config"] == {"icon": "i"}
+    child = client.post("/v1/projects", json={"name": "kid", "parent_id": legacy_id})
+    assert child.status_code == 400
+    moved = client.patch(f"/v1/projects/{made['b']['id']}", json={"parent_id": legacy_id})
+    assert moved.status_code == 400
+
+
+@pytest.mark.parametrize("label_session_first", [False, True])
+def test_label_only_session_shares_the_alias_namespace_of_its_root_project(
+    db_uri: str, label_session_first: bool
+) -> None:
+    """A filed member and a label-only member of ``Work`` cannot both hold ``Work/Bench``."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    client = TestClient(_single_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "Work"}).json()
+    filed = conversations.create_conversation(title="filed", agent_id=AGENT_ID)
+    client.patch(f"/v1/sessions/{filed.id}", json={"project_id": project["id"]})
+    labelled = conversations.create_conversation(title="labelled", agent_id=AGENT_ID)
+    conversations.set_labels(labelled.id, {PROJECT_LABEL_KEY: "Work"})
+    first, second = (labelled, filed) if label_session_first else (filed, labelled)
+
+    assert client.put(f"/v1/sessions/{first.id}/alias", json={"alias": "Bench"}).status_code == 200
+    assert (
+        client.put(f"/v1/sessions/{second.id}/alias", json={"alias": "Bench"}).status_code == 409
+    )
+
+
+def test_project_id_filter_rejects_a_malformed_id(db_uri: str) -> None:
+    client = TestClient(_single_user_app(db_uri))
+    response = client.get("/v1/sessions", params={"project_id": "not-a-uuid"})
+    assert 400 <= response.status_code < 500, response.text
+
+
+def test_project_routes_accept_a_dashed_id(db_uri: str) -> None:
+    client = TestClient(_single_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "n"}).json()
+    dashed = str(uuid.UUID(project["id"]))
+    renamed = client.patch(f"/v1/projects/{dashed}", json={"name": "m"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["path"] == "m"
+    assert client.delete(f"/v1/projects/{dashed}").status_code == 200
+
+
+def test_the_patch_migrate_slashes_describes_is_accepted(db_uri: str) -> None:
+    """``PATCH {name, parent_id}`` for a printed step turns a legacy ``a/b`` into a tree node."""
+    client = TestClient(_single_user_app(db_uri))
+    legacy = client.post("/v1/projects", json={"name": "seed"}).json()
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.execute(update(SqlProject).where(SqlProject.id == legacy["id"]).values(name="a/b"))
+        session.commit()
+    parent = client.post("/v1/projects", json={"name": "a"}).json()
+
+    patched = client.patch(
+        f"/v1/projects/{legacy['id']}", json={"name": "b", "parent_id": parent["id"]}
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["path"] == "a/b"

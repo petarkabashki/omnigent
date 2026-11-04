@@ -48,6 +48,11 @@ def list_aliases(client: httpx.Client, project: str | None = None) -> list[dict[
     return list(_checked(client.get("/v1/sessions/aliases", params=params)).get("data", []))
 
 
+def list_projects(client: httpx.Client) -> list[dict[str, Any]]:
+    """The caller's first-class projects, with ``parent_id`` and computed ``path``."""
+    return list(_checked(client.get("/v1/projects")).get("data", []))
+
+
 def resolve_address(client: httpx.Client, address: str) -> dict[str, Any]:
     """Resolve a session id, ``project/Role`` or (unfiled) ``Role``."""
     return dict(_checked(client.get("/v1/sessions/aliases/resolve", params={"address": address})))

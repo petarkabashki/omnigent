@@ -1913,6 +1913,18 @@
             "description": "Human-readable project name. Trimmed; must be non-empty and at most 100 characters; unique among the caller's projects.",
             "title": "Name",
             "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parent project to nest under; omitted / `null` creates a root. The name is one path segment: no `/`, not `.` or `..`.",
+            "title": "Parent Id"
           }
         },
         "required": [
@@ -8097,7 +8109,7 @@
         "type": "object"
       },
       "SessionProjectSummary": {
-        "description": "One entry of `GET /v1/sessions/projects` \u2014 a sidebar project folder.\n\nDual-read union of first-class projects and legacy `omni_project`\nlabel-projects, keyed by name.",
+        "description": "One entry of `GET /v1/sessions/projects` \u2014 a sidebar project folder.\n\nDual-read union of first-class projects and legacy `omni_project`\nlabel-projects. First-class entries are keyed by id (two nested projects may\nshare a leaf name); a label-project merges only into a root of the same name.",
         "properties": {
           "icon": {
             "anyOf": [
@@ -8124,9 +8136,33 @@
             "title": "Id"
           },
           "name": {
-            "description": "Project name (the folder's display name and union key).",
+            "description": "Project name (the folder's display name; one path segment).",
             "title": "Name",
             "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parent project id for a nested first-class project, else `None`.",
+            "title": "Parent Id"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Namespace path (`a/b`); the name for roots and label-projects.",
+            "title": "Path"
           }
         },
         "required": [
@@ -10671,6 +10707,18 @@
             ],
             "description": "New project name. `None` leaves it unchanged; otherwise trimmed, non-empty, at most 100 characters.",
             "title": "Name"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Move under this project; an explicit `null` moves to the root and omitting the field leaves the parent unchanged.",
+            "title": "Parent Id"
           }
         },
         "title": "UpdateProjectRequest",
@@ -13824,8 +13872,27 @@
     },
     "/v1/projects": {
       "get": {
-        "description": "List the caller's projects.\n\n**Returns:** `{\"object\": \"list\", \"data\": [...]}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated in multi-user mode.",
+        "description": "List the caller's projects, or the one at `?path=a/b`.\n\n**Returns:** `{\"object\": \"list\", \"data\": [...]}`; empty when `path` matches nothing.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated in multi-user mode, 409 if `path` matches several sibling projects that differ only by case, or both a tree project and a different legacy `a/b`-named one.",
         "operationId": "list_projects_v1_projects_get",
+        "parameters": [
+          {
+            "description": "When set, tree-walk this namespace path (case-insensitive segments) instead of listing everything.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Path"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -13838,6 +13905,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Projects",
@@ -13945,6 +14022,52 @@
           }
         },
         "summary": "Save Project Order",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/v1/projects/resolve": {
+      "get": {
+        "description": "Resolve a namespace path (`a/b`) to exactly one of the caller's projects.\n\n**Returns:** The project as a serialized dict (with its `path`).\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if nothing matches, 409 if the path is ambiguous.",
+        "operationId": "resolve_project_v1_projects_resolve_get",
+        "parameters": [
+          {
+            "description": "Namespace path; segments match case-insensitively.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve Project V1 Projects Resolve Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Project",
         "tags": [
           "projects"
         ]
@@ -14590,6 +14713,23 @@
             }
           },
           {
+            "description": "Filter to members of this first-class project id (owner-scoped; no legacy label match). Unlike `project` it is unambiguous when nested projects share a leaf name.",
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
             "description": "When `True`, return only sessions the user has pinned (the `omnigent.pinned` label). Lets the sidebar enumerate pinned sessions that fall outside the loaded pagination window. `False` (default) disables it.",
             "in": "query",
             "name": "pinned",
@@ -14671,7 +14811,7 @@
     },
     "/v1/sessions/aliases": {
       "get": {
-        "description": "List the caller's live aliased sessions, optionally by project name or alias.",
+        "description": "List the caller's live aliased sessions, optionally by project path or alias.",
         "operationId": "list_session_aliases_v1_sessions_aliases_get",
         "parameters": [
           {
@@ -14806,7 +14946,7 @@
     },
     "/v1/sessions/projects": {
       "get": {
-        "description": "Return the caller's project summaries in their preferred display order.\n\nDual-reads both project representations and unions them by name:\n- **First-class projects** (`project_store`) \u2014 carry an `id` and\n  appear even when empty (the whole point of the first-class entity).\n- **Legacy label-projects** (implicit `omni_project` label) \u2014 exist\n  while at least one owned session carries the label; `id` is\n  `None` until such a project is promoted to first-class.\n\nA name present in both sources collapses to one entry that keeps the\nfirst-class `id`. Filing is owner-only, so both halves are scoped to\nthe caller (label-projects to their owned sessions, first-class to\ntheir owned rows) \u2014 a project shared to them but owned by another user\ndoes not surface as one of their own folders.\n\n**Returns:** Project summaries in custom order, or alphabetical order by default.",
+        "description": "Return the caller's project summaries in their preferred display order.\n\nDual-reads both project representations and unions them (first-class by\nid, label-projects by name against root projects):\n- **First-class projects** (`project_store`) \u2014 carry an `id` and\n  appear even when empty (the whole point of the first-class entity).\n- **Legacy label-projects** (implicit `omni_project` label) \u2014 exist\n  while at least one owned session carries the label; `id` is\n  `None` until such a project is promoted to first-class.\n\nA label name equal to a root project's name collapses into that entry,\nwhich keeps the first-class `id`. Filing is owner-only, so both halves are scoped to\nthe caller (label-projects to their owned sessions, first-class to\ntheir owned rows) \u2014 a project shared to them but owned by another user\ndoes not surface as one of their own folders.\n\n**Returns:** Project summaries in custom order, or alphabetical order by default.",
         "operationId": "list_session_projects_v1_sessions_projects_get",
         "responses": {
           "200": {

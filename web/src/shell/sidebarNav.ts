@@ -179,13 +179,15 @@ export function isOwnedByViewer(conversation: Conversation, viewerId: string | n
  */
 export function sessionBelongsToProject(
   conversation: Conversation,
-  project: { id: string | null; name: string },
+  project: { id: string | null; name: string; parent_id?: string | null },
   viewerId: string | null,
 ): boolean {
+  // A nested project shares its leaf name with others, so only roots (and
+  // label-only folders) match the legacy name label.
   return (
     isOwnedByViewer(conversation, viewerId) &&
     ((project.id !== null && conversation.project_id === project.id) ||
-      conversation.labels?.[PROJECT_LABEL_KEY] === project.name)
+      (!project.parent_id && conversation.labels?.[PROJECT_LABEL_KEY] === project.name))
   );
 }
 

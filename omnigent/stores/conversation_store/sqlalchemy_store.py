@@ -3078,6 +3078,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned_owner: str | None = None,
         title: str | None = None,
         has_label: str | None = None,
+        project_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3127,6 +3128,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param include_archived: When ``False`` (default), exclude
             rows where ``archived`` is true. When ``True``, include
             archived rows alongside non-archived ones.
+        :param project_id: Filter to members of this first-class project id
+            (``owned_by``'s project; no legacy label match). Takes precedence
+            over ``project``. ``None`` disables it.
         :param project: Filter by project NAME, dual-reading both storage
             paths. A non-empty string returns sessions that EITHER have a
             first-class membership (``metadata.project_id`` → ``owned_by``'s
@@ -3378,7 +3382,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     stmt = stmt.where(~title_match, content_match)
                 else:
                     stmt = stmt.where(or_(title_match, content_match))
-            if project is not None:
+            if project is not None or project_id is not None:
                 # Dual-read by project NAME: a session is "in <name>" if it has
                 # EITHER the first-class membership (metadata.project_id → the
                 # owner's project of that name) OR the legacy ``omni_project``
@@ -3389,7 +3393,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationLabel.workspace_id == current_workspace_id(),
                     SqlConversationLabel.key == PROJECT_LABEL_KEY,
                 )
-                if project == "":
+                if project == "" and project_id is None:
                     # Unfiled: no first-class membership AND no label.
                     first_class_stmt = select(SqlConversationMetadata.id).where(
                         SqlConversationMetadata.workspace_id == current_workspace_id(),
@@ -3428,7 +3432,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                             SqlConversationMetadata.workspace_id == current_workspace_id(),
                             SqlProject.workspace_id == current_workspace_id(),
                             SqlProject.user_id == owned_by,
-                            SqlProject.name == project,
+                            SqlProject.id == project_id
+                            if project_id is not None
+                            else SqlProject.name == project,
                         )
                     )
                     if self._conv_engine is self._engine:
@@ -3446,14 +3452,18 @@ class SqlAlchemyConversationStore(ConversationStore):
                             )
                         with self._session("list_conversations") as meta_sess:
                             member_match = list(meta_sess.execute(member_stmt).scalars())
-                    stmt = stmt.where(
-                        or_(
-                            SqlConversation.id.in_(member_match),
-                            SqlConversation.id.in_(
-                                label_filed.where(SqlConversationLabel.value == project)
-                            ),
+                    if project_id is not None:
+                        # By id: first-class members only, no legacy label match.
+                        stmt = stmt.where(SqlConversation.id.in_(member_match))
+                    else:
+                        stmt = stmt.where(
+                            or_(
+                                SqlConversation.id.in_(member_match),
+                                SqlConversation.id.in_(
+                                    label_filed.where(SqlConversationLabel.value == project)
+                                ),
+                            )
                         )
-                    )
             if pinned:
                 # Restrict to sessions the caller has pinned. Pins are per-user,
                 # so match the caller's own key (``omnigent.pinned.<user>``), not

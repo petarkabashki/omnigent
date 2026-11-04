@@ -5509,6 +5509,8 @@ class ProjectObject(BaseModel):
     created_at: int
     updated_at: int | None = None
     config: dict[str, Any] = Field(default_factory=dict)
+    parent_id: str | None = None
+    path: str | None = None
 
 
 class ProjectList(BaseModel):
@@ -5526,11 +5528,14 @@ class SessionProjectSummary(BaseModel):
     """One entry of ``GET /v1/sessions/projects`` — a sidebar project folder.
 
     Dual-read union of first-class projects and legacy ``omni_project``
-    label-projects, keyed by name.
+    label-projects. First-class entries are keyed by id (two nested projects may
+    share a leaf name); a label-project merges only into a root of the same name.
 
     :param id: First-class project id when one exists, or ``None`` for a
         label-only project not yet promoted to the ``projects`` table.
-    :param name: Project name (the folder's display name and union key).
+    :param name: Project name (the folder's display name; one path segment).
+    :param parent_id: Parent project id for a nested first-class project, else ``None``.
+    :param path: Namespace path (``a/b``); the name for roots and label-projects.
     :param icon: The project's chosen emoji icon (a unicode grapheme), read
         from its ``config``; ``None`` when unset or for a label-only folder,
         so the sidebar falls back to the default folder glyph.
@@ -5539,6 +5544,8 @@ class SessionProjectSummary(BaseModel):
     id: str | None = None
     name: str
     icon: str | None = None
+    parent_id: str | None = None
+    path: str | None = None
 
 
 class CreateProjectRequest(BaseModel):
@@ -5549,12 +5556,15 @@ class CreateProjectRequest(BaseModel):
         at most 100 characters; unique among the caller's projects.
     :param config: Optional default session settings (opaque JSON object).
         Omitted / empty stores no defaults.
+    :param parent_id: Parent project to nest under; omitted / ``null`` creates a root.
+        The name is one path segment: no ``/``, not ``.`` or ``..``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
+    parent_id: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -5570,6 +5580,10 @@ class CreateProjectRequest(BaseModel):
             raise ValueError("name must not be empty")
         if len(trimmed) > 100:
             raise ValueError("name must be at most 100 characters")
+        if "/" in trimmed:
+            raise ValueError("name must not contain '/'")
+        if trimmed in (".", ".."):
+            raise ValueError("name must not be '.' or '..'")
         return trimmed
 
 
@@ -5583,12 +5597,15 @@ class UpdateProjectRequest(BaseModel):
         trimmed, non-empty, at most 100 characters.
     :param config: New config object to replace the stored one. ``None`` leaves
         it unchanged; an empty object ``{}`` clears the stored defaults.
+    :param parent_id: Move under this project; an explicit ``null`` moves to the
+        root and omitting the field leaves the parent unchanged.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     config: dict[str, Any] | None = None
+    parent_id: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -5606,4 +5623,6 @@ class UpdateProjectRequest(BaseModel):
             raise ValueError("name must not be empty")
         if len(trimmed) > 100:
             raise ValueError("name must be at most 100 characters")
+        # '/' and reserved segments are rejected by the store only when the name
+        # changes, so a legacy name can be echoed back on a config save.
         return trimmed

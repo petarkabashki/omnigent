@@ -24,12 +24,14 @@ import {
   undoArchiveConversations,
   useConversations,
   useSessionSearch,
+  fetchAllProjectSessionIds,
   useDeleteProject,
   useProjects,
   useProjectConfig,
   useProjectSessions,
   useRenameProject,
   useUpdateProjectConfig,
+  resolveOrCreateProjectId,
   useMoveToProject,
   useRenameConversation,
   useStopAndDeleteConversation,
@@ -563,9 +565,9 @@ describe("useRenameProject", () => {
 
   it("returns the existing id for a first-class rename", async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ id: "proj_1", name: "Renamed" })); // PATCH rename
-    fetchMock.mockResolvedValueOnce(
-      mockResponse({ data: [], first_id: null, last_id: null, has_more: false }),
-    );
+    const emptyPage = { data: [], first_id: null, last_id: null, has_more: false };
+    fetchMock.mockResolvedValueOnce(mockResponse(emptyPage)); // members by project_id
+    fetchMock.mockResolvedValueOnce(mockResponse(emptyPage)); // legacy label sweep (root)
 
     const { result } = renderRenameHook();
     const id = await result.current.mutateAsync({
@@ -575,6 +577,44 @@ describe("useRenameProject", () => {
     });
 
     expect(id).toBe("proj_1");
+  });
+});
+
+describe("fetchAllProjectSessionIds", () => {
+  const page = (...rows: { id: string; project_id?: string | null }[]) =>
+    mockResponse({ data: rows, first_id: null, last_id: null, has_more: false });
+
+  // Nested projects can share a leaf name, so the `?project=<name>` filter alone
+  // would pull in another folder's members.
+  it("reads a nested folder by project_id only, never by the leaf name", async () => {
+    fetchMock.mockResolvedValueOnce(page({ id: "s1", project_id: "p1" }));
+
+    const ids = await fetchAllProjectSessionIds({ id: "p1", name: "sub", parent_id: "root" });
+
+    expect(ids).toEqual(["s1"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("project_id=p1");
+    expect(url).not.toMatch(/[?&]project=/);
+  });
+
+  it("adds label-only members of a root folder but skips namesakes filed elsewhere", async () => {
+    fetchMock.mockResolvedValueOnce(page({ id: "s1", project_id: "p1" }));
+    fetchMock.mockResolvedValueOnce(
+      page({ id: "s1", project_id: "p1" }, { id: "s2" }, { id: "s3", project_id: "other-sub" }),
+    );
+
+    const ids = await fetchAllProjectSessionIds({ id: "p1", name: "work" });
+
+    expect(ids.sort()).toEqual(["s1", "s2"]);
+    expect(fetchMock.mock.calls[1][0] as string).toContain("project=work");
+  });
+
+  it("reads a label-only folder by name", async () => {
+    fetchMock.mockResolvedValueOnce(page({ id: "s2" }));
+
+    expect(await fetchAllProjectSessionIds({ id: null, name: "legacy" })).toEqual(["s2"]);
+    expect(fetchMock.mock.calls[0][0] as string).toContain("project=legacy");
   });
 });
 
@@ -3474,8 +3514,8 @@ describe("useDeleteProject", () => {
   }
 
   it("archives + unfiles every member, then deletes the first-class project", async () => {
-    // 1st call: page of project members. Then one PATCH per member, then the
-    // DELETE of the first-class container.
+    // 1st call: members by project_id; 2nd: the legacy label sweep (a root
+    // folder). Then one PATCH per member, then the DELETE of the container.
     fetchMock
       .mockResolvedValueOnce(
         mockResponse({
@@ -3487,6 +3527,9 @@ describe("useDeleteProject", () => {
           last_id: "conv_b",
           has_more: false,
         }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({ data: [], first_id: null, last_id: null, has_more: false }),
       )
       .mockResolvedValueOnce(archivedConv("conv_a"))
       .mockResolvedValueOnce(archivedConv("conv_b"))
@@ -3501,15 +3544,17 @@ describe("useDeleteProject", () => {
     result.current.mutate({ id: "p_1", name: "Sprint 42" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    // The list fetch is filtered by project and includes archived members.
+    // The member fetch goes by project id (nested projects can share a leaf
+    // name) and includes archived members; the label sweep goes by name.
     const listUrl = fetchMock.mock.calls[0][0] as string;
-    expect(listUrl).toContain("project=Sprint+42");
+    expect(listUrl).toContain("project_id=p_1");
+    expect(fetchMock.mock.calls[1][0] as string).toContain("project=Sprint+42");
     expect(listUrl).toContain("include_archived=true");
     expect(listUrl).toContain("visibility=all");
 
     // Each member is archived AND detached (project_id cleared + label removed)
     // via PATCH — never deleted.
-    const patches = (fetchMock.mock.calls.slice(1, 3) as [string, RequestInit][]).map(
+    const patches = (fetchMock.mock.calls.slice(2, 4) as [string, RequestInit][]).map(
       ([url, init]) => ({ url, init }),
     );
     expect(patches.map((p) => p.url).sort()).toEqual([
@@ -3526,7 +3571,7 @@ describe("useDeleteProject", () => {
     }
 
     // Finally the first-class container is removed.
-    const [delUrl, delInit] = fetchMock.mock.calls[3] as [string, RequestInit];
+    const [delUrl, delInit] = fetchMock.mock.calls[4] as [string, RequestInit];
     expect(delUrl).toBe("/v1/projects/p_1");
     expect(delInit.method).toBe("DELETE");
 
@@ -3546,6 +3591,9 @@ describe("useDeleteProject", () => {
           last_id: "conv_b",
           has_more: false,
         }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({ data: [], first_id: null, last_id: null, has_more: false }),
       )
       .mockResolvedValueOnce(archivedConv("conv_a"))
       .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 403 }));
@@ -3831,4 +3879,87 @@ it("uses the configured API page size for archived initial loads and pagination"
   expect(calls[1].get("after")).toBe(first.last_id);
   unmount();
   client.clear();
+});
+
+describe("resolveOrCreateProjectId", () => {
+  const projects = [
+    { id: "p_a", name: "a", parent_id: null, path: "a" },
+    { id: "p_sub", name: "sub", parent_id: "p_a", path: "a/sub" },
+  ];
+  const posts = () =>
+    fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+
+  beforeEach(() => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return mockResponse({ id: "p_new", name: "sub" });
+      if (url.startsWith("/v1/projects/resolve")) {
+        return url.endsWith("a%2FSUB")
+          ? mockResponse(projects[1])
+          : mockResponse({ error: { message: "No project" } }, { ok: false, status: 404 });
+      }
+      return mockResponse({ object: "list", data: projects });
+    });
+  });
+
+  it("finds a nested project by its path without creating one", async () => {
+    await expect(resolveOrCreateProjectId("a/sub")).resolves.toBe("p_sub");
+    expect(posts()).toEqual([]);
+  });
+
+  it("lets the server match a nested path's case", async () => {
+    await expect(resolveOrCreateProjectId("a/SUB")).resolves.toBe("p_sub");
+    expect(posts()).toEqual([]);
+  });
+
+  it("rejects an unknown nested path and never creates it", async () => {
+    await expect(resolveOrCreateProjectId("a/missing")).rejects.toThrow();
+    expect(posts()).toEqual([]);
+  });
+
+  it("does not mistake a nested project's leaf name for a root", async () => {
+    await expect(resolveOrCreateProjectId("sub")).resolves.toBe("p_new");
+    expect(posts()).toHaveLength(1);
+  });
+});
+
+describe("useMoveToProject nested targets", () => {
+  it("overlays the nested folder's id-keyed page, not a same-named root's", async () => {
+    let release: (response: Response) => void = () => {};
+    fetchMock.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const row = { id: "conv_move", title: "t", labels: {}, project_id: null };
+    const page = (data: unknown[]) => ({
+      pages: [{ data, first_id: null, last_id: null, has_more: false }],
+      pageParams: [undefined],
+    });
+    queryClient.setQueryData(
+      ["projects"],
+      [
+        { id: "p_child", name: "sub", parent_id: "p_a", path: "a/sub" },
+        { id: "p_root", name: "sub", parent_id: null, path: "sub" },
+      ],
+    );
+    queryClient.setQueryData(["project-sessions", "free"], page([row]));
+    queryClient.setQueryData(["project-sessions", "p_child", "updated_at", false], page([]));
+    queryClient.setQueryData(["project-sessions", "sub", "updated_at", false], page([]));
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useMoveToProject(), { wrapper });
+
+    result.current.mutate({ id: "conv_move", project: "a/sub" });
+
+    const ids = (key: unknown[]) =>
+      queryClient
+        .getQueryData<ConversationsInfiniteData>(key)
+        ?.pages.flatMap((p) => p.data.map((c) => c.id));
+    await waitFor(() =>
+      expect(ids(["project-sessions", "p_child", "updated_at", false])).toEqual(["conv_move"]),
+    );
+    expect(ids(["project-sessions", "sub", "updated_at", false])).toEqual([]);
+    release(mockResponse({ object: "list", data: [] }));
+  });
 });
