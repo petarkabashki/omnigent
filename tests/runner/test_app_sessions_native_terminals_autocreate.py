@@ -36,6 +36,7 @@ from omnigent.harnesses.claude_native.bridge import (
     ClaudeNativeHookInterpreterMismatchError,
     bridge_dir_for_bridge_id,
     prepare_bridge_dir,
+    read_launch_epoch,
     read_permission_hook_config,
     record_launch_epoch,
 )
@@ -71,8 +72,16 @@ from omnigent.runner.app import (
     _publish_terminal_pending,
     _terminal_lookup_miss_log_state,
 )
-from omnigent.runner.native.claude_reset import local_resume_hint_epoch
-from omnigent.runner.native.orchestration import _build_pi_native_args
+from omnigent.runner.native import orchestration
+from omnigent.runner.native.orchestration import (
+    _CLAUDE_LAUNCH_REFUSED_MESSAGE,
+    NativeLaunchContext,
+    _build_pi_native_args,
+    _claude_launch_redrives,
+    _ClaudeLaunchRefusedError,
+    _ensure_native_terminal,
+    _launch_claude,
+)
 from omnigent.runner.resource_registry import (
     CLAUDE_NATIVE_TERMINAL_ROLE,
     KIRO_NATIVE_TERMINAL_ROLE,
@@ -3441,29 +3450,152 @@ async def test_auto_create_claude_fork_preserves_history_in_another_workspace(
         assert source_path.read_text(encoding="utf-8") == source_text + "\n"
 
 
+def _claude_terminal_view(session_id: str) -> SessionResourceView:
+    return SessionResourceView(
+        id="terminal_claude_main",
+        type="terminal",
+        session_id=session_id,
+        name="claude:main",
+        metadata={"terminal_name": "claude", "session_key": "main", "running": True},
+    )
+
+
+class _StatusResponse(NullServerClient._Response):
+    """Server response with an error status and no body."""
+
+    headers = httpx.Headers()
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+async def _skip_retry_delay(delay: float) -> None:
+    del delay
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("stamped_epoch", "server_epoch", "has_hint", "resumes"),
+    ("has_hint", "stamped_epoch"),
     [
-        pytest.param(None, 0, True, True, id="never-reset"),
-        pytest.param(1, 1, True, True, id="hint-from-current-epoch"),
-        pytest.param(0, 1, True, False, id="hint-predates-reset"),
-        pytest.param(None, 1, True, False, id="unstamped-hint-after-reset"),
-        pytest.param(0, 1, False, False, id="reset-wiped-the-hint"),
+        pytest.param(True, 0, id="never-reset-with-a-mirrored-id"),
+        pytest.param(False, 1, id="after-a-reset"),
+    ],
+)
+async def test_auto_create_claude_terminal_refuses_while_the_session_read_keeps_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_hint: bool,
+    stamped_epoch: int,
+) -> None:
+    """Without the epoch nothing launches, and nothing a retry needs is disturbed."""
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._launch_config_retry_sleep", _skip_retry_delay
+    )
+    session_id = "5cdbea97a2fb0c659bc09605401e2bb2"
+    bridge_dir = bridge_dir_for_bridge_id(session_id)
+    bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if has_hint:
+        (bridge_dir / "state.json").write_text(
+            json.dumps({"claude_session_id": "3d10247d-c3c0-4689-8cbd-862d7453bf70"}),
+            encoding="utf-8",
+        )
+    record_launch_epoch(bridge_dir, stamped_epoch)
+    (bridge_dir / "context.json").write_text("{}", encoding="utf-8")
+    bridge_before = {path.name: path.read_bytes() for path in bridge_dir.iterdir()}
+    server_writes: list[str] = []
+    launches: list[Any] = []
+
+    class _UnavailableServerClient(NullServerClient):
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            del url, kwargs
+            return _StatusResponse(503)
+
+        async def patch(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            del kwargs
+            server_writes.append(url)
+            return _StatusResponse(503)
+
+    class _RecordingRegistry(SessionResourceRegistry):
+        terminal_registry = None
+
+        async def get_terminal_resource(self, session_id: str, terminal_id: str) -> None:
+            del session_id, terminal_id
+
+        async def launch_required_terminal(self, **kwargs: Any) -> SessionResourceView:
+            launches.append(kwargs)
+            raise AssertionError("a refused launch must not start a terminal")
+
+    published: list[dict[str, Any]] = []
+    never_ending_redrive = asyncio.Event()
+
+    async def _redrive(_session_id: str, _harness_name: str | None) -> None:
+        await never_ending_redrive.wait()
+
+    monkeypatch.setattr(orchestration, "_LAUNCH_REDRIVE_BASE_DELAY_S", 3600.0)
+    ensure_locks: dict[str, asyncio.Lock] = {}
+    response = await _ensure_native_terminal(
+        "claude",
+        NativeLaunchContext(
+            session_id=session_id,
+            resource_registry=_RecordingRegistry(),
+            publish_event=lambda _sid, event: published.append(dict(event)),
+            server_client=_UnavailableServerClient(),  # type: ignore[arg-type]
+            redrive_launch=_redrive,
+        ),
+        ensure_locks=ensure_locks,
+    )
+
+    # The owner sees why it stopped, and nothing blocks recovery while the re-drive waits.
+    error = json.loads(response.body)["error"]
+    assert (response.status_code, error["code"]) == (500, "native_terminal_start_failed")
+    assert error["message"].startswith(_CLAUDE_LAUNCH_REFUSED_MESSAGE)
+    failed = [event for event in published if event.get("status") == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"]["message"].startswith(_CLAUDE_LAUNCH_REFUSED_MESSAGE)
+    assert not ensure_locks[session_id].locked()
+    redrive = _claude_launch_redrives[session_id]
+    assert not redrive.done()
+    redrive.cancel()
+    await asyncio.gather(redrive, return_exceptions=True)
+    assert launches == []
+    assert server_writes == []
+    assert {path.name: path.read_bytes() for path in bridge_dir.iterdir()} == bridge_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stamped_epoch", "server_epoch", "has_hint", "resumes", "failed_reads"),
+    [
+        pytest.param(None, 0, True, True, 0, id="never-reset"),
+        pytest.param(1, 1, True, True, 0, id="hint-from-current-epoch"),
+        pytest.param(0, 1, True, False, 0, id="hint-predates-reset"),
+        pytest.param(None, 1, True, False, 0, id="unstamped-hint-after-reset"),
+        pytest.param(0, 1, False, False, 0, id="reset-wiped-the-hint"),
+        pytest.param(0, None, True, False, 0, id="session-404-with-stamped-hint"),
+        pytest.param(None, None, True, False, 0, id="session-404-with-unstamped-hint"),
+        pytest.param(1, 1, True, True, 1, id="read-recovers-after-a-503"),
+        pytest.param(1, 1, True, True, 3, id="refused-launch-resumes-when-the-server-returns"),
+        pytest.param(0, 1, True, False, 3, id="reset-during-the-outage-is-not-undone"),
     ],
 )
 async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_bridge_sid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stamped_epoch: int | None,
-    server_epoch: int,
+    server_epoch: int | None,
     has_hint: bool,
     resumes: bool,
+    failed_reads: int,
 ) -> None:
     """Fallback fires when server GET omits external_session_id but local bridge has it.
 
     A hint recorded before the session's latest context reset is ignored, so a
-    reset the runner never saw does not resume the pre-reset Claude chat.
+    reset the runner never saw does not resume the pre-reset Claude chat. When
+    the server has no such session (``server_epoch`` is ``None``) the epoch is
+    unknown, so the hint is not trusted and the launch stamps nothing. A read
+    that keeps failing refuses the launch, and the next attempt resumes.
 
     Simulates the workspace-scope miss (ES-2065116): the server snapshot
     returns no external_session_id, but the bridge state.json from the
@@ -3491,6 +3623,9 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
         )
     if stamped_epoch is not None:
         record_launch_epoch(pre_bridge_dir, stamped_epoch)
+    status_files = [pre_bridge_dir / "context.json", pre_bridge_dir / "context_raw.json"]
+    for status_file in status_files:
+        status_file.write_text("{}", encoding="utf-8")
 
     synth_calls: list[str] = []
 
@@ -3524,6 +3659,11 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
         _capture_forwarder,
     )
 
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._launch_config_retry_sleep", _skip_retry_delay
+    )
+    session_reads = 0
+
     class _NullBindingServerClient(NullServerClient):
         """Server client whose session snapshot omits external_session_id."""
 
@@ -3536,6 +3676,13 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
                         return {"labels": {}}
 
                 return _LabelsResponse()
+
+            nonlocal session_reads
+            session_reads += 1
+            if session_reads <= failed_reads:
+                return _StatusResponse(503)
+            if server_epoch is None:
+                return _StatusResponse(404)
 
             # Session snapshot has no external_session_id (workspace-scope miss).
             class _SnapResponse(NullServerClient._Response):
@@ -3559,25 +3706,47 @@ async def test_auto_create_claude_terminal_cold_resume_fallback_uses_pre_wipe_br
         ) -> SessionResourceView:
             del terminal_name, session_key
             launched_specs.append(spec)
-            return SessionResourceView(
-                id="terminal_claude_main",
-                type="terminal",
-                session_id=session_id,
-                name="claude:main",
-                metadata={"terminal_name": "claude", "session_key": "main", "running": True},
-            )
+            return _claude_terminal_view(session_id)
+
+        async def get_terminal_resource(
+            self, session_id: str, terminal_id: str
+        ) -> SessionResourceView | None:
+            del terminal_id
+            return _claude_terminal_view(session_id) if launched_specs else None
 
     launched_specs: list[Any] = []
-    await _auto_create_claude_terminal(
-        session_id,
-        _FakeResourceRegistry(),
-        lambda _sid, _evt: None,
-        server_client=_NullBindingServerClient(),  # type: ignore[arg-type]
-    )
+    if failed_reads >= 3:
+
+        async def _redrive(_session_id: str, _harness_name: str | None) -> None:
+            await _launch_claude(launch_ctx)
+
+        monkeypatch.setattr(orchestration, "_LAUNCH_REDRIVE_BASE_DELAY_S", 0.0)
+        launch_ctx = NativeLaunchContext(
+            session_id=session_id,
+            resource_registry=_FakeResourceRegistry(),
+            publish_event=lambda _sid, _evt: None,
+            server_client=_NullBindingServerClient(),  # type: ignore[arg-type]
+            redrive_launch=_redrive,
+        )
+        with pytest.raises(_ClaudeLaunchRefusedError):
+            await _launch_claude(launch_ctx)
+        assert launched_specs == []
+        await asyncio.wait_for(_claude_launch_redrives[session_id], timeout=5)
+        assert len(launched_specs) == 1
+    else:
+        await _auto_create_claude_terminal(
+            session_id,
+            _FakeResourceRegistry(),
+            lambda _sid, _evt: None,
+            server_client=_NullBindingServerClient(),  # type: ignore[arg-type]
+        )
 
     await asyncio.sleep(0)
 
-    assert local_resume_hint_epoch(bridge_dir_for_bridge_id(session_id)) == server_epoch
+    assert read_launch_epoch(bridge_dir_for_bridge_id(session_id)) == server_epoch
+    # A reset no runner saw must not leave the old conversation's cost total behind.
+    snapshot_kept = server_epoch is not None and (stamped_epoch or 0) >= server_epoch
+    assert [path.exists() for path in status_files] == [snapshot_kept, snapshot_kept]
     launch_args = repr(launched_specs[0])
     if not resumes:
         assert synth_calls == []

@@ -14,7 +14,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from omnigent.harnesses.claude_native.bridge import clear_claude_session_state, read_launch_epoch
+from omnigent.harnesses.claude_native.bridge import (
+    clear_claude_session_state,
+    clear_claude_status_snapshot,
+    read_launch_epoch,
+)
 from omnigent.harnesses.claude_native.forwarder import reset_transcript_forward_state
 
 
@@ -48,6 +52,7 @@ def wipe_claude_resume_state(bridge_dir: Path) -> None:
     :param bridge_dir: The session's Claude bridge directory.
     """
     clear_claude_session_state(bridge_dir)
+    clear_claude_status_snapshot(bridge_dir)
     reset_transcript_forward_state(bridge_dir)
 
 

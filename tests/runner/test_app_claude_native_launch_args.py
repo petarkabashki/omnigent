@@ -18,24 +18,35 @@ import logging
 import os
 import shlex
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
+import httpx
 import pytest
 
+from omnigent.errors import OmnigentError
 from omnigent.harnesses.claude_native.main import (
     ClaudeNativeUcodeConfig,
     build_native_claude_terminal_env,
 )
+from omnigent.runner import pending_approvals
 from omnigent.runner.app import _build_claude_native_base_args, _claude_terminal_env_unset
 from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
 from omnigent.runner.native.orchestration import (
+    _CLAUDE_LAUNCH_REFUSED_MESSAGE,
     _ROUTED_SPAWN_ALLOWED_TOOLS,
+    NativeLaunchContext,
     _claude_launch_metadata_from_envelope,
     _claude_launch_permission_mode,
+    _ClaudeLaunchRefusedError,
     _load_claude_launch_metadata,
     _load_legacy_claude_launch_metadata,
+    _native_terminal_start_error_payload,
+    _redrive_refused_claude_launch,
     _routed_spawn_launch_args,
 )
+from omnigent.runner.resource_registry import SessionResourceRegistry
 from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
 
 
@@ -933,6 +944,217 @@ async def test_legacy_metadata_loader_reads_the_auto_harness_flag(
     assert metadata.auto_harness is expected
 
 
+@pytest.mark.parametrize(
+    ("respond", "expected_epoch"),
+    [
+        pytest.param(lambda: httpx.Response(404), None, id="not-found"),
+        pytest.param(lambda: httpx.Response(403), None, id="forbidden"),
+        pytest.param(lambda: httpx.Response(429), None, id="rate-limited"),
+        pytest.param(lambda: httpx.Response(200, json={}), 0, id="server-without-epochs"),
+        pytest.param(lambda: httpx.Response(200, json={"context_epoch": 2}), 2, id="known"),
+    ],
+)
+async def test_legacy_metadata_only_lets_a_client_error_launch_with_an_unknown_epoch(
+    respond: Callable[[], httpx.Response], expected_epoch: int | None
+) -> None:
+    """A 4xx launches without the hint, once, and must not pass for a session never reset."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return respond()
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        metadata = await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert metadata.context_epoch == expected_epoch
+
+
+@pytest.fixture
+def no_launch_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def skip_delay(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._launch_config_retry_sleep", skip_delay
+    )
+
+
+async def test_legacy_metadata_rides_out_a_transient_session_read_failure(
+    no_launch_retry_delay: None,
+) -> None:
+    responses = [httpx.Response(503), httpx.Response(200, json={"context_epoch": 2})]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return responses.pop(0)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        metadata = await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert metadata.context_epoch == 2
+
+
+@pytest.mark.parametrize(
+    "status",
+    [pytest.param(503, id="unavailable"), pytest.param(500, id="internal-error")],
+)
+async def test_legacy_metadata_refuses_when_the_session_read_keeps_failing(
+    no_launch_retry_delay: None, status: int
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        with pytest.raises(_ClaudeLaunchRefusedError):
+            await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert len(requests) == 3
+    # Reads run under the ensure lock, so one slow server can't hold it for a minute.
+    assert {request.extensions["timeout"]["read"] for request in requests} == {5.0}
+
+
+async def test_legacy_metadata_refuses_after_repeated_transport_errors(
+    no_launch_retry_delay: None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("server down", request=request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        with pytest.raises(_ClaudeLaunchRefusedError):
+            await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert len(requests) == 3
+
+
+def test_refused_launch_message_reaches_the_owner_verbatim() -> None:
+    refusal = _ClaudeLaunchRefusedError(_CLAUDE_LAUNCH_REFUSED_MESSAGE)
+
+    payload = _native_terminal_start_error_payload(refusal, "Claude", session_id="conv_abc")
+
+    assert payload["message"] == (
+        "Claude did not start because the Omnigent server did not respond, so this session's "
+        "state could not be confirmed. Your session and chat are safe and nothing was changed. "
+        "Omnigent will keep retrying for up to 15 minutes and start Claude when the server is "
+        "back. A message that triggered this stays in the chat but was not sent to Claude, so "
+        "send it again after Claude starts. If Claude has not started after 15 minutes, send a "
+        f"message to try again. Error ID: {payload['error_id']}."
+    )
+
+
+class _RedriveHarness:
+    """A refused launch's context with a recorded ensure and a scripted pane."""
+
+    def __init__(self, respond: Callable[[], httpx.Response], *, launch_starts_pane: bool) -> None:
+        self.ensures: list[tuple[str, str | None]] = []
+        self.events: list[dict[str, Any]] = []
+        self.pane: object | None = None
+        self.launch_starts_pane = launch_starts_pane
+        self.client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: respond()), base_url="http://runner"
+        )
+        self.ctx = NativeLaunchContext(
+            session_id="conv_abc",
+            resource_registry=cast(SessionResourceRegistry, self),
+            publish_event=lambda _session_id, event: self.events.append(dict(event)),
+            server_client=self.client,
+            redrive_launch=self._ensure,
+        )
+
+    async def get_terminal_resource(self, session_id: str, terminal_id: str) -> object | None:
+        del session_id, terminal_id
+        return self.pane
+
+    async def _ensure(self, session_id: str, harness_name: str | None) -> None:
+        self.ensures.append((session_id, harness_name))
+        if self.launch_starts_pane:
+            self.pane = object()
+
+
+@pytest.fixture
+def quick_redrive(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestration = "omnigent.runner.native.orchestration"
+    monkeypatch.setattr(f"{orchestration}._LAUNCH_REDRIVE_BASE_DELAY_S", 0.0)
+    monkeypatch.setattr(f"{orchestration}._LAUNCH_REDRIVE_MAX_DELAY_S", 0.0)
+    monkeypatch.setattr(f"{orchestration}._LAUNCH_REDRIVE_WINDOW_S", 0.05)
+
+
+async def test_redrive_launches_once_when_the_server_answers_and_clears_the_failure(
+    quick_redrive: None,
+) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=True)
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == [("conv_abc", "claude-native")]
+    assert [event["status"] for event in harness.events] == ["running", "idle"]
+
+
+async def test_redrive_stops_at_its_launch_bound_when_launches_keep_failing(
+    quick_redrive: None,
+) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=False)
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert len(harness.ensures) == 3
+    assert harness.events == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [pytest.param(503, id="server-still-down"), pytest.param(404, id="session-deleted-meanwhile")],
+)
+async def test_redrive_never_launches_without_a_readable_session(
+    quick_redrive: None, status: int
+) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(status), launch_starts_pane=True)
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == []
+
+
+async def test_redrive_leaves_a_pane_someone_else_started_alone(quick_redrive: None) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=True)
+    harness.pane = object()
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == []
+    assert harness.events == []
+
+
+async def test_redrive_wakes_on_tunnel_reconnect_rather_than_its_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._LAUNCH_REDRIVE_BASE_DELAY_S", 3600.0
+    )
+    harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=True)
+    redrive = asyncio.create_task(_redrive_refused_claude_launch(harness.ctx))
+    await asyncio.sleep(0.01)
+    assert harness.ensures == []
+
+    pending_approvals.notify_server_reconnect()
+    await asyncio.wait_for(redrive, timeout=5)
+
+    assert harness.ensures == [("conv_abc", "claude-native")]
+
+
 async def test_runner_launch_error_is_logged_before_cancellable_diagnostic_drain(
     bridge_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1218,7 +1440,7 @@ def test_claude_terminal_launch_cwd_rejects_an_unsearchable_env_chdir_target(
     tmp_path: Path,
 ) -> None:
     """``env -C`` cannot enter a directory without search permission, so seeding stops."""
-    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.errors import ErrorCode
     from omnigent.inner.datamodel import OSEnvSpec, TerminalEnvSpec
     from omnigent.runner.native import orchestration
 
@@ -1655,7 +1877,7 @@ async def test_auto_create_claude_terminal_rejects_missing_env_chdir_target(
     """
     from unittest.mock import Mock
 
-    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.errors import ErrorCode
     from omnigent.runner.resource_registry import SessionResourceRegistry
 
     workspace = tmp_path / "workspace"

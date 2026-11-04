@@ -30,6 +30,9 @@ def test_launch_bridge_id_keeps_a_cleared_sessions_own_bridge(
 
 def test_wipe_removes_the_resume_hint(tmp_path: Path) -> None:
     (tmp_path / "state.json").write_text(json.dumps({"claude_session_id": "old"}))
+    # The previous conversation's cost total must not reach the next launch.
+    (tmp_path / "context.json").write_text(json.dumps({"total_cost_usd": 10.0}))
+    (tmp_path / "context_raw.json").write_text(json.dumps({"cost": {"total_cost_usd": 10.0}}))
     unrelated = tmp_path / "keep.txt"
     unrelated.write_text("x")
 
@@ -38,6 +41,8 @@ def test_wipe_removes_the_resume_hint(tmp_path: Path) -> None:
     wipe_claude_resume_state(tmp_path)
 
     assert not (tmp_path / "state.json").exists()
+    assert not (tmp_path / "context.json").exists()
+    assert not (tmp_path / "context_raw.json").exists()
     assert unrelated.exists()
 
 

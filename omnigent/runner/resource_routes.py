@@ -409,6 +409,7 @@ def register_resource_routes(
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
                 rebind_bridge=_rebind_claude_bridge,
+                redrive_launch=_ensure_native_terminal_for_turn,
             )
             _ensure_build: (
                 Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None

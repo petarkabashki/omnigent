@@ -4,7 +4,7 @@ import hashlib
 import math
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -420,6 +420,39 @@ def _is_addable_usage_increment(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return math.isfinite(value) and value >= 0
+
+
+#: ``session_usage`` key holding the totals a native report rebases on after a reset.
+CONTEXT_RESET_BASE_KEY = "context_reset_base"
+_CONTEXT_RESET_BASE_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def capture_context_reset_base(usage: dict[str, Any], epoch: int) -> None:
+    """
+    Record *usage*'s totals as the base for reports from context epoch *epoch*.
+
+    A reset starts a new vendor conversation whose cumulative totals restart
+    near zero, so its reports add to these totals. A base from an earlier reset
+    is replaced: the totals captured here already include it.
+
+    :param usage: The session's usage dict, modified in place.
+    :param epoch: The context epoch the reset starts, e.g. ``1``.
+    """
+    total_cost = float(usage.get("total_cost_usd", 0.0) or 0.0)
+    base: dict[str, Any] = {
+        "epoch": epoch,
+        "total_cost_usd": total_cost,
+        "policy_cost_usd": float(usage.get("policy_cost_usd") or total_cost),
+    }
+    for key in _CONTEXT_RESET_BASE_TOKEN_KEYS:
+        base[key] = int(usage.get(key, 0) or 0)
+    usage[CONTEXT_RESET_BASE_KEY] = base
 
 
 def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) -> None:
@@ -1243,6 +1276,9 @@ class ConversationStore(ABC):
     def advance_context_epoch(self, conversation_id: str, epoch: int) -> bool:
         """Raise the conversation's ``context_epoch`` to ``epoch`` if it is lower.
 
+        Captures the usage bases (:func:`capture_context_reset_base`) in the
+        same transaction, so no usage write can see the new epoch without them.
+
         :param conversation_id: Conversation to update.
         :param epoch: The epoch a just-appended ``context_reset`` item carries.
         :returns: ``True`` when the counter moved, ``False`` when it was
@@ -1481,6 +1517,24 @@ class ConversationStore(ABC):
         :param project_id: The project id to file under, or ``None`` to unfile.
         :returns: ``True`` if a metadata row was updated; ``False`` if the
             conversation has no metadata row.
+        """
+        ...
+
+    @abstractmethod
+    def update_session_usage(
+        self,
+        conversation_id: str,
+        apply: Callable[[dict[str, Any], int], bool],
+    ) -> dict[str, Any]:
+        """
+        Atomically read, change and write one conversation's session usage.
+
+        :param conversation_id: The conversation to update.
+        :param apply: Called inside the write transaction with the current usage
+            dict and ``context_epoch``. It changes the dict in place and returns
+            whether to write it. It may run again if the transaction retries, so
+            it must not have other side effects.
+        :returns: The usage dict after ``apply``.
         """
         ...
 

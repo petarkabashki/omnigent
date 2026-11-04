@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
@@ -1732,6 +1732,39 @@ class SqlAlchemyConversationStore(ConversationStore):
             return result.rowcount > 0
 
         return run_write_transaction(self._session_immediate, "set_conversation_project", write)
+
+    def update_session_usage(
+        self,
+        conversation_id: str,
+        apply: Callable[[dict[str, Any], int], bool],
+    ) -> dict[str, Any]:
+        """Atomically change session usage; serialized as in ``increment_session_usage``."""
+        import json
+
+        def write(session: Session) -> dict[str, Any]:
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+            )
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            current: dict[str, Any] = (
+                dict(json.loads(meta.session_usage)) if meta and meta.session_usage else {}
+            )
+            context_epoch = (meta.context_epoch or 0) if meta else 0
+            if apply(current, context_epoch):
+                session.execute(
+                    update(SqlConversationMetadata)
+                    .where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.id == conversation_id,
+                    )
+                    .values(session_usage=json.dumps(current))
+                )
+            return current
+
+        return run_write_transaction(self._session_immediate, "update_session_usage", write)
 
     def increment_session_usage(
         self,
@@ -3998,22 +4031,36 @@ class SqlAlchemyConversationStore(ConversationStore):
         return self.get_conversation(conversation_id)
 
     def advance_context_epoch(self, conversation_id: str, epoch: int) -> bool:
-        """Raise ``context_epoch`` to ``epoch`` when it is lower."""
+        """Raise ``context_epoch`` to ``epoch`` when it is lower, capturing usage bases."""
+        import json
+
+        from omnigent.stores.conversation_store import capture_context_reset_base
 
         def write(session: Session) -> bool:
-            result = cast(
-                _RowCountResult,
-                session.execute(
-                    update(SqlConversationMetadata)
-                    .where(
-                        SqlConversationMetadata.workspace_id == current_workspace_id(),
-                        SqlConversationMetadata.id == conversation_id,
-                        SqlConversationMetadata.context_epoch < epoch,
-                    )
-                    .values(context_epoch=epoch)
-                ),
+            q = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id == conversation_id,
+                SqlConversationMetadata.context_epoch < epoch,
             )
-            return result.rowcount == 1
+            if self._meta_supports_for_update:
+                q = q.with_for_update()
+            meta = session.scalars(q).first()
+            if meta is None:
+                return False
+            values: dict[str, Any] = {"context_epoch": epoch}
+            usage = dict(json.loads(meta.session_usage)) if meta.session_usage else {}
+            if usage:
+                capture_context_reset_base(usage, epoch)
+                values["session_usage"] = json.dumps(usage)
+            session.execute(
+                update(SqlConversationMetadata)
+                .where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == conversation_id,
+                )
+                .values(**values)
+            )
+            return True
 
         return run_write_transaction(self._session_immediate, "advance_context_epoch", write)
 

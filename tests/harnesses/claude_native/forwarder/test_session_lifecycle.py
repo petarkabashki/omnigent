@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1088,3 +1089,170 @@ async def test_forwarder_does_not_mirror_when_hook_payload_lacks_session_id(
     # — a regression that would route empty/null
     # external_session_id values to the server.
     assert "PATCH" not in methods, f"unexpected PATCH(es): {drained}"
+
+
+@pytest.mark.parametrize(
+    ("launch_stamp", "mirrored_id"),
+    [
+        pytest.param(None, "post-reset-chat", id="unknown-epoch-launch-stamps-nothing"),
+        pytest.param(1, "post-reset-chat", id="current-stamp"),
+        pytest.param(0, None, id="stale-stamp-is-refused"),
+    ],
+)
+async def test_external_id_mirror_only_conflicts_on_a_stale_stamp(
+    tmp_path: Path, launch_stamp: int | None, mirrored_id: str | None
+) -> None:
+    """A launch that could not read the epoch still mirrors its chat onto a reset session."""
+    (tmp_path / "state.json").write_text(
+        json.dumps({"claude_session_id": "post-reset-chat"}), encoding="utf-8"
+    )
+    if launch_stamp is not None:
+        record_launch_epoch(tmp_path, launch_stamp)
+    session_epoch = 1
+    stored: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("context_epoch", session_epoch) < session_epoch:
+            return httpx.Response(409, json={})
+        stored.append(body["external_session_id"])
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        finished = await forwarder._maybe_mirror_external_session_id(
+            client=client, session_id="conv_abc", bridge_dir=tmp_path
+        )
+
+    assert finished is True
+    assert stored == ([] if mirrored_id is None else [mirrored_id])
+
+
+async def _forward_cost(
+    *, bridge_dir: Path, dedupe: forwarder._ForwardDedupeState, posted: list[dict[str, object]]
+) -> None:
+    """Run one cost poll, collecting the usage posts it makes."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content)["data"])
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), base_url="http://server"
+    ) as client:
+        await forwarder._forward_session_cost(
+            client=client,
+            session_id="conv_abc",
+            bridge_dir=bridge_dir,
+            parent_transcript_path=bridge_dir / "transcript.jsonl",
+            subagent_state=forwarder.SubagentForwardState(subagents={}),
+            dedupe=dedupe,
+            cost_cache={},
+        )
+
+
+def _write_status_snapshot(bridge_dir: Path, *, cost: float) -> None:
+    (bridge_dir / "context.json").write_text(
+        json.dumps({"context_window_size": 1000, "total_cost_usd": cost}), encoding="utf-8"
+    )
+
+
+def _age_status_snapshot(bridge_dir: Path, *, filename: str = "context.json") -> None:
+    """Make a snapshot older than the launch stamp, as a pre-reset file is."""
+    launched = (bridge_dir / "launch_epoch").stat().st_mtime_ns
+    os.utime(bridge_dir / filename, ns=(launched - 1_000_000, launched - 1_000_000))
+
+
+@pytest.mark.asyncio
+async def test_cost_post_carries_the_launch_epoch(tmp_path: Path) -> None:
+    record_launch_epoch(tmp_path, 2)
+    _write_status_snapshot(tmp_path, cost=0.5)
+    posted: list[dict[str, object]] = []
+
+    await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
+
+    assert posted == [{"cumulative_cost_usd": 0.5, "policy_cost_usd": 0.5, "context_epoch": 2}]
+
+
+@pytest.mark.asyncio
+async def test_cost_post_without_a_launch_stamp_omits_the_epoch(tmp_path: Path) -> None:
+    _write_status_snapshot(tmp_path, cost=0.5)
+    posted: list[dict[str, object]] = []
+
+    await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
+
+    assert posted == [{"cumulative_cost_usd": 0.5, "policy_cost_usd": 0.5}]
+
+
+@pytest.mark.asyncio
+async def test_epoch_change_clears_the_cost_dedupe_so_a_restarted_total_posts(
+    tmp_path: Path,
+) -> None:
+    """A forwarder that outlives the reset must not gate S against the old total."""
+    record_launch_epoch(tmp_path, 0)
+    _write_status_snapshot(tmp_path, cost=10.0)
+    dedupe = forwarder._ForwardDedupeState()
+    posted: list[dict[str, object]] = []
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted)
+
+    record_launch_epoch(tmp_path, 1)
+    _write_status_snapshot(tmp_path, cost=0.25)
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted)
+
+    assert posted[-1] == {
+        "cumulative_cost_usd": 0.25,
+        "policy_cost_usd": 0.25,
+        "context_epoch": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_epoch_stamp_gap_during_a_relaunch_keeps_the_last_known_epoch(
+    tmp_path: Path,
+) -> None:
+    """An unstamped post would count as current; the stamp is briefly absent on relaunch."""
+    record_launch_epoch(tmp_path, 1)
+    _write_status_snapshot(tmp_path, cost=1.0)
+    dedupe = forwarder._ForwardDedupeState()
+    posted: list[dict[str, object]] = []
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted)
+
+    (tmp_path / "launch_epoch").unlink()
+    _write_status_snapshot(tmp_path, cost=2.0)
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted)
+
+    assert posted[-1]["context_epoch"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot_file", ["context.json", "context_raw.json"])
+async def test_snapshot_from_before_the_reset_launch_is_not_reported(
+    tmp_path: Path, snapshot_file: str
+) -> None:
+    """A fresh forwarder would add the old conversation's S to the new base."""
+    record_launch_epoch(tmp_path, 1)
+    _write_status_snapshot(tmp_path, cost=10.0)
+    (tmp_path / "context_raw.json").unlink(missing_ok=True)
+    if snapshot_file == "context_raw.json":
+        # A stale raw capture normalized now gets a fresh ``context.json`` mtime.
+        (tmp_path / snapshot_file).write_text("{}", encoding="utf-8")
+    _age_status_snapshot(tmp_path, filename=snapshot_file)
+    posted: list[dict[str, object]] = []
+
+    await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
+
+    assert posted == []
+
+
+@pytest.mark.asyncio
+async def test_never_reset_session_still_reports_an_older_snapshot(tmp_path: Path) -> None:
+    """A plain relaunch at epoch 0 keeps reporting the snapshot it finds."""
+    record_launch_epoch(tmp_path, 0)
+    _write_status_snapshot(tmp_path, cost=3.0)
+    _age_status_snapshot(tmp_path)
+    posted: list[dict[str, object]] = []
+
+    await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
+
+    assert posted == [{"cumulative_cost_usd": 3.0, "policy_cost_usd": 3.0, "context_epoch": 0}]

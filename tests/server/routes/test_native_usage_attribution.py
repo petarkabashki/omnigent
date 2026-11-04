@@ -545,3 +545,344 @@ async def test_flush_telemetry_reports_the_callers_installation_id(db_uri: str) 
         )
 
     assert [e.host_installation_id for e in events] == ["inst-host-9", None]
+
+
+def _reset_session_after_spending(
+    store: SqlAlchemyConversationStore, *, spent: float = 10.0, policy: float | None = None
+) -> str:
+    """Create a session that spent ``spent`` and then crossed a context reset."""
+    conv = store.create_conversation(title="reset-usage", agent_id=_AGENT_ID)
+    report: dict = {"cumulative_cost_usd": spent, "model": "m1", "context_epoch": 0}
+    if policy is not None:
+        report["policy_cost_usd"] = policy
+    _persist_native_cumulative_usage(conv.id, report, store)
+    store.append_context_reset(conv.id, response_id="reset_1")
+    return conv.id
+
+
+def _spy_daily_cost(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    deltas: list[float] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._record_daily_cost",
+        lambda _conv, delta, _store: deltas.append(delta),
+    )
+    return deltas
+
+
+def test_cost_keeps_growing_after_a_reset_restarts_the_reported_total(db_uri: str) -> None:
+    """S restarts near 0 in the new conversation; its growth adds to prior spend."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store)
+
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 0.5, "model": "m1", "context_epoch": 1}, store
+    )
+    assert _usage(store, conv_id)["total_cost_usd"] == pytest.approx(10.5)
+
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 2.0, "model": "m1", "context_epoch": 1}, store
+    )
+    assert _usage(store, conv_id)["total_cost_usd"] == pytest.approx(12.0)
+
+
+def test_policy_gate_figure_keeps_growing_across_a_reset(db_uri: str) -> None:
+    """The enforcement total rebases on its own peak, not on the display total."""
+    from omnigent.runtime.policies.builder import load_session_usage
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0, policy=12.0)
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.0,
+            "policy_cost_usd": 3.0,
+            "model": "m1",
+            "context_epoch": 1,
+        },
+        store,
+    )
+
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(11.0)
+    assert usage["policy_cost_usd"] == pytest.approx(15.0)
+    assert load_session_usage(conv_id, store)["policy_cost_usd"] == pytest.approx(15.0)
+
+
+def test_policy_base_falls_back_to_the_total_when_no_enforcement_figure_exists(
+    db_uri: str,
+) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0)
+
+    _persist_native_cumulative_usage(conv_id, {"policy_cost_usd": 1.0, "context_epoch": 1}, store)
+
+    assert _usage(store, conv_id)["policy_cost_usd"] == pytest.approx(11.0)
+
+
+@pytest.mark.parametrize(
+    "first_report",
+    [
+        {"cumulative_cost_usd": 0.0, "policy_cost_usd": 0.0, "context_epoch": 1},
+        {"cumulative_cost_usd": 0.0, "policy_cost_usd": 0.0},
+        {"cumulative_cost_usd": 9.0, "policy_cost_usd": 12.0, "context_epoch": 0},
+        {"cumulative_cost_usd": 10.0, "policy_cost_usd": 12.0, "context_epoch": 0},
+    ],
+    ids=["zero", "zero-without-epoch", "stale-below-total", "stale-equal-to-total"],
+)
+def test_first_snapshot_after_a_reset_equals_the_pre_reset_total_exactly(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, first_report: dict
+) -> None:
+    """Neither spend dropped nor double-counted: exact equality, for both figures."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0, policy=12.0)
+    daily = _spy_daily_cost(monkeypatch)
+
+    _persist_native_cumulative_usage(conv_id, {**first_report, "model": "m1"}, store)
+
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == 10.0
+    assert usage["policy_cost_usd"] == 12.0
+    assert usage["by_model"]["m1"]["total_cost_usd"] == 10.0
+    assert sum(daily) == 0.0
+
+
+def test_stale_report_is_dropped_and_cannot_inflate_later_growth(db_uri: str) -> None:
+    """A late pre-reset S added to the base would stick forever through the clamp."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0, policy=12.0)
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 10.0,
+            "policy_cost_usd": 12.0,
+            "cumulative_input_tokens": 500,
+            "model": "m1",
+            "context_epoch": 0,
+        },
+        store,
+    )
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.0,
+            "policy_cost_usd": 1.0,
+            "model": "m1",
+            "context_epoch": 1,
+        },
+        store,
+    )
+
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(11.0)
+    assert usage["policy_cost_usd"] == pytest.approx(13.0)
+    assert "input_tokens" not in usage
+
+
+def test_two_resets_in_a_row_keep_every_conversations_spend(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0, policy=10.0)
+    _persist_native_cumulative_usage(
+        conv_id,
+        {"cumulative_cost_usd": 3.0, "policy_cost_usd": 3.0, "context_epoch": 1},
+        store,
+    )
+    store.append_context_reset(conv_id, response_id="reset_2")
+    # A third conversation that reports nothing changes neither base.
+    store.append_context_reset(conv_id, response_id="reset_3")
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {"cumulative_cost_usd": 0.0, "policy_cost_usd": 0.0, "context_epoch": 3},
+        store,
+    )
+    assert _usage(store, conv_id)["total_cost_usd"] == 13.0
+    assert _usage(store, conv_id)["policy_cost_usd"] == 13.0
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {"cumulative_cost_usd": 2.0, "policy_cost_usd": 2.0, "context_epoch": 3},
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(15.0)
+    assert usage["policy_cost_usd"] == pytest.approx(15.0)
+
+
+def test_forged_low_report_after_a_reset_lowers_nothing(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0, policy=10.0)
+    _persist_native_cumulative_usage(
+        conv_id,
+        {"cumulative_cost_usd": 4.0, "policy_cost_usd": 4.0, "context_epoch": 1},
+        store,
+    )
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {"cumulative_cost_usd": 1.0, "policy_cost_usd": 1.0, "context_epoch": 1},
+        store,
+    )
+
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(14.0)
+    assert usage["policy_cost_usd"] == pytest.approx(14.0)
+
+
+def test_reset_growth_reaches_buckets_and_rollup_once(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-model buckets and the daily rollup see real growth, never the base."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = _reset_session_after_spending(store, spent=10.0)
+    daily = _spy_daily_cost(monkeypatch)
+
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 1.0, "model": "m1", "context_epoch": 1}, store
+    )
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 3.0, "model": "m2", "context_epoch": 1}, store
+    )
+
+    usage = _usage(store, conv_id)
+    assert usage["by_model"]["m1"]["total_cost_usd"] == pytest.approx(11.0)
+    assert usage["by_model"]["m2"]["total_cost_usd"] == pytest.approx(2.0)
+    assert sum(daily) == pytest.approx(3.0)
+
+
+def test_cumulative_tokens_rebase_across_a_reset(db_uri: str) -> None:
+    """Totals do not drop at the boundary, and buckets gain only new tokens."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="reset-tokens", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 1000,
+            "cumulative_output_tokens": 200,
+            "cumulative_cache_read_input_tokens": 400,
+            "model": "m1",
+        },
+        store,
+    )
+    store.append_context_reset(conv.id, response_id="reset_1")
+
+    _persist_native_cumulative_usage(
+        conv.id,
+        {
+            "cumulative_input_tokens": 100,
+            "cumulative_output_tokens": 20,
+            "model": "m1",
+            "context_epoch": 1,
+        },
+        store,
+    )
+
+    usage = _usage(store, conv.id)
+    # The report omits cache reads, so none of the base's 400 carry into this
+    # conversation: all 100 input tokens are uncached.
+    assert usage["input_tokens"] == 700
+    assert usage["cache_read_input_tokens"] == 400
+    assert usage["output_tokens"] == 220
+    assert usage["total_tokens"] == 1320
+    assert usage["by_model"]["m1"]["input_tokens"] == 700
+    assert usage["by_model"]["m1"]["total_tokens"] == 1320
+
+
+def test_token_priced_cost_rebases_across_a_reset(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prior spend keeps its own price; only this conversation's tokens are priced."""
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing_with_provider",
+        lambda *a, **kw: ModelPricing(input_per_token=0.01, output_per_token=0),
+    )
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="reset-priced", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_input_tokens": 1000, "model": "m1"}, store
+    )
+    store.append_context_reset(conv.id, response_id="reset_1")
+
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_input_tokens": 100, "model": "m1", "context_epoch": 1}, store
+    )
+
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(11.0)
+
+
+def test_never_reset_session_stores_no_base_and_accepts_a_current_epoch(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="no-reset", agent_id=_AGENT_ID)
+
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 2.0, "model": "m1", "context_epoch": 0}, store
+    )
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 3.0, "model": "m1"}, store)
+
+    usage = _usage(store, conv.id)
+    assert usage["total_cost_usd"] == pytest.approx(3.0)
+    assert "context_reset_base" not in usage
+
+
+@pytest.mark.parametrize("bad_epoch", ["1", True, -1])
+def test_malformed_context_epoch_is_rejected(db_uri: str, bad_epoch: object) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="bad-epoch", agent_id=_AGENT_ID)
+
+    with pytest.raises(OmnigentError):
+        _persist_native_cumulative_usage(
+            conv.id, {"cumulative_cost_usd": 1.0, "context_epoch": bad_epoch}, store
+        )
+
+
+def test_flush_cannot_erase_a_base_written_after_it_read_the_row(db_uri: str) -> None:
+    """A reset landing between a flush's read and write keeps its base and epoch."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="flush-race", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 10.0}, store)
+    real_get = store.get_conversation
+    raced = False
+
+    def get_then_reset(conversation_id: str, *args: object, **kwargs: object):
+        nonlocal raced
+        row = real_get(conversation_id, *args, **kwargs)
+        if not raced:
+            raced = True
+            store.append_context_reset(conv.id, response_id="reset_1")
+        return row
+
+    store.get_conversation = get_then_reset  # type: ignore[method-assign]
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 10.0, "context_epoch": 0}, store
+    )
+    store.get_conversation = real_get  # type: ignore[method-assign]
+    assert raced
+
+    _persist_native_cumulative_usage(
+        conv.id, {"cumulative_cost_usd": 1.0, "context_epoch": 1}, store
+    )
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(11.0)
+
+
+def test_concurrent_flushes_cannot_lower_the_persisted_total(db_uri: str) -> None:
+    """A flush that read before a higher report landed must not overwrite it."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="lost-update", agent_id=_AGENT_ID)
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 1.0}, store)
+    real_get = store.get_conversation
+    raced = False
+
+    def get_then_higher_report(conversation_id: str, *args: object, **kwargs: object):
+        nonlocal raced
+        row = real_get(conversation_id, *args, **kwargs)
+        if not raced:
+            raced = True
+            _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 9.0}, store)
+        return row
+
+    store.get_conversation = get_then_higher_report  # type: ignore[method-assign]
+    _persist_native_cumulative_usage(conv.id, {"cumulative_cost_usd": 5.0}, store)
+    store.get_conversation = real_get  # type: ignore[method-assign]
+
+    assert _usage(store, conv.id)["total_cost_usd"] == pytest.approx(9.0)

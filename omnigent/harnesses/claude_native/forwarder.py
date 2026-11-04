@@ -49,6 +49,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_transcript_items_from_offset,
     read_transcript_items_since_with_position,
     read_transcript_path,
+    status_snapshot_predates_reset,
     transcript_has_forked_from_marker,
     transcript_has_recent_local_command,
     url_component,
@@ -900,6 +901,9 @@ class _ForwardDedupeState:
     # sub-agent spend so the gate can block mid-turn. Separate baseline
     # because it can advance while ``posted_cost`` (S) is frozen.
     posted_policy_cost: float | None = None
+    # Launch context epoch the cost baselines above belong to. S restarts on a
+    # reset, so a new epoch clears them.
+    cost_epoch: int | None = None
     # Last permission mode POSTed as ``external_permission_mode_change`` —
     # mirrors the launch mode and any in-pane shift+tab switch, neither of
     # which the web UI can observe on its own.
@@ -3218,7 +3222,18 @@ async def _forward_session_cost(
     """
     if time.monotonic() < dedupe.cost_retry_not_before:
         return
-    status_state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
+    launch_epoch = await asyncio.to_thread(read_launch_epoch, bridge_dir)
+    if launch_epoch is None:
+        # The stamp is briefly absent during a relaunch; an unstamped post counts as current.
+        launch_epoch = dedupe.cost_epoch
+    elif launch_epoch != dedupe.cost_epoch:
+        if dedupe.cost_epoch is not None:
+            dedupe.posted_cost = None
+            dedupe.posted_policy_cost = None
+        dedupe.cost_epoch = launch_epoch
+    status_state = None
+    if not await asyncio.to_thread(status_snapshot_predates_reset, bridge_dir):
+        status_state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
     status_cost = _cumulative_cost_from_status_state(status_state)
     active_subagents = [
         entry for entry in subagent_state.subagents.values() if entry.child_conversation_id
@@ -3244,6 +3259,8 @@ async def _forward_session_cost(
     # steady-state churn. The two fields advance independently (policy_cost
     # moves mid-turn while display_cost/S is frozen).
     payload: dict[str, float | str] = {}
+    # Tells the server which conversation's S this is, so it can drop a stale total.
+    epoch_fields = {} if launch_epoch is None else {"context_epoch": launch_epoch}
     if display_cost is not None and (
         dedupe.posted_cost is None or display_cost > dedupe.posted_cost
     ):
@@ -3269,7 +3286,7 @@ async def _forward_session_cost(
         await _post_external_session_usage(
             client,
             session_id=session_id,
-            usage=payload,
+            usage=payload | epoch_fields,
         )
     except httpx.HTTPError as exc:
         dedupe.cost_retry_failures += 1

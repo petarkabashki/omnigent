@@ -83,6 +83,7 @@ from omnigent.native.native_coding_agents import (
 from omnigent.native.native_dispatch import resolve_hook
 from omnigent.pi_prompt import pi_prompt_args
 from omnigent.process_logging import process_log_reference
+from omnigent.runner import pending_approvals
 from omnigent.runner.resource_registry import (
     ANTIGRAVITY_NATIVE_TERMINAL_ROLE,
     CLAUDE_NATIVE_TERMINAL_ROLE,
@@ -1044,6 +1045,23 @@ _LAUNCH_CONFIG_FETCH_BACKOFF_BASE_S = 0.5
 _LAUNCH_CONFIG_FETCH_BACKOFF_CAP_S = 4.0
 _LAUNCH_CONFIG_RETRY_MAX_DELAY_S = 10.0
 _LAUNCH_CONFIG_RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+#: Only a server fault hides the epoch, so a Claude launch retries every 5xx and no 4xx.
+_LAUNCH_SESSION_READ_RETRYABLE_STATUS = frozenset(range(500, 600))
+#: Each read runs under the session's ensure lock, so a slow server must fail fast.
+_LAUNCH_SESSION_READ_TIMEOUT_S = 5.0
+#: A refused launch is re-driven for this long, enough to outlast a server restart.
+_LAUNCH_REDRIVE_WINDOW_S = 900.0
+_LAUNCH_REDRIVE_BASE_DELAY_S = 5.0
+_LAUNCH_REDRIVE_MAX_DELAY_S = 30.0
+_LAUNCH_REDRIVE_MAX_LAUNCHES = 3
+_CLAUDE_LAUNCH_REFUSED_MESSAGE = (
+    "Claude did not start because the Omnigent server did not respond, so this session's "
+    "state could not be confirmed. Your session and chat are safe and nothing was changed. "
+    "Omnigent will keep retrying for up to 15 minutes and start Claude when the server is "
+    "back. A message that triggered this stays in the chat but was not sent to Claude, so "
+    "send it again after Claude starts. If Claude has not started after 15 minutes, send a "
+    "message to try again."
+)
 
 
 def _launch_config_fetch_is_transient(exc: httpx.HTTPError) -> bool:
@@ -1064,6 +1082,14 @@ def _launch_config_fetch_is_transient(exc: httpx.HTTPError) -> bool:
             httpx.RemoteProtocolError,
         ),
     )
+
+
+class _LaunchSessionRejectedError(RuntimeError):
+    """The server answered a launch-config fetch with a client error such as ``404``."""
+
+
+class _ClaudeLaunchRefusedError(OmnigentError):
+    """A Claude launch stopped because a server fault hid the session's epoch."""
 
 
 async def _launch_config_retry_sleep(delay: float) -> None:
@@ -1088,6 +1114,8 @@ async def _fetch_native_launch_snapshot(
     server_client: httpx.AsyncClient | None,
     session_id: str,
     runtime_label: str,
+    retryable_status: frozenset[int] = _LAUNCH_CONFIG_RETRYABLE_STATUS,
+    timeout_s: float = _LAUNCH_CONFIG_FETCH_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Fetch and validate a session snapshot for a native-terminal launch config.
 
@@ -1104,12 +1132,15 @@ async def _fetch_native_launch_snapshot(
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :param runtime_label: Human-readable harness name for error text, e.g.
         ``"Codex"``.
+    :param retryable_status: HTTP statuses retried before giving up.
+    :param timeout_s: Timeout of each attempt.
     :returns: The snapshot mapping.
     :raises OmnigentError: Server-attributed (blocking, harness setup) when
         retries are exhausted, the server returns a 5xx, or the body is not a
         JSON object.
-    :raises RuntimeError: If the client is missing, or on a client-side 4xx
-        or non-transient transport error.
+    :raises _LaunchSessionRejectedError: On a client-side 4xx.
+    :raises RuntimeError: If the client is missing, or on a non-transient
+        transport error.
     """
     if server_client is None:
         raise RuntimeError(
@@ -1122,7 +1153,7 @@ async def _fetch_native_launch_snapshot(
         resp = None
         try:
             resp = await server_client.get(
-                path, params=_SESSION_METADATA_PARAMS, timeout=_LAUNCH_CONFIG_FETCH_TIMEOUT_S
+                path, params=_SESSION_METADATA_PARAMS, timeout=timeout_s
             )
         except httpx.HTTPError as exc:
             transient = _launch_config_fetch_is_transient(exc)
@@ -1141,19 +1172,19 @@ async def _fetch_native_launch_snapshot(
         else:
             if resp.status_code == 200:
                 break
-            if last_attempt or resp.status_code not in _LAUNCH_CONFIG_RETRYABLE_STATUS:
+            if last_attempt or resp.status_code not in retryable_status:
                 message = (
                     f"Could not fetch {runtime_label} launch config for {session_id!r}: "
                     f"GET /v1/sessions returned {resp.status_code}."
                 )
-                if resp.status_code >= 500 or resp.status_code in _LAUNCH_CONFIG_RETRYABLE_STATUS:
+                if resp.status_code >= 500 or resp.status_code in retryable_status:
                     raise OmnigentError(
                         message,
                         category=ErrorCategory.SERVER,
                         impact=ErrorImpact.BLOCKING,
                         phase=ErrorPhase.HARNESS_SETUP,
                     )
-                raise RuntimeError(message)
+                raise _LaunchSessionRejectedError(message)
             retry_reason = f"HTTP {resp.status_code}"
         backoff = min(
             _LAUNCH_CONFIG_FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1)),
@@ -8615,9 +8646,8 @@ def _native_terminal_start_error_payload(
             "Install @anthropic-ai/claude-code from WSL so a WSL-native `claude` "
             "binary wins PATH resolution, then retry."
         )
-    elif isinstance(exc, PiNativeCliOutdatedError):
-        # The raise site composes a client-safe message (versions + upgrade
-        # command), so it can be shown verbatim.
+    elif isinstance(exc, PiNativeCliOutdatedError | _ClaudeLaunchRefusedError):
+        # The raise site composes a client-safe message, so it can be shown verbatim.
         message = str(exc)
     elif IS_WINDOWS:
         # Native terminals are tmux/PTY-based and disabled on Windows by design.
@@ -8885,8 +8915,9 @@ class _ClaudeSessionLaunchMetadata:
     fork_source_external_id: str | None = None
     fork_carry_history: bool = False
     #: Context resets the session has had; a local resume hint from an older
-    #: epoch predates the latest reset boundary.
-    context_epoch: int = 0
+    #: epoch predates the latest reset boundary. ``None`` means the server answered
+    #: with a client error such as ``404``: no epoch to compare, nothing to resume.
+    context_epoch: int | None = None
     #: Both routing fields come from ``routing_class_from_snapshot``, so an
     #: auto-harness session always reads as routing-enabled too. Deriving them
     #: separately was the bug: a sub-agent child of a routed parent carries the
@@ -8942,7 +8973,11 @@ async def _load_legacy_claude_launch_metadata(
     server_client: httpx.AsyncClient,
     session_id: str,
 ) -> _ClaudeSessionLaunchMetadata:
-    """Fetch Claude launch metadata for servers predating the init envelope."""
+    """Fetch Claude launch metadata for servers predating the init envelope.
+
+    :raises _ClaudeLaunchRefusedError: On a transport error or 5xx after retries.
+        A 4xx proceeds with an unknown epoch.
+    """
     from omnigent.runner.subagent_routing import routing_class_from_snapshot
     from omnigent.stores.conversation_store import (
         FORK_CARRY_HISTORY_LABEL_KEY,
@@ -8950,21 +8985,29 @@ async def _load_legacy_claude_launch_metadata(
     )
 
     try:
-        response = await server_client.get(
-            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-            params=_SESSION_METADATA_PARAMS,
-            timeout=_LAUNCH_CONFIG_FETCH_TIMEOUT_S,
+        snapshot = await _fetch_native_launch_snapshot(
+            server_client=server_client,
+            session_id=session_id,
+            runtime_label="Claude",
+            retryable_status=_LAUNCH_SESSION_READ_RETRYABLE_STATUS,
+            timeout_s=_LAUNCH_SESSION_READ_TIMEOUT_S,
         )
-    except httpx.HTTPError:
+    except _LaunchSessionRejectedError:
         _logger.debug(
-            "Could not fetch session launch config for %s; terminal will use Claude's defaults",
+            "Server rejected the session read for %s; terminal will use Claude's defaults",
             session_id,
         )
         return _ClaudeSessionLaunchMetadata()
-    if response.status_code != 200:
-        return _ClaudeSessionLaunchMetadata()
+    except (OmnigentError, RuntimeError) as exc:
+        # Launching blind could undo a reset or orphan a chat; a refused launch
+        # loses nothing and can be retried.
+        raise _ClaudeLaunchRefusedError(
+            _CLAUDE_LAUNCH_REFUSED_MESSAGE,
+            category=ErrorCategory.SERVER,
+            impact=ErrorImpact.BLOCKING,
+            phase=ErrorPhase.HARNESS_SETUP,
+        ) from exc
 
-    snapshot = response.json()
     effort = snapshot.get("reasoning_effort")
     model_override = snapshot.get("model_override")
     launch_args = snapshot.get("terminal_launch_args")
@@ -9006,11 +9049,10 @@ async def _load_legacy_claude_launch_metadata(
     )
     permission_mode = _claude_launch_permission_mode(metadata.terminal_launch_args)
     _logger.info(
-        "Claude terminal launch config fetched: session=%s status=%s effort_set=%s "
+        "Claude terminal launch config fetched: session=%s effort_set=%s "
         "model_override_set=%s launch_args_count=%d permission_mode=%s "
         "external_session_id_set=%s",
         session_id,
-        response.status_code,
         metadata.reasoning_effort is not None,
         metadata.model_override is not None,
         len(metadata.terminal_launch_args or []),
@@ -9192,6 +9234,13 @@ async def _auto_create_claude_terminal(
         skills_filter,
         extra={"session_id": session_id},
     )
+    # Ahead of every bridge write: a refused launch must leave the resume hint,
+    # epoch stamp and labels for the retry.
+    launch_metadata = await _load_claude_launch_metadata(
+        server_client=server_client,
+        session_id=session_id,
+        session_init=session_init,
+    )
     # Pick the bridge id this session's dir is keyed on. Normally session_id,
     # and we (re)assert the label = session_id so a STALE label from a rotation
     # that timed out before its terminal transfer can't make
@@ -9204,7 +9253,10 @@ async def _auto_create_claude_terminal(
     # "no longer active after /clear" guard. So when the label is exactly that
     # marker, honour it and resume in the session's own isolated dir. The
     # executor spawn_env already resolves the same label, so the two agree.
-    from omnigent.harnesses.claude_native.bridge import record_launch_epoch
+    from omnigent.harnesses.claude_native.bridge import (
+        clear_claude_status_snapshot,
+        record_launch_epoch,
+    )
     from omnigent.runner.native.claude_reset import (
         claude_launch_bridge_id,
         local_resume_hint_epoch,
@@ -9312,28 +9364,31 @@ async def _auto_create_claude_terminal(
         resolve_native_claude_config,
     )
 
-    launch_metadata = await _load_claude_launch_metadata(
-        server_client=server_client,
-        session_id=session_id,
-        session_init=session_init,
-    )
     session_effort = launch_metadata.reasoning_effort
     session_model_override = launch_metadata.model_override
     session_launch_args = launch_metadata.terminal_launch_args
     session_external_id = launch_metadata.external_session_id
     fork_source_external_id = launch_metadata.fork_source_external_id
     fork_carry_history = launch_metadata.fork_carry_history
-    # Hooks of this launch record their Claude id under the current epoch.
-    await asyncio.to_thread(record_launch_epoch, bridge_dir, launch_metadata.context_epoch)
-    if _pre_wipe_claude_sid is not None and _pre_wipe_hint_epoch < launch_metadata.context_epoch:
-        # A context reset happened after that Claude session was recorded.
-        _logger.info(
-            "Claude local resume hint predates the context reset; launching fresh: session=%s",
-            session_id,
-            extra={"session_id": session_id},
-        )
-        _pre_wipe_claude_sid = None
-    if launch_metadata.context_epoch > 0:
+    context_epoch = launch_metadata.context_epoch
+    if context_epoch is not None:
+        # Hooks of this launch record their Claude id under the current epoch. An
+        # unknown epoch stays unstamped: a wrong stamp would get that id refused.
+        await asyncio.to_thread(record_launch_epoch, bridge_dir, context_epoch)
+    if context_epoch is None or _pre_wipe_hint_epoch < context_epoch:
+        # A reset with no runner bound left the old conversation's cost total here.
+        await asyncio.to_thread(clear_claude_status_snapshot, bridge_dir)
+        if _pre_wipe_claude_sid is not None:
+            # A context reset happened after that Claude session was recorded, or
+            # the server rejected the session read.
+            _logger.info(
+                "Claude local resume hint may predate a context reset; launching fresh: "
+                "session=%s",
+                session_id,
+                extra={"session_id": session_id},
+            )
+            _pre_wipe_claude_sid = None
+    if context_epoch:
         # A crash can leave fork labels behind a reset; a fork starts at epoch 0.
         fork_source_external_id = None
         fork_carry_history = False
@@ -10540,6 +10595,8 @@ class NativeLaunchContext:
     resolve_launch_config: Callable[[], Awaitable[ClaudeNativeUcodeConfig | None]] | None = None
     record_launch_config: Callable[[str, ClaudeNativeUcodeConfig | None], None] | None = None
     rebind_bridge: Callable[[str, str], Awaitable[None]] | None = None
+    #: Ensures a session's terminal, ``(session_id, harness_name)``; repeats a refused launch.
+    redrive_launch: Callable[[str, str | None], Awaitable[None]] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -10725,24 +10782,126 @@ async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
     """
     if ctx.server_client is None:
         raise ValueError("claude-native launch requires a bound server_client")
-    view = await _auto_create_claude_terminal(
-        ctx.session_id,
-        ctx.resource_registry,
-        ctx.publish_event,
-        server_client=ctx.server_client,
-        event_dispatcher=ctx.event_dispatcher,
-        bundle_dir=ctx.bundle_dir,
-        agent_name=ctx.agent_name,
-        agent_spec=ctx.agent_spec,
-        skills_filter=ctx.skills_filter,
-        session_init=ctx.session_init,
-        auth_token_factory=ctx.auth_token_factory,
-        resolve_launch_config=ctx.resolve_launch_config,
-        record_launch_config=ctx.record_launch_config,
-        rebind_bridge=ctx.rebind_bridge,
-    )
+    try:
+        view = await _auto_create_claude_terminal(
+            ctx.session_id,
+            ctx.resource_registry,
+            ctx.publish_event,
+            server_client=ctx.server_client,
+            event_dispatcher=ctx.event_dispatcher,
+            bundle_dir=ctx.bundle_dir,
+            agent_name=ctx.agent_name,
+            agent_spec=ctx.agent_spec,
+            skills_filter=ctx.skills_filter,
+            session_init=ctx.session_init,
+            auth_token_factory=ctx.auth_token_factory,
+            resolve_launch_config=ctx.resolve_launch_config,
+            record_launch_config=ctx.record_launch_config,
+            rebind_bridge=ctx.rebind_bridge,
+        )
+    except _ClaudeLaunchRefusedError:
+        _schedule_claude_launch_redrive(ctx)
+        raise
     _start_claude_relay_after_launch(ctx)
     return view
+
+
+#: Live re-drives by session, so repeated refusals share one bounded task.
+_claude_launch_redrives: dict[str, asyncio.Task[None]] = {}
+
+
+def _schedule_claude_launch_redrive(ctx: NativeLaunchContext) -> None:
+    """Start one background re-drive of a refused launch; nothing else restarts it."""
+    session_id = ctx.session_id
+    if ctx.redrive_launch is None or session_id in _claude_launch_redrives:
+        return
+    task = asyncio.create_task(
+        _redrive_refused_claude_launch(ctx),
+        name=f"claude-launch-redrive:{session_id}",
+    )
+    _claude_launch_redrives[session_id] = task
+    task.add_done_callback(lambda _done: _claude_launch_redrives.pop(session_id, None))
+
+
+async def _claude_session_can_redrive(ctx: NativeLaunchContext) -> bool | None:
+    """Probe the session once: ``True`` if readable, ``None`` to wait, ``False`` to stop."""
+    assert ctx.server_client is not None
+    try:
+        response = await ctx.server_client.get(
+            f"/v1/sessions/{urllib.parse.quote(ctx.session_id, safe='')}",
+            params=_SESSION_METADATA_PARAMS,
+            timeout=_LAUNCH_SESSION_READ_TIMEOUT_S,
+        )
+    except (httpx.HTTPError, ConnectionError):
+        return None
+    if response.status_code == 200:
+        return True
+    # A 4xx means the session is gone or barred; a launch would run blind.
+    return None if response.status_code >= 500 else False
+
+
+async def _claude_pane_exists(ctx: NativeLaunchContext) -> bool:
+    terminal_id = terminal_resource_id("claude", "main")
+    existing = await ctx.resource_registry.get_terminal_resource(ctx.session_id, terminal_id)
+    return existing is not None
+
+
+async def _redrive_refused_claude_launch(ctx: NativeLaunchContext) -> None:
+    """Repeat a refused Claude launch once the server answers, within fixed bounds.
+
+    No lock is held between attempts, so a message or reset can go first. Each
+    launch reads the epoch afresh, so a reset made meanwhile is honoured. Wakes
+    early when the tunnel reconnects; a 5xx with no tunnel drop relies on the poll.
+    """
+    assert ctx.redrive_launch is not None
+    session_id = ctx.session_id
+    deadline = time.monotonic() + _LAUNCH_REDRIVE_WINDOW_S
+    delay = _LAUNCH_REDRIVE_BASE_DELAY_S
+    generation = pending_approvals.current_server_generation()
+    launches = 0
+    try:
+        while launches < _LAUNCH_REDRIVE_MAX_LAUNCHES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                generation = await pending_approvals.wait_for_server_reconnect(
+                    generation, timeout_seconds=min(delay, remaining)
+                )
+            except TimeoutError:
+                delay = min(delay * 2, _LAUNCH_REDRIVE_MAX_DELAY_S)
+            if await _claude_pane_exists(ctx):
+                return
+            readable = await _claude_session_can_redrive(ctx)
+            if readable is None:
+                continue
+            if not readable:
+                _logger.info(
+                    "Dropping refused Claude launch: session=%s no longer readable",
+                    session_id,
+                    extra={"session_id": session_id},
+                )
+                return
+            launches += 1
+            await ctx.redrive_launch(session_id, "claude-native")
+            if await _claude_pane_exists(ctx):
+                # ``failed`` only yields to a ``running`` edge, and the refusal is over.
+                ctx.publish_event(session_id, {"type": "session.status", "status": "running"})
+                ctx.publish_event(session_id, {"type": "session.status", "status": "idle"})
+                return
+    except Exception:
+        _logger.exception(
+            "Refused Claude launch re-drive failed: session=%s",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return
+    _logger.warning(
+        "Gave up re-driving refused Claude launch: session=%s launches=%s",
+        session_id,
+        launches,
+        extra={"session_id": session_id},
+    )
 
 
 def _start_claude_relay_after_launch(ctx: NativeLaunchContext) -> None:
@@ -11052,6 +11211,11 @@ async def _ensure_native_terminal(
                         stage="terminal_start",
                         error_impact=ErrorImpact.BLOCKING.value,
                     ),
+                )
+            if isinstance(exc, _ClaudeLaunchRefusedError):
+                # A runner-side ensure drops the response below; the status still shows.
+                _publish_native_terminal_start_error(
+                    ctx.publish_event, ctx.session_id, agent.display_name, exc
                 )
             return _native_terminal_start_error_response(
                 exc, agent.display_name, session_id=ctx.session_id

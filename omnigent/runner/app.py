@@ -2990,6 +2990,7 @@ def create_runner_app(
                 event_dispatcher=getattr(app.state, "runner_event_dispatcher", None),
                 ensure_comment_relay=_ensure_comment_relay_started,
                 rebind_bridge=_rebind_claude_bridge,
+                redrive_launch=_ensure_native_terminal_for_turn,
             )
             _launch_pre: Callable[[bool], Awaitable[PreLaunchResult]] | None = None
             _launch_build: (

@@ -220,19 +220,22 @@ async def test_launch_config_reads_the_metadata_only_snapshot(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reader",
+    ("reader", "read_timeout_s"),
     [
-        pytest.param(_orchestration._codex_native_launch_config, id="codex"),
-        pytest.param(_orchestration._pi_native_launch_config, id="pi"),
-        pytest.param(_orchestration._kiro_native_launch_config, id="kiro"),
-        pytest.param(_orchestration._opencode_native_launch_config, id="opencode"),
-        pytest.param(_orchestration._session_payload_for_host_spawn_check, id="host-spawn"),
-        pytest.param(_orchestration._load_legacy_claude_launch_metadata, id="legacy-claude"),
-        pytest.param(_orchestration._claude_native_session_wants_rebuild, id="claude-rebuild"),
+        pytest.param(_orchestration._codex_native_launch_config, 20.0, id="codex"),
+        pytest.param(_orchestration._pi_native_launch_config, 20.0, id="pi"),
+        pytest.param(_orchestration._kiro_native_launch_config, 20.0, id="kiro"),
+        pytest.param(_orchestration._opencode_native_launch_config, 20.0, id="opencode"),
+        pytest.param(_orchestration._session_payload_for_host_spawn_check, 20.0, id="host-spawn"),
+        pytest.param(_orchestration._load_legacy_claude_launch_metadata, 5.0, id="legacy-claude"),
+        pytest.param(
+            _orchestration._claude_native_session_wants_rebuild, 20.0, id="claude-rebuild"
+        ),
     ],
 )
 async def test_native_metadata_reads_skip_usage_aggregation(
     reader: Callable[..., Awaitable[Any]],
+    read_timeout_s: float,
 ) -> None:
     """Launch and resume metadata reads opt out of expensive response-only work."""
     requests: list[httpx.Request] = []
@@ -262,7 +265,7 @@ async def test_native_metadata_reads_skip_usage_aggregation(
         "include_usage": "false",
         "include_live_status": "false",
     }
-    assert requests[0].extensions["timeout"]["read"] == 20.0
+    assert requests[0].extensions["timeout"]["read"] == read_timeout_s
 
 
 @pytest.mark.asyncio

@@ -3233,6 +3233,39 @@ def read_launch_epoch(bridge_dir: Path) -> int | None:
         return None
 
 
+def clear_claude_status_snapshot(bridge_dir: Path) -> None:
+    """
+    Remove the captured statusLine files so a reset's previous cost total is gone.
+
+    :param bridge_dir: Bridge directory path.
+    """
+    for filename in (_CONTEXT_FILE, CONTEXT_RAW_FILE):
+        with contextlib.suppress(FileNotFoundError):
+            (bridge_dir / filename).unlink()
+
+
+def status_snapshot_predates_reset(bridge_dir: Path) -> bool:
+    """
+    Return whether the statusLine snapshot was captured before a post-reset launch.
+
+    The raw capture decides when present: normalizing it stamps ``context.json``
+    with a fresh mtime however old the capture is. Epoch 0 never reset.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: ``True`` when the snapshot belongs to an earlier conversation.
+    """
+    if not read_launch_epoch(bridge_dir):
+        return False
+    try:
+        launched_ns = (bridge_dir / _LAUNCH_EPOCH_FILE).stat().st_mtime_ns
+    except OSError:
+        return False
+    for filename in (CONTEXT_RAW_FILE, _CONTEXT_FILE):
+        with contextlib.suppress(OSError):
+            return (bridge_dir / filename).stat().st_mtime_ns < launched_ns
+    return False
+
+
 def read_seen_claude_session_ids(bridge_dir: Path) -> set[str]:
     """
     Return Claude session ids already observed by this bridge.
