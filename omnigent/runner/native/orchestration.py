@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import errno
 import functools
@@ -25,10 +26,13 @@ import urllib.parse
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, MutableMapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
-from omnigent.util.http_retry import jittered_retry_delay
+from omnigent.harness_aliases import canonicalize_harness
+from omnigent.runner.identity import RUNNER_ID_ENV_VAR
+from omnigent.util.http_retry import bounded_retry_after_seconds, jittered_retry_delay
 from omnigent.util.json_types import JsonObject as _JsonObject
+from omnigent.util.session_lifecycle import is_session_closed
 
 if TYPE_CHECKING:
     # Type-only import: the runner keeps codex deps out of its runtime import
@@ -1047,20 +1051,40 @@ _LAUNCH_CONFIG_RETRY_MAX_DELAY_S = 10.0
 _LAUNCH_CONFIG_RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
 #: Only a server fault hides the epoch, so a Claude launch retries every 5xx and no 4xx.
 _LAUNCH_SESSION_READ_RETRYABLE_STATUS = frozenset(range(500, 600))
-#: Each read runs under the session's ensure lock, so a slow server must fail fast.
-_LAUNCH_SESSION_READ_TIMEOUT_S = 5.0
+#: Each read runs under the session's ensure lock, so a Claude launch reads at most twice.
+_LAUNCH_SESSION_READ_ATTEMPTS = 2
+#: Two reads plus the longest retry wait; httpx timeouts are per phase, not total.
+_LAUNCH_SESSION_READ_DEADLINE_S = 50.0
 #: A refused launch is re-driven for this long, enough to outlast a server restart.
 _LAUNCH_REDRIVE_WINDOW_S = 900.0
 _LAUNCH_REDRIVE_BASE_DELAY_S = 5.0
 _LAUNCH_REDRIVE_MAX_DELAY_S = 30.0
 _LAUNCH_REDRIVE_MAX_LAUNCHES = 3
 _CLAUDE_LAUNCH_REFUSED_MESSAGE = (
-    "Claude did not start because the Omnigent server did not respond, so this session's "
-    "state could not be confirmed. Your session and chat are safe and nothing was changed. "
-    "Omnigent will keep retrying for up to 15 minutes and start Claude when the server is "
-    "back. A message that triggered this stays in the chat but was not sent to Claude, so "
-    "send it again after Claude starts. If Claude has not started after 15 minutes, send a "
-    "message to try again."
+    "Claude did not start because the Omnigent server did not give a usable answer, so this "
+    "session's state could not be confirmed. Your session and chat are safe and nothing was "
+    "changed. Omnigent will keep retrying for up to 15 minutes and start Claude when the "
+    "server answers. A message that triggered this stays in the chat but was not sent to "
+    "Claude, so send it again after Claude starts. If Claude has not started after 15 "
+    "minutes, send a message to try again."
+)
+_CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE = (
+    "Claude did not start because Omnigent refused access to this session. Your session and "
+    "chat are safe and nothing was changed. Sign in again or check that you have access to "
+    "this session, then send a message to try again. A message that triggered this stays in "
+    "the chat but was not sent to Claude, so send it again."
+)
+_CLAUDE_LAUNCH_STOPPED_UNAVAILABLE_MESSAGE = (
+    "Claude did not start and Omnigent has stopped retrying because the server can no longer "
+    "provide this session. If the session still exists, send a message to try again."
+)
+_CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE = (
+    "Claude did not start and Omnigent has stopped retrying because this session is archived "
+    "or closed."
+)
+_CLAUDE_LAUNCH_STOPPED_HARNESS_MESSAGE = (
+    "Claude did not start and Omnigent has stopped retrying because this session no longer "
+    "uses Claude."
 )
 
 
@@ -1087,9 +1111,82 @@ def _launch_config_fetch_is_transient(exc: httpx.HTTPError) -> bool:
 class _LaunchSessionRejectedError(RuntimeError):
     """The server answered a launch-config fetch with a client error such as ``404``."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_s: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_s = retry_after_s
+
 
 class _ClaudeLaunchRefusedError(OmnigentError):
-    """A Claude launch stopped because a server fault hid the session's epoch."""
+    """A Claude launch stopped because the session's state could not be confirmed.
+
+    :param message: Client-safe text shown verbatim.
+    :param redrivable: Whether a background retry of the launch can succeed.
+    :param retry_after_s: The server's ``Retry-After`` hint, if it sent one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        redrivable: bool = True,
+        retry_after_s: float | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            category=ErrorCategory.SERVER if redrivable else ErrorCategory.USER,
+            impact=ErrorImpact.BLOCKING,
+            phase=ErrorPhase.HARNESS_SETUP,
+        )
+        self.redrivable = redrivable
+        self.retry_after_s = retry_after_s
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClaudeReadRefusal:
+    """Why a session read's status must not launch Claude."""
+
+    message: str
+    redrivable: bool
+
+
+def _claude_read_refusal(status_code: int) -> _ClaudeReadRefusal | None:
+    """Classify a non-200 session read, shared by the launch loader and re-drive probe.
+
+    :param status_code: The HTTP status, e.g. ``503``.
+    :returns: The refusal, or ``None`` for a 4xx that says nothing about the epoch.
+    """
+    if status_code in (401, 403):
+        return _ClaudeReadRefusal(_CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE, redrivable=False)
+    if status_code == 429 or status_code >= 500:
+        return _ClaudeReadRefusal(_CLAUDE_LAUNCH_REFUSED_MESSAGE, redrivable=True)
+    return None
+
+
+def _claude_launch_refused(
+    session_id: str,
+    refusal: _ClaudeReadRefusal,
+    *,
+    reason: str,
+    retry_after_s: float | None = None,
+) -> _ClaudeLaunchRefusedError:
+    """Log a refused Claude launch with its reason and build the error to raise."""
+    _logger.warning(
+        "Refusing Claude launch: session=%s reason=%s redrivable=%s",
+        session_id,
+        reason,
+        refusal.redrivable,
+        extra={"session_id": session_id},
+    )
+    return _ClaudeLaunchRefusedError(
+        refusal.message, redrivable=refusal.redrivable, retry_after_s=retry_after_s
+    )
 
 
 async def _launch_config_retry_sleep(delay: float) -> None:
@@ -1116,6 +1213,7 @@ async def _fetch_native_launch_snapshot(
     runtime_label: str,
     retryable_status: frozenset[int] = _LAUNCH_CONFIG_RETRYABLE_STATUS,
     timeout_s: float = _LAUNCH_CONFIG_FETCH_TIMEOUT_S,
+    attempts: int = _LAUNCH_CONFIG_FETCH_ATTEMPTS,
 ) -> dict[str, Any]:
     """Fetch and validate a session snapshot for a native-terminal launch config.
 
@@ -1134,6 +1232,7 @@ async def _fetch_native_launch_snapshot(
         ``"Codex"``.
     :param retryable_status: HTTP statuses retried before giving up.
     :param timeout_s: Timeout of each attempt.
+    :param attempts: Reads to try before giving up.
     :returns: The snapshot mapping.
     :raises OmnigentError: Server-attributed (blocking, harness setup) when
         retries are exhausted, the server returns a 5xx, or the body is not a
@@ -1148,8 +1247,8 @@ async def _fetch_native_launch_snapshot(
         )
     path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
     resp: httpx.Response | None = None
-    for attempt in range(1, _LAUNCH_CONFIG_FETCH_ATTEMPTS + 1):
-        last_attempt = attempt == _LAUNCH_CONFIG_FETCH_ATTEMPTS
+    for attempt in range(1, attempts + 1):
+        last_attempt = attempt == attempts
         resp = None
         try:
             resp = await server_client.get(
@@ -1184,7 +1283,13 @@ async def _fetch_native_launch_snapshot(
                         impact=ErrorImpact.BLOCKING,
                         phase=ErrorPhase.HARNESS_SETUP,
                     )
-                raise _LaunchSessionRejectedError(message)
+                raise _LaunchSessionRejectedError(
+                    message,
+                    status_code=resp.status_code,
+                    retry_after_s=bounded_retry_after_seconds(
+                        resp, fallback=0.0, max_delay=_LAUNCH_REDRIVE_WINDOW_S
+                    ),
+                )
             retry_reason = f"HTTP {resp.status_code}"
         backoff = min(
             _LAUNCH_CONFIG_FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1)),
@@ -1208,7 +1313,7 @@ async def _fetch_native_launch_snapshot(
             runtime_label,
             retry_reason,
             attempt,
-            _LAUNCH_CONFIG_FETCH_ATTEMPTS,
+            attempts,
             session_id,
             delay,
             extra={"session_id": session_id},
@@ -8724,6 +8829,10 @@ def _publish_native_terminal_start_error(
         status event.
     """
     error = _native_terminal_start_error_payload(exc, runtime_name, session_id=session_id)
+    if isinstance(exc, _ClaudeLaunchRefusedError):
+        _claude_refused_status_sessions.add(session_id)
+    else:
+        _claude_refused_status_sessions.discard(session_id)
     publish_event(
         session_id,
         {
@@ -8975,8 +9084,9 @@ async def _load_legacy_claude_launch_metadata(
 ) -> _ClaudeSessionLaunchMetadata:
     """Fetch Claude launch metadata for servers predating the init envelope.
 
-    :raises _ClaudeLaunchRefusedError: On a transport error or 5xx after retries.
-        A 4xx proceeds with an unknown epoch.
+    :raises _ClaudeLaunchRefusedError: On a transport error, 5xx, malformed body,
+        401, 403 or 429, and on any failed read during a re-drive. Any other 4xx
+        outside a re-drive proceeds with an unknown epoch.
     """
     from omnigent.runner.subagent_routing import routing_class_from_snapshot
     from omnigent.stores.conversation_store import (
@@ -8985,27 +9095,37 @@ async def _load_legacy_claude_launch_metadata(
     )
 
     try:
-        snapshot = await _fetch_native_launch_snapshot(
-            server_client=server_client,
-            session_id=session_id,
-            runtime_label="Claude",
-            retryable_status=_LAUNCH_SESSION_READ_RETRYABLE_STATUS,
-            timeout_s=_LAUNCH_SESSION_READ_TIMEOUT_S,
-        )
-    except _LaunchSessionRejectedError:
-        _logger.debug(
-            "Server rejected the session read for %s; terminal will use Claude's defaults",
-            session_id,
-        )
-        return _ClaudeSessionLaunchMetadata()
-    except (OmnigentError, RuntimeError) as exc:
+        async with asyncio.timeout(_LAUNCH_SESSION_READ_DEADLINE_S):
+            snapshot = await _fetch_native_launch_snapshot(
+                server_client=server_client,
+                session_id=session_id,
+                runtime_label="Claude",
+                retryable_status=_LAUNCH_SESSION_READ_RETRYABLE_STATUS,
+                attempts=_LAUNCH_SESSION_READ_ATTEMPTS,
+            )
+    except _LaunchSessionRejectedError as exc:
+        refusal = _claude_read_refusal(exc.status_code) if exc.status_code else None
+        if refusal is None:
+            if _claude_redrive_attempt.get() is None:
+                _logger.debug(
+                    "Server rejected the session read for %s; terminal will use Claude's defaults",
+                    session_id,
+                )
+                return _ClaudeSessionLaunchMetadata()
+            # The probe's answer is stale by now, and a re-drive must never launch blind.
+            refusal = _ClaudeReadRefusal(
+                _CLAUDE_LAUNCH_STOPPED_UNAVAILABLE_MESSAGE, redrivable=False
+            )
+        raise _claude_launch_refused(
+            session_id, refusal, reason=str(exc), retry_after_s=exc.retry_after_s
+        ) from exc
+    except (OmnigentError, RuntimeError, TimeoutError, ConnectionError) as exc:
         # Launching blind could undo a reset or orphan a chat; a refused launch
         # loses nothing and can be retried.
-        raise _ClaudeLaunchRefusedError(
-            _CLAUDE_LAUNCH_REFUSED_MESSAGE,
-            category=ErrorCategory.SERVER,
-            impact=ErrorImpact.BLOCKING,
-            phase=ErrorPhase.HARNESS_SETUP,
+        raise _claude_launch_refused(
+            session_id,
+            _ClaudeReadRefusal(_CLAUDE_LAUNCH_REFUSED_MESSAGE, redrivable=True),
+            reason=f"{type(exc).__name__}: {exc} (cause: {exc.__cause__!r})",
         ) from exc
 
     effort = snapshot.get("reasoning_effort")
@@ -10597,6 +10717,8 @@ class NativeLaunchContext:
     rebind_bridge: Callable[[str, str], Awaitable[None]] | None = None
     #: Ensures a session's terminal, ``(session_id, harness_name)``; repeats a refused launch.
     redrive_launch: Callable[[str, str | None], Awaitable[None]] | None = None
+    #: Reads a session's last published status; guards the refusal status clear.
+    session_status: Callable[[str], str | None] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -10799,9 +10921,14 @@ async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
             record_launch_config=ctx.record_launch_config,
             rebind_bridge=ctx.rebind_bridge,
         )
-    except _ClaudeLaunchRefusedError:
-        _schedule_claude_launch_redrive(ctx)
+    except _ClaudeLaunchRefusedError as exc:
+        redrive_attempt = _claude_redrive_attempt.get()
+        if redrive_attempt is not None:
+            redrive_attempt.refusal = exc
+        if exc.redrivable:
+            _schedule_claude_launch_redrive(ctx, first_wait_s=exc.retry_after_s)
         raise
+    _clear_claude_refusal_status(ctx)
     _start_claude_relay_after_launch(ctx)
     return view
 
@@ -10810,34 +10937,153 @@ async def _launch_claude(ctx: NativeLaunchContext) -> SessionResourceView:
 _claude_launch_redrives: dict[str, asyncio.Task[None]] = {}
 
 
-def _schedule_claude_launch_redrive(ctx: NativeLaunchContext) -> None:
+#: Sessions whose last start failure on this runner was a refused launch.
+_claude_refused_status_sessions: set[str] = set()
+
+
+@dataclasses.dataclass
+class _ClaudeRedriveAttempt:
+    """One re-drive launch; the refusal, if any, is recorded by ``_launch_claude``."""
+
+    refusal: _ClaudeLaunchRefusedError | None = None
+
+
+#: Set while a re-drive runs a launch, so the launch never proceeds on a failed read.
+_claude_redrive_attempt: contextvars.ContextVar[_ClaudeRedriveAttempt | None] = (
+    contextvars.ContextVar("claude_redrive_attempt", default=None)
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClaudeRedriveProbe:
+    """What a re-drive should do next.
+
+    :param verdict: ``"launch"``, ``"wait"`` or ``"stop"``.
+    :param reason: Why, for the log.
+    :param message: Status to show on ``"stop"``; ``None`` leaves the status alone.
+    :param retry_after_s: The server's ``Retry-After`` hint on ``"wait"``.
+    """
+
+    verdict: Literal["launch", "wait", "stop"]
+    reason: str
+    message: str | None = None
+    retry_after_s: float | None = None
+
+
+def _clear_claude_refusal_status(ctx: NativeLaunchContext) -> None:
+    """Clear a refusal's ``failed`` status after a launch started the pane.
+
+    ``failed`` only yields to a ``running`` edge. A status other than ``failed``
+    may be a live turn, which must not see a synthetic edge.
+    """
+    session_id = ctx.session_id
+    if session_id not in _claude_refused_status_sessions:
+        return
+    _claude_refused_status_sessions.discard(session_id)
+    if ctx.session_status is None or ctx.session_status(session_id) != "failed":
+        return
+    ctx.publish_event(session_id, {"type": "session.status", "status": "running"})
+    ctx.publish_event(session_id, {"type": "session.status", "status": "idle"})
+
+
+def _schedule_claude_launch_redrive(
+    ctx: NativeLaunchContext, *, first_wait_s: float | None = None
+) -> None:
     """Start one background re-drive of a refused launch; nothing else restarts it."""
     session_id = ctx.session_id
     if ctx.redrive_launch is None or session_id in _claude_launch_redrives:
         return
     task = asyncio.create_task(
-        _redrive_refused_claude_launch(ctx),
+        _redrive_refused_claude_launch(ctx, first_wait_s=first_wait_s),
         name=f"claude-launch-redrive:{session_id}",
     )
     _claude_launch_redrives[session_id] = task
     task.add_done_callback(lambda _done: _claude_launch_redrives.pop(session_id, None))
 
 
-async def _claude_session_can_redrive(ctx: NativeLaunchContext) -> bool | None:
-    """Probe the session once: ``True`` if readable, ``None`` to wait, ``False`` to stop."""
+def _cancel_claude_launch_redrive(session_id: str) -> None:
+    """Forget a deleted session's refused launch and stop its re-drive."""
+    _claude_refused_status_sessions.discard(session_id)
+    task = _claude_launch_redrives.get(session_id)
+    if task is not None:
+        task.cancel()
+
+
+def _claude_redrive_stop(snapshot: Mapping[str, Any]) -> _ClaudeRedriveProbe | None:
+    """Return why a readable session must not be launched here, or ``None`` if it may."""
+    labels = snapshot.get("labels")
+    title = snapshot.get("title")
+    if snapshot.get("archived") is True or is_session_closed(
+        labels if isinstance(labels, dict) else None,
+        title if isinstance(title, str) else None,
+    ):
+        return _ClaudeRedriveProbe(
+            "stop", "archived or closed", message=_CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE
+        )
+    bound_runner_id = snapshot.get("runner_id")
+    own_runner_id = os.environ.get(RUNNER_ID_ENV_VAR)
+    if bound_runner_id and own_runner_id and bound_runner_id != own_runner_id:
+        # The bound runner owns the session's status from here.
+        return _ClaudeRedriveProbe("stop", f"moved to runner {bound_runner_id}")
+    harness = snapshot.get("harness")
+    if isinstance(harness, str) and canonicalize_harness(harness) not in (
+        "auto",
+        "claude-native",
+    ):
+        return _ClaudeRedriveProbe(
+            "stop", f"harness is now {harness}", message=_CLAUDE_LAUNCH_STOPPED_HARNESS_MESSAGE
+        )
+    return None
+
+
+async def _probe_claude_redrive(ctx: NativeLaunchContext) -> _ClaudeRedriveProbe:
+    """Read the session once, without the ensure lock, to decide the re-drive's next step."""
     assert ctx.server_client is not None
     try:
         response = await ctx.server_client.get(
             f"/v1/sessions/{urllib.parse.quote(ctx.session_id, safe='')}",
             params=_SESSION_METADATA_PARAMS,
-            timeout=_LAUNCH_SESSION_READ_TIMEOUT_S,
+            timeout=_LAUNCH_CONFIG_FETCH_TIMEOUT_S,
         )
-    except (httpx.HTTPError, ConnectionError):
-        return None
-    if response.status_code == 200:
-        return True
-    # A 4xx means the session is gone or barred; a launch would run blind.
-    return None if response.status_code >= 500 else False
+    except (httpx.HTTPError, ConnectionError) as exc:
+        return _ClaudeRedriveProbe("wait", type(exc).__name__)
+    status_code = response.status_code
+    if status_code == 200:
+        try:
+            snapshot = response.json()
+        except ValueError:
+            return _ClaudeRedriveProbe("wait", "invalid JSON")
+        if not isinstance(snapshot, dict):
+            return _ClaudeRedriveProbe("wait", "snapshot was not a JSON object")
+        return _claude_redrive_stop(snapshot) or _ClaudeRedriveProbe("launch", "readable")
+    reason = f"HTTP {status_code}"
+    refusal = _claude_read_refusal(status_code)
+    if refusal is None:
+        return _ClaudeRedriveProbe(
+            "stop", reason, message=_CLAUDE_LAUNCH_STOPPED_UNAVAILABLE_MESSAGE
+        )
+    if not refusal.redrivable:
+        return _ClaudeRedriveProbe("stop", reason, message=refusal.message)
+    retry_after_s = bounded_retry_after_seconds(
+        response, fallback=0.0, max_delay=_LAUNCH_REDRIVE_WINDOW_S
+    )
+    return _ClaudeRedriveProbe("wait", reason, retry_after_s=retry_after_s)
+
+
+def _publish_claude_redrive_stop(ctx: NativeLaunchContext, probe: _ClaudeRedriveProbe) -> None:
+    """Replace a "keep retrying" status once retrying has stopped."""
+    session_id = ctx.session_id
+    if probe.message is None:
+        _claude_refused_status_sessions.discard(session_id)
+        return
+    if ctx.session_status is None or ctx.session_status(session_id) != "failed":
+        return
+    _publish_native_terminal_start_error(
+        ctx.publish_event,
+        session_id,
+        "Claude",
+        _ClaudeLaunchRefusedError(probe.message, redrivable=False),
+    )
 
 
 async def _claude_pane_exists(ctx: NativeLaunchContext) -> bool:
@@ -10846,17 +11092,23 @@ async def _claude_pane_exists(ctx: NativeLaunchContext) -> bool:
     return existing is not None
 
 
-async def _redrive_refused_claude_launch(ctx: NativeLaunchContext) -> None:
+async def _redrive_refused_claude_launch(
+    ctx: NativeLaunchContext, *, first_wait_s: float | None = None
+) -> None:
     """Repeat a refused Claude launch once the server answers, within fixed bounds.
 
     No lock is held between attempts, so a message or reset can go first. Each
     launch reads the epoch afresh, so a reset made meanwhile is honoured. Wakes
     early when the tunnel reconnects; a 5xx with no tunnel drop relies on the poll.
+
+    :param ctx: The context of the refused launch.
+    :param first_wait_s: The refusal's ``Retry-After`` hint, if any.
     """
     assert ctx.redrive_launch is not None
     session_id = ctx.session_id
     deadline = time.monotonic() + _LAUNCH_REDRIVE_WINDOW_S
     delay = _LAUNCH_REDRIVE_BASE_DELAY_S
+    retry_after_s = first_wait_s or 0.0
     generation = pending_approvals.current_server_generation()
     launches = 0
     try:
@@ -10866,28 +11118,38 @@ async def _redrive_refused_claude_launch(ctx: NativeLaunchContext) -> None:
                 break
             try:
                 generation = await pending_approvals.wait_for_server_reconnect(
-                    generation, timeout_seconds=min(delay, remaining)
+                    generation, timeout_seconds=min(max(delay, retry_after_s), remaining)
                 )
             except TimeoutError:
                 delay = min(delay * 2, _LAUNCH_REDRIVE_MAX_DELAY_S)
             if await _claude_pane_exists(ctx):
                 return
-            readable = await _claude_session_can_redrive(ctx)
-            if readable is None:
+            probe = await _probe_claude_redrive(ctx)
+            retry_after_s = probe.retry_after_s or 0.0
+            if probe.verdict == "wait":
                 continue
-            if not readable:
-                _logger.info(
-                    "Dropping refused Claude launch: session=%s no longer readable",
+            if probe.verdict == "stop":
+                _logger.warning(
+                    "Stopped re-driving refused Claude launch: session=%s reason=%s",
                     session_id,
+                    probe.reason,
                     extra={"session_id": session_id},
                 )
+                _publish_claude_redrive_stop(ctx, probe)
                 return
-            launches += 1
-            await ctx.redrive_launch(session_id, "claude-native")
+            attempt = _ClaudeRedriveAttempt()
+            token = _claude_redrive_attempt.set(attempt)
+            try:
+                await ctx.redrive_launch(session_id, "claude-native")
+            finally:
+                _claude_redrive_attempt.reset(token)
+            if attempt.refusal is None:
+                launches += 1
+            elif not attempt.refusal.redrivable:
+                return
+            else:
+                retry_after_s = attempt.refusal.retry_after_s or 0.0
             if await _claude_pane_exists(ctx):
-                # ``failed`` only yields to a ``running`` edge, and the refusal is over.
-                ctx.publish_event(session_id, {"type": "session.status", "status": "running"})
-                ctx.publish_event(session_id, {"type": "session.status", "status": "idle"})
                 return
     except Exception:
         _logger.exception(

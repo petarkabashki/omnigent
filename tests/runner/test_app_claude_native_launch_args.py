@@ -13,12 +13,14 @@ passed. See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import json
 import logging
 import os
 import shlex
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,16 +35,27 @@ from omnigent.harnesses.claude_native.main import (
 from omnigent.runner import pending_approvals
 from omnigent.runner.app import _build_claude_native_base_args, _claude_terminal_env_unset
 from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
+from omnigent.runner.native import orchestration
 from omnigent.runner.native.orchestration import (
+    _CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE,
     _CLAUDE_LAUNCH_REFUSED_MESSAGE,
+    _CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE,
+    _CLAUDE_LAUNCH_STOPPED_HARNESS_MESSAGE,
+    _CLAUDE_LAUNCH_STOPPED_UNAVAILABLE_MESSAGE,
     _ROUTED_SPAWN_ALLOWED_TOOLS,
     NativeLaunchContext,
+    _cancel_claude_launch_redrive,
     _claude_launch_metadata_from_envelope,
     _claude_launch_permission_mode,
+    _claude_launch_redrives,
+    _claude_redrive_attempt,
+    _claude_refused_status_sessions,
     _ClaudeLaunchRefusedError,
+    _launch_claude,
     _load_claude_launch_metadata,
     _load_legacy_claude_launch_metadata,
     _native_terminal_start_error_payload,
+    _publish_native_terminal_start_error,
     _redrive_refused_claude_launch,
     _routed_spawn_launch_args,
 )
@@ -948,8 +961,7 @@ async def test_legacy_metadata_loader_reads_the_auto_harness_flag(
     ("respond", "expected_epoch"),
     [
         pytest.param(lambda: httpx.Response(404), None, id="not-found"),
-        pytest.param(lambda: httpx.Response(403), None, id="forbidden"),
-        pytest.param(lambda: httpx.Response(429), None, id="rate-limited"),
+        pytest.param(lambda: httpx.Response(410), None, id="gone"),
         pytest.param(lambda: httpx.Response(200, json={}), 0, id="server-without-epochs"),
         pytest.param(lambda: httpx.Response(200, json={"context_epoch": 2}), 2, id="known"),
     ],
@@ -1017,9 +1029,9 @@ async def test_legacy_metadata_refuses_when_the_session_read_keeps_failing(
         with pytest.raises(_ClaudeLaunchRefusedError):
             await _load_legacy_claude_launch_metadata(client, "conv_abc")
 
-    assert len(requests) == 3
-    # Reads run under the ensure lock, so one slow server can't hold it for a minute.
-    assert {request.extensions["timeout"]["read"] for request in requests} == {5.0}
+    # Reads run under the ensure lock, but a slow server still gets a full 20 s read.
+    assert len(requests) == 2
+    assert {request.extensions["timeout"]["read"] for request in requests} == {20.0}
 
 
 async def test_legacy_metadata_refuses_after_repeated_transport_errors(
@@ -1037,7 +1049,91 @@ async def test_legacy_metadata_refuses_after_repeated_transport_errors(
         with pytest.raises(_ClaudeLaunchRefusedError):
             await _load_legacy_claude_launch_metadata(client, "conv_abc")
 
-    assert len(requests) == 3
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "message", "redrivable", "retry_after_s"),
+    [
+        pytest.param(401, {}, _CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE, False, 0.0, id="signed-out"),
+        pytest.param(403, {}, _CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE, False, 0.0, id="barred"),
+        pytest.param(
+            429, {"Retry-After": "7"}, _CLAUDE_LAUNCH_REFUSED_MESSAGE, True, 7.0, id="rate-limited"
+        ),
+    ],
+)
+async def test_legacy_metadata_refuses_access_and_rate_limit_answers_at_once(
+    status: int, headers: dict[str, str], message: str, redrivable: bool, retry_after_s: float
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, headers=headers)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        with pytest.raises(_ClaudeLaunchRefusedError) as refused:
+            await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert len(requests) == 1
+    assert str(refused.value) == message
+    assert refused.value.redrivable is redrivable
+    assert refused.value.retry_after_s == retry_after_s
+
+
+@pytest.mark.parametrize(
+    "body",
+    [pytest.param(b"not json", id="not-json"), pytest.param(b"[1]", id="not-an-object")],
+)
+async def test_legacy_metadata_refuses_a_malformed_answer_and_logs_why(
+    no_launch_retry_delay: None, body: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+        base_url="http://runner",
+    ) as client:
+        with (
+            caplog.at_level("WARNING", logger=orchestration._logger.name),
+            pytest.raises(_ClaudeLaunchRefusedError) as refused,
+        ):
+            await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert refused.value.redrivable is True
+    refusals = [r.getMessage() for r in caplog.records if "Refusing Claude launch" in r.message]
+    assert len(refusals) == 1
+    assert "session=conv_abc" in refusals[0]
+    assert "launch config" in refusals[0]
+
+
+async def test_legacy_metadata_refuses_when_the_reads_outlast_their_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(orchestration, "_LAUNCH_SESSION_READ_DEADLINE_S", 0.01)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        await asyncio.sleep(3600)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://runner"
+    ) as client:
+        with (
+            caplog.at_level("WARNING", logger=orchestration._logger.name),
+            pytest.raises(_ClaudeLaunchRefusedError),
+        ):
+            await _load_legacy_claude_launch_metadata(client, "conv_abc")
+
+    assert any("reason=TimeoutError" in record.getMessage() for record in caplog.records)
+
+
+def test_launch_read_deadline_covers_two_reads_and_the_longest_retry_wait() -> None:
+    assert orchestration._LAUNCH_SESSION_READ_DEADLINE_S == (
+        orchestration._LAUNCH_SESSION_READ_ATTEMPTS * orchestration._LAUNCH_CONFIG_FETCH_TIMEOUT_S
+        + orchestration._LAUNCH_CONFIG_RETRY_MAX_DELAY_S
+    )
 
 
 def test_refused_launch_message_reaches_the_owner_verbatim() -> None:
@@ -1046,23 +1142,43 @@ def test_refused_launch_message_reaches_the_owner_verbatim() -> None:
     payload = _native_terminal_start_error_payload(refusal, "Claude", session_id="conv_abc")
 
     assert payload["message"] == (
-        "Claude did not start because the Omnigent server did not respond, so this session's "
-        "state could not be confirmed. Your session and chat are safe and nothing was changed. "
-        "Omnigent will keep retrying for up to 15 minutes and start Claude when the server is "
-        "back. A message that triggered this stays in the chat but was not sent to Claude, so "
-        "send it again after Claude starts. If Claude has not started after 15 minutes, send a "
-        f"message to try again. Error ID: {payload['error_id']}."
+        "Claude did not start because the Omnigent server did not give a usable answer, so this "
+        "session's state could not be confirmed. Your session and chat are safe and nothing was "
+        "changed. Omnigent will keep retrying for up to 15 minutes and start Claude when the "
+        "server answers. A message that triggered this stays in the chat but was not sent to "
+        "Claude, so send it again after Claude starts. If Claude has not started after 15 "
+        f"minutes, send a message to try again. Error ID: {payload['error_id']}."
     )
+
+
+def test_access_refusal_makes_no_retry_promise() -> None:
+    refusal = _ClaudeLaunchRefusedError(_CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE, redrivable=False)
+
+    payload = _native_terminal_start_error_payload(refusal, "Claude", session_id="conv_abc")
+
+    assert "refused access to this session" in payload["message"]
+    assert "safe" in payload["message"]
+    assert "Sign in" in payload["message"]
+    assert "15 minutes" not in payload["message"]
+    assert "retrying" not in payload["message"]
 
 
 class _RedriveHarness:
     """A refused launch's context with a recorded ensure and a scripted pane."""
 
-    def __init__(self, respond: Callable[[], httpx.Response], *, launch_starts_pane: bool) -> None:
+    def __init__(
+        self,
+        respond: Callable[[], httpx.Response],
+        *,
+        launch_starts_pane: bool,
+        refused_launches: int = 0,
+        status: str | None = None,
+    ) -> None:
         self.ensures: list[tuple[str, str | None]] = []
         self.events: list[dict[str, Any]] = []
         self.pane: object | None = None
         self.launch_starts_pane = launch_starts_pane
+        self.refused_launches = refused_launches
         self.client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda _request: respond()), base_url="http://runner"
         )
@@ -1072,6 +1188,7 @@ class _RedriveHarness:
             publish_event=lambda _session_id, event: self.events.append(dict(event)),
             server_client=self.client,
             redrive_launch=self._ensure,
+            session_status=lambda _session_id: status,
         )
 
     async def get_terminal_resource(self, session_id: str, terminal_id: str) -> object | None:
@@ -1080,7 +1197,12 @@ class _RedriveHarness:
 
     async def _ensure(self, session_id: str, harness_name: str | None) -> None:
         self.ensures.append((session_id, harness_name))
-        if self.launch_starts_pane:
+        if self.refused_launches > 0:
+            self.refused_launches -= 1
+            attempt = _claude_redrive_attempt.get()
+            assert attempt is not None
+            attempt.refusal = _ClaudeLaunchRefusedError(_CLAUDE_LAUNCH_REFUSED_MESSAGE)
+        elif self.launch_starts_pane:
             self.pane = object()
 
 
@@ -1092,15 +1214,13 @@ def quick_redrive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(f"{orchestration}._LAUNCH_REDRIVE_WINDOW_S", 0.05)
 
 
-async def test_redrive_launches_once_when_the_server_answers_and_clears_the_failure(
-    quick_redrive: None,
-) -> None:
+async def test_redrive_launches_once_when_the_server_answers(quick_redrive: None) -> None:
     harness = _RedriveHarness(lambda: httpx.Response(200, json={}), launch_starts_pane=True)
 
     await _redrive_refused_claude_launch(harness.ctx)
 
     assert harness.ensures == [("conv_abc", "claude-native")]
-    assert [event["status"] for event in harness.events] == ["running", "idle"]
+    assert harness.events == []
 
 
 async def test_redrive_stops_at_its_launch_bound_when_launches_keep_failing(
@@ -1114,18 +1234,276 @@ async def test_redrive_stops_at_its_launch_bound_when_launches_keep_failing(
     assert harness.events == []
 
 
-@pytest.mark.parametrize(
-    "status",
-    [pytest.param(503, id="server-still-down"), pytest.param(404, id="session-deleted-meanwhile")],
-)
-async def test_redrive_never_launches_without_a_readable_session(
-    quick_redrive: None, status: int
+async def test_refused_redrive_attempts_do_not_spend_the_launch_budget(
+    quick_redrive: None,
 ) -> None:
-    harness = _RedriveHarness(lambda: httpx.Response(status), launch_starts_pane=True)
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=True, refused_launches=5
+    )
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert len(harness.ensures) == 6
+    assert harness.pane is not None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(httpx.Response(503), id="server-still-down"),
+        pytest.param(httpx.Response(429), id="rate-limited"),
+        pytest.param(httpx.Response(200, content=b"not json"), id="malformed"),
+        pytest.param(httpx.Response(200, json=[1]), id="not-an-object"),
+    ],
+)
+async def test_redrive_keeps_waiting_without_a_usable_answer(
+    quick_redrive: None, response: httpx.Response
+) -> None:
+    harness = _RedriveHarness(lambda: response, launch_starts_pane=True, status="failed")
 
     await _redrive_refused_claude_launch(harness.ctx)
 
     assert harness.ensures == []
+    assert harness.events == []
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        pytest.param(
+            httpx.Response(404), _CLAUDE_LAUNCH_STOPPED_UNAVAILABLE_MESSAGE, id="deleted-meanwhile"
+        ),
+        pytest.param(httpx.Response(403), _CLAUDE_LAUNCH_ACCESS_REFUSED_MESSAGE, id="barred"),
+        pytest.param(
+            httpx.Response(200, json={"archived": True}),
+            _CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE,
+            id="archived",
+        ),
+        pytest.param(
+            httpx.Response(200, json={"labels": {"omnigent.closed": "true"}}),
+            _CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE,
+            id="closed-label",
+        ),
+        pytest.param(
+            httpx.Response(200, json={"title": "researcher:auth:closed:conv_abc123"}),
+            _CLAUDE_LAUNCH_STOPPED_CLOSED_MESSAGE,
+            id="closed-title",
+        ),
+        pytest.param(
+            httpx.Response(200, json={"harness": "codex-native"}),
+            _CLAUDE_LAUNCH_STOPPED_HARNESS_MESSAGE,
+            id="harness-changed",
+        ),
+    ],
+)
+async def test_redrive_stops_and_replaces_the_keep_retrying_status(
+    quick_redrive: None,
+    response: httpx.Response,
+    message: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = _RedriveHarness(lambda: response, launch_starts_pane=True, status="failed")
+
+    with caplog.at_level("WARNING", logger=orchestration._logger.name):
+        await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == []
+    assert [event["status"] for event in harness.events] == ["failed"]
+    assert harness.events[0]["error"]["message"].startswith(message)
+    assert any("Stopped re-driving" in record.getMessage() for record in caplog.records)
+
+
+async def test_redrive_stop_leaves_a_status_that_has_moved_on(quick_redrive: None) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={"archived": True}),
+        launch_starts_pane=True,
+        status="running",
+    )
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == []
+    assert harness.events == []
+
+
+async def test_redrive_leaves_a_session_moved_to_another_runner_to_that_runner(
+    quick_redrive: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_RUNNER_ID", "runner_here")
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={"runner_id": "runner_there"}),
+        launch_starts_pane=True,
+        status="failed",
+    )
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == []
+    assert harness.events == []
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        pytest.param({"runner_id": "runner_here", "harness": "claude-native"}, id="same"),
+        pytest.param({"runner_id": None, "harness": None}, id="unbound"),
+        pytest.param({"harness": "auto"}, id="auto-routed"),
+    ],
+)
+async def test_redrive_launches_a_session_still_claude_on_this_runner(
+    quick_redrive: None, monkeypatch: pytest.MonkeyPatch, snapshot: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("OMNIGENT_RUNNER_ID", "runner_here")
+    harness = _RedriveHarness(lambda: httpx.Response(200, json=snapshot), launch_starts_pane=True)
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.ensures == [("conv_abc", "claude-native")]
+
+
+async def test_redrive_honours_retry_after_from_the_refusal_and_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    async def record_wait(generation: int, *, timeout_seconds: float) -> int:
+        waits.append(timeout_seconds)
+        return generation
+
+    monkeypatch.setattr(pending_approvals, "wait_for_server_reconnect", record_wait)
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "120"}),
+        httpx.Response(200, json={}),
+    ]
+    harness = _RedriveHarness(lambda: responses.pop(0), launch_starts_pane=True)
+
+    await _redrive_refused_claude_launch(harness.ctx, first_wait_s=9.0)
+
+    assert waits == [9.0, 120.0]
+
+
+class _LoaderLaunch:
+    """Runs the real ``_launch_claude`` on the real loader, as a re-drive's ensure does."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, harness: _RedriveHarness) -> None:
+        self.reads = 0
+        self.harness = harness
+        monkeypatch.setattr(orchestration, "_auto_create_claude_terminal", self._auto_create)
+        harness.ctx = dataclasses.replace(harness.ctx, redrive_launch=self.ensure)
+
+    async def _auto_create(self, session_id: str, *_args: Any, **kwargs: Any) -> object:
+        await _load_legacy_claude_launch_metadata(kwargs["server_client"], session_id)
+        self.harness.pane = object()
+        return self.harness.pane
+
+    async def ensure(self, session_id: str, harness_name: str | None) -> None:
+        self.harness.ensures.append((session_id, harness_name))
+        # The ensure route turns a refusal into a response.
+        with contextlib.suppress(_ClaudeLaunchRefusedError):
+            await _launch_claude(self.harness.ctx)
+
+
+async def test_redrive_never_launches_on_a_client_error_after_the_probe_passed(
+    quick_redrive: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    responses = [httpx.Response(200, json={}), httpx.Response(404)]
+    harness = _RedriveHarness(lambda: responses.pop(0), launch_starts_pane=False)
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _redrive_refused_claude_launch(harness.ctx)
+
+    assert harness.pane is None
+    assert responses == []
+    assert len(harness.ensures) == 1
+
+
+async def test_outside_a_redrive_a_client_error_still_launches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(404), launch_starts_pane=False)
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _launch_claude(harness.ctx)
+
+    assert harness.pane is not None
+
+
+async def test_access_refusal_schedules_no_redrive(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = _RedriveHarness(lambda: httpx.Response(401), launch_starts_pane=False)
+    _LoaderLaunch(monkeypatch, harness)
+
+    with pytest.raises(_ClaudeLaunchRefusedError):
+        await _launch_claude(harness.ctx)
+
+    assert "conv_abc" not in _claude_launch_redrives
+
+
+@pytest.fixture
+def refused_session() -> Iterator[str]:
+    _claude_refused_status_sessions.add("conv_abc")
+    yield "conv_abc"
+    _claude_refused_status_sessions.discard("conv_abc")
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        pytest.param("failed", ["running", "idle"], id="refusal-still-showing"),
+        pytest.param("running", [], id="live-turn"),
+        pytest.param("idle", [], id="already-clear"),
+    ],
+)
+async def test_any_successful_launch_clears_a_refusal_without_touching_a_live_turn(
+    monkeypatch: pytest.MonkeyPatch, refused_session: str, status: str, expected: list[str]
+) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=False, status=status
+    )
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _launch_claude(harness.ctx)
+
+    assert [event["status"] for event in harness.events] == expected
+    assert refused_session not in _claude_refused_status_sessions
+
+
+async def test_a_launch_leaves_a_failure_it_did_not_refuse_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _RedriveHarness(
+        lambda: httpx.Response(200, json={}), launch_starts_pane=False, status="failed"
+    )
+    _LoaderLaunch(monkeypatch, harness)
+
+    await _launch_claude(harness.ctx)
+
+    assert harness.events == []
+
+
+def test_only_a_refused_launch_marks_the_status_for_clearing() -> None:
+    def publish(_session_id: str, _event: dict[str, Any]) -> None:
+        return None
+
+    refusal = _ClaudeLaunchRefusedError(_CLAUDE_LAUNCH_REFUSED_MESSAGE)
+    _publish_native_terminal_start_error(publish, "conv_marked", "Claude", refusal)
+    assert "conv_marked" in _claude_refused_status_sessions
+
+    _publish_native_terminal_start_error(publish, "conv_marked", "Claude", RuntimeError("boom"))
+    assert "conv_marked" not in _claude_refused_status_sessions
+
+
+async def test_deleting_a_session_cancels_its_redrive(refused_session: str) -> None:
+    redrive = asyncio.create_task(asyncio.sleep(3600))
+    _claude_launch_redrives[refused_session] = redrive
+
+    try:
+        _cancel_claude_launch_redrive(refused_session)
+        await asyncio.gather(redrive, return_exceptions=True)
+    finally:
+        _claude_launch_redrives.pop(refused_session, None)
+
+    assert redrive.cancelled()
+    assert refused_session not in _claude_refused_status_sessions
 
 
 async def test_redrive_leaves_a_pane_someone_else_started_alone(quick_redrive: None) -> None:

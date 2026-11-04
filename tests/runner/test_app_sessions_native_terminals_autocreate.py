@@ -1859,9 +1859,11 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
         return native_spec
 
     launched_specs: list[Any] = []
+    launch_contexts: list[Any] = []
 
     async def _fake_launch(ctx: Any) -> SessionResourceView:
         launched_specs.append(ctx.agent_spec)
+        launch_contexts.append(ctx)
         return SessionResourceView(
             id=f"terminal_{terminal_name}_main",
             type="terminal",
@@ -1899,6 +1901,30 @@ async def test_native_launch_arms_resolve_agent_spec_for_terminal(
     for launched_spec in launched_specs:
         assert launched_spec is not None, "launch context carried no agent spec"
         assert _agent_os_env_from_spec(launched_spec) is agent_os_env
+    # Both launch paths must see the published status, or a refusal never clears.
+    app.state.native_pane_status[session_id] = "failed"
+    assert [ctx.session_status(session_id) for ctx in launch_contexts] == ["failed", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_runner_delete_session_cancels_a_refused_launch_redrive() -> None:
+    session_id = "7d1c0a2e9b3f4c5d8e6f1a2b3c4d5e6f"
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=TerminalRegistry(),
+    )
+    redrive = asyncio.create_task(asyncio.sleep(3600))
+    _claude_launch_redrives[session_id] = redrive
+    try:
+        async with _runner_client(app) as client:
+            await client.delete(f"/v1/sessions/{session_id}")
+        await asyncio.gather(redrive, return_exceptions=True)
+    finally:
+        _claude_launch_redrives.pop(session_id, None)
+        redrive.cancel()
+
+    assert redrive.cancelled()
 
 
 @pytest.mark.asyncio

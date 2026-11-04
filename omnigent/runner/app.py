@@ -126,6 +126,7 @@ from omnigent.runner.native import (
     _antigravity_native_terminal_arrives_via_transfer,
     _auto_create_repl_terminal,
     _cancel_auto_forwarder_task,
+    _cancel_claude_launch_redrive,
     _claude_native_bridge_id_for_session,
     _claude_native_bridge_id_with_optional_labels,
     _claude_native_session_wants_rebuild,
@@ -2991,6 +2992,7 @@ def create_runner_app(
                 ensure_comment_relay=_ensure_comment_relay_started,
                 rebind_bridge=_rebind_claude_bridge,
                 redrive_launch=_ensure_native_terminal_for_turn,
+                session_status=_native_pane_status.get,
             )
             _launch_pre: Callable[[bool], Awaitable[PreLaunchResult]] | None = None
             _launch_build: (
@@ -3659,6 +3661,7 @@ def create_runner_app(
         _required_terminal_exit_errors.pop(session_id, None)
         _clean_terminal_exit_responses.pop(session_id, None)
         _native_pane_status.pop(session_id, None)
+        _cancel_claude_launch_redrive(session_id)
         _native_interrupt_runner.clear_pending_interrupt(session_id)
         _ingest_next_seq.pop(session_id, None)
         _ingest_now_serving.pop(session_id, None)

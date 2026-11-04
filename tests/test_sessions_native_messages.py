@@ -26,6 +26,45 @@ def _conversation_with_wrapper(wrapper: str) -> Conversation:
     )
 
 
+class _EnsureClient:
+    """Records the ensure POST's timeout and accepts the request."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    async def post(self, url: str, *, json: dict[str, object], timeout: float) -> httpx.Response:
+        del json
+        self.timeouts.append(timeout)
+        return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+
+
+@pytest.mark.parametrize(
+    ("harness", "expected_timeout_s"),
+    [("claude-native", 60.0), ("codex-native", 10.0)],
+)
+async def test_ensure_wait_outlasts_the_claude_launch_read(
+    monkeypatch: pytest.MonkeyPatch, harness: str, expected_timeout_s: float
+) -> None:
+    """The runner's refusal, not this wait expiring, must decide the turn's error."""
+    from omnigent.runner.native.orchestration import _LAUNCH_SESSION_READ_DEADLINE_S
+    from omnigent.server.routes import sessions as sessions_routes
+    from omnigent.server.routes._sessions.orchestration import (
+        _CLAUDE_NATIVE_TERMINAL_ENSURE_TIMEOUT_S,
+    )
+
+    monkeypatch.setattr(sessions_routes, "_resolve_harness", lambda _conv: harness)
+    client = _EnsureClient()
+
+    await sessions_routes._ensure_native_terminal_ready(
+        client,  # type: ignore[arg-type]
+        "conv_abc",
+        _conversation_with_wrapper(harness),
+    )
+
+    assert client.timeouts == [expected_timeout_s]
+    assert _CLAUDE_NATIVE_TERMINAL_ENSURE_TIMEOUT_S > _LAUNCH_SESSION_READ_DEADLINE_S
+
+
 def _message_event() -> SessionEventInput:
     """
     Build one user message event for native dispatch tests.

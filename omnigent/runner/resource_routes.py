@@ -410,6 +410,7 @@ def register_resource_routes(
                 ensure_comment_relay=_ensure_comment_relay_started,
                 rebind_bridge=_rebind_claude_bridge,
                 redrive_launch=_ensure_native_terminal_for_turn,
+                session_status=getattr(app.state, "native_pane_status", {}).get,
             )
             _ensure_build: (
                 Callable[[NativeLaunchContext], Awaitable[NativeLaunchContext]] | None

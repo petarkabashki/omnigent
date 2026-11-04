@@ -227,7 +227,7 @@ async def test_launch_config_reads_the_metadata_only_snapshot(
         pytest.param(_orchestration._kiro_native_launch_config, 20.0, id="kiro"),
         pytest.param(_orchestration._opencode_native_launch_config, 20.0, id="opencode"),
         pytest.param(_orchestration._session_payload_for_host_spawn_check, 20.0, id="host-spawn"),
-        pytest.param(_orchestration._load_legacy_claude_launch_metadata, 5.0, id="legacy-claude"),
+        pytest.param(_orchestration._load_legacy_claude_launch_metadata, 20.0, id="legacy-claude"),
         pytest.param(
             _orchestration._claude_native_session_wants_rebuild, 20.0, id="claude-rebuild"
         ),

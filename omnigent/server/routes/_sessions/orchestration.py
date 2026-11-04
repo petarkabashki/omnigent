@@ -6161,6 +6161,12 @@ def _native_terminal_runtime(conv: Conversation) -> tuple[str, str, str]:
     )
 
 
+#: How long a turn waits for the runner to ensure its native terminal.
+_NATIVE_TERMINAL_ENSURE_TIMEOUT_S = 10.0
+#: Above the runner's 50 s launch-read deadline, so its refusal reaches the turn.
+_CLAUDE_NATIVE_TERMINAL_ENSURE_TIMEOUT_S = 60.0
+
+
 async def _ensure_native_terminal_ready(
     runner_client: httpx.AsyncClient,
     session_id: str,
@@ -6215,7 +6221,11 @@ async def _ensure_native_terminal_ready(
                 "ensure_native_terminal": True,
                 "persist_resource_event": persist_resource_event,
             },
-            timeout=10.0,
+            timeout=(
+                _CLAUDE_NATIVE_TERMINAL_ENSURE_TIMEOUT_S
+                if harness == "claude-native"
+                else _NATIVE_TERMINAL_ENSURE_TIMEOUT_S
+            ),
         )
 
     def _is_tunnel_loss(exc: httpx.HTTPError | ConnectionError) -> bool:
