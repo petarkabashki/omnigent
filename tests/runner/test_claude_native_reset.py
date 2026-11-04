@@ -200,6 +200,20 @@ def test_prepare_fits_inside_the_servers_forward_budget() -> None:
     )
 
 
+def test_codex_prepare_fits_inside_the_servers_forward_budget() -> None:
+    app_server_close_s = 6.0
+    reap_listing_and_grace_s = 6.5
+    # Lock wait, forwarder cancel, backend stop, and the two bridge label reads.
+    assert (
+        claude_reset.RESET_PREPARE_LOCK_WAIT_S
+        + orchestration._AUTO_FORWARDER_CANCEL_TIMEOUT_S
+        + app_server_close_s
+        + reap_listing_and_grace_s
+        + 2 * orchestration._SESSION_LABEL_LOOKUP_TIMEOUT_SECONDS
+        < RESET_FORWARD_TIMEOUT_S
+    )
+
+
 async def test_commit_without_prepare_stops_a_live_pane_before_relaunch(tmp_path: Path) -> None:
     calls: list[str] = []
     reset, ensure_lock = _recording_reset(tmp_path, calls)
