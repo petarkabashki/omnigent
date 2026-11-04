@@ -121,6 +121,17 @@ def append_dead_letter(
         )
 
 
+def clear_dead_letters(bridge_dir: Path) -> None:
+    """
+    Drop every dead-lettered forward so no later resume replays it.
+
+    :param bridge_dir: Native bridge directory holding the dead-letter files.
+    :returns: None.
+    """
+    for filename in (_DEAD_LETTER_FILE, _DEAD_LETTER_BACKUP_FILE):
+        (bridge_dir / filename).unlink(missing_ok=True)
+
+
 # Transport failures proving a POST never reached the server (no bytes
 # sent) — safe to retry. See :func:`post_may_have_been_delivered`.
 _DELIVERY_SAFE_RETRY_ERRORS = (

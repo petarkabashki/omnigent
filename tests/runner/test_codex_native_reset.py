@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 import pytest
 
 from omnigent.harnesses.codex_native.bridge import (
@@ -14,7 +15,11 @@ from omnigent.harnesses.codex_native.bridge import (
     record_child_usage_baseline,
     write_bridge_state,
 )
-from omnigent.harnesses.codex_native.forwarder import reset_codex_forward_state
+from omnigent.harnesses.codex_native.forwarder import (
+    _replay_dead_letters_before_resume,
+    reset_codex_forward_state,
+)
+from omnigent.native._native_post_delivery import append_dead_letter
 from omnigent.runner import turn_routing
 from omnigent.runner.native import claude_reset
 from omnigent.runner.native.claude_reset import ClaudeNativeReset, ClaudeResetBusyError
@@ -64,6 +69,40 @@ def test_wipe_also_drops_a_pending_routed_prompt_and_keeps_unrelated_files(
     assert read_bridge_state(tmp_path) is None
     assert turn_routing.read_pending_replay(tmp_path) is None
     assert unrelated.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_dead_letter_from_before_a_reset_does_not_replay_after_the_boundary(
+    tmp_path: Path,
+) -> None:
+    def dead_letter(source_id: str) -> None:
+        append_dead_letter(
+            tmp_path,
+            session_id="conv_a",
+            event_type="external_conversation_item",
+            payload={"item_type": "message", "source_id": source_id},
+            reason="transient HTTP failure after retries",
+            http_status=503,
+        )
+
+    dead_letter("item_rotated_out")
+    (tmp_path / "dead_letter.jsonl").replace(tmp_path / "dead_letter.jsonl.1")
+    dead_letter("item_old")
+    reposted: list[bytes] = []
+
+    def repost(request: httpx.Request) -> httpx.Response:
+        reposted.append(request.content)
+        return httpx.Response(202, json={"queued": False})
+
+    wipe_codex_resume_state(tmp_path)
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(repost)
+    ) as client:
+        await _replay_dead_letters_before_resume(client, tmp_path)
+
+    assert reposted == []
+    assert list(tmp_path.glob("dead_letter*")) == []
 
 
 def _codex_reset(

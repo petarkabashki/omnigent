@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from omnigent.harnesses.codex_native.forwarder import reset_codex_forward_state
+from omnigent.native._native_post_delivery import clear_dead_letters
 from omnigent.runner.turn_routing import clear_pending_replay
 
 
@@ -22,3 +23,5 @@ def wipe_codex_resume_state(bridge_dir: Path) -> None:
     reset_codex_forward_state(bridge_dir)
     # A routed prompt a previous launch blocked belongs before the boundary.
     clear_pending_replay(bridge_dir)
+    # The forwarder is stopped, so every dead letter predates the boundary.
+    clear_dead_letters(bridge_dir)
