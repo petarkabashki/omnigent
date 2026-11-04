@@ -34,6 +34,7 @@ from omnigent.server.schemas import (
     ProjectOrderResponse,
     UpdateProjectRequest,
 )
+from omnigent.server.session_aliases import release_project_roles
 from omnigent.stores.conversation_store import ConversationStore, pinned_label_key
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import (
@@ -118,6 +119,7 @@ def create_projects_router(
         # Checked before the write lock so it isn't held for N permission reads;
         # the transaction re-checks only sessions filed since.
         approved: set[str] = set()
+        role_path = await asyncio.to_thread(project_store.get_path, project_id, user_id=user_id)
         member_ids = await asyncio.to_thread(
             project_store.member_session_ids,
             project_id,
@@ -153,6 +155,15 @@ def create_projects_router(
                     logger.exception("Dropping the pin failed for session %s", session_id)
 
         await asyncio.to_thread(drop_pins)
+        await asyncio.to_thread(
+            release_project_roles,
+            store,
+            project_store,
+            project_id,
+            session_ids=sweep.session_ids,
+            user_id=user_id,
+            role_path=role_path or "",
+        )
         announce_projects_changed(user_id)
         return {
             "id": project_id,
@@ -362,9 +373,21 @@ def create_projects_router(
                     code=ErrorCode.INVALID_INPUT,
                 )
             return await _delete_with_sessions(request, conversation_store, project_id, user_id)
+        role_path = await asyncio.to_thread(project_store.get_path, project_id, user_id=user_id)
         deleted = await asyncio.to_thread(project_store.delete, project_id, user_id=user_id)
         if not deleted:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        # The members stay filed for the caller to unfile, but their namespace is gone.
+        if conversation_store is not None:
+            await asyncio.to_thread(
+                release_project_roles,
+                conversation_store,
+                project_store,
+                project_id,
+                session_ids=(),
+                user_id=user_id,
+                role_path=role_path or "",
+            )
         # Drop the folder from the owner's other connected clients live.
         announce_projects_changed(user_id)
         return {"id": project_id, "object": "project.deleted", "deleted": True}

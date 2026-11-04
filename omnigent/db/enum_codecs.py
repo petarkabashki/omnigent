@@ -5,8 +5,8 @@ Several low-cardinality closed-set columns (``conversations.kind``,
 ``account_tokens.kind``, ``policies.type``, ``policies.scope``,
 ``hosts.status``, ``agents.kind``, ``scheduled_tasks.state``,
 ``scheduled_tasks.execution_target``,
-``scheduled_task_runs.status``) are stored as
-integer codes rather
+``scheduled_task_runs.status``, ``role_events.kind``, ``role_events.actor``)
+are stored as integer codes rather
 than their string names — smaller rows and a tighter ``CHECK`` than a
 free ``VARCHAR``. The string names remain the
 contract for entities, the HTTP API, the web client, and the SDKs; the
@@ -158,6 +158,22 @@ def _assert_item_type_codes_cover_data_classes() -> None:
 
 _assert_item_type_codes_cover_data_classes()
 
+
+ROLE_EVENT_KIND: dict[str, int] = {
+    "take": 1,
+    "release": 2,
+    "takeover": 3,
+    "adopt": 4,
+    "stale_repair": 5,
+    "moved": 6,
+}
+
+ROLE_EVENT_ACTOR: dict[str, int] = {
+    "owner": 1,
+    "agent": 2,
+    "bootstrap": 3,
+    "system": 4,
+}
 
 # ── Encode / decode ────────────────────────────────────
 
@@ -356,3 +372,23 @@ def encode_scheduled_task_run_status(name: str) -> int:
 def decode_scheduled_task_run_status(code: int) -> str:
     """Decode a ``scheduled_task_runs.status`` int code to its name."""
     return _decode(SCHEDULED_TASK_RUN_STATUS, code, field="scheduled_task_runs.status")
+
+
+def encode_role_event_kind(name: str) -> int:
+    """Encode a ``role_events.kind`` name to its int code."""
+    return _encode(ROLE_EVENT_KIND, name, field="role_events.kind")
+
+
+def decode_role_event_kind(code: int) -> str:
+    """Decode a ``role_events.kind`` int code to its name."""
+    return _decode(ROLE_EVENT_KIND, code, field="role_events.kind")
+
+
+def encode_role_event_actor(name: str) -> int:
+    """Encode a ``role_events.actor`` name to its int code."""
+    return _encode(ROLE_EVENT_ACTOR, name, field="role_events.actor")
+
+
+def decode_role_event_actor(code: int) -> str:
+    """Decode a ``role_events.actor`` int code to its name."""
+    return _decode(ROLE_EVENT_ACTOR, code, field="role_events.actor")

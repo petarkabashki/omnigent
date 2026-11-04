@@ -49,6 +49,7 @@ from omnigent.tools.builtins.nimble_research import NimbleResearchTool
 from omnigent.tools.builtins.read_skill_file import (
     ReadSkillFileTool,
 )
+from omnigent.tools.builtins.role_list import SysRoleListTool
 from omnigent.tools.builtins.scheduled_tasks import (
     SysScheduledTaskCreateTool,
     SysScheduledTaskDeleteTool,
@@ -89,6 +90,7 @@ __all__ = [
     "SysCancelAsyncTool",
     "SysListModelsTool",
     "SysReadInboxTool",
+    "SysRoleListTool",
     "SysScheduledTaskCreateTool",
     "SysScheduledTaskDeleteTool",
     "SysScheduledTaskListTool",

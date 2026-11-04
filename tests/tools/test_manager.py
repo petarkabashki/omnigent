@@ -65,6 +65,7 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_session_get_history",
         "sys_session_list",
         "sys_session_get_info",
+        "sys_role_list",
         "sys_session_rename",
         # Peer messaging is advertised for every agent; the server
         # enforces the orchestration flag and source authorization.

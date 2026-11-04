@@ -32,6 +32,8 @@ from omnigent.db.db_models import (
     SqlHost,
     SqlPreference,
     SqlProject,
+    SqlRole,
+    SqlRoleEvent,
     SqlScheduledTask,
     SqlSessionPermission,
     SqlUser,
@@ -91,6 +93,22 @@ def _revoke_durable_authority(session: Session, user_id: str, *, now: int) -> No
         delete(SqlConnection).where(
             SqlConnection.workspace_id == workspace_id,
             SqlConnection.user_id == user_id,
+        )
+    )
+    role_ids = select(SqlRole.id).where(
+        SqlRole.workspace_id == workspace_id,
+        SqlRole.user_id == user_id,
+    )
+    session.execute(
+        delete(SqlRoleEvent).where(
+            SqlRoleEvent.workspace_id == workspace_id,
+            SqlRoleEvent.role_id.in_(role_ids),
+        )
+    )
+    session.execute(
+        delete(SqlRole).where(
+            SqlRole.workspace_id == workspace_id,
+            SqlRole.user_id == user_id,
         )
     )
     project_ids = select(SqlProject.id).where(

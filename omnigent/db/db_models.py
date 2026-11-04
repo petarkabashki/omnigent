@@ -782,6 +782,106 @@ class SqlProject(OmnigentBase):
     )
 
 
+class SqlRole(OmnigentBase):
+    """
+    SQLAlchemy model for the ``roles`` table.
+
+    One addressable name in an owner's namespace, and who holds it. The row is
+    the source of truth; session labels mirror it. Rows stay after a release so
+    a later take keeps the ``id``. No DB foreign keys (Rule R032).
+
+    :param owner_key: ``user_id`` or ``""``, so the name index works in
+        single-user mode, where ``user_id`` is NULL.
+    :param project_key: ``project_id`` as hex or ``""``, for the same reason.
+    :param name_key: Case-folded ``name``.
+    :param overlay_ref: Role-file name, or NULL when it equals ``name``.
+    :param defaults: Opaque pre-fill JSON, or NULL.
+    :param generation: Bumped on every take and release; the CAS token.
+    """
+
+    __tablename__ = "roles"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    name_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    owner_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    project_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    overlay_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    defaults: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    permanent: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    holder_session_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    previous_session_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    held_since: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    __table_args__ = (
+        # Real constraints, unlike project names: a lost race must fail here.
+        Index(
+            "uq_roles_name",
+            "workspace_id",
+            "owner_key",
+            "project_key",
+            "name_key",
+            unique=True,
+        ),
+        # A session holds at most one role. NULLs are distinct on every dialect,
+        # so vacant rows never collide and no partial index is needed.
+        Index("uq_roles_holder", "workspace_id", "holder_session_id", unique=True),
+    )
+
+
+class SqlRoleEvent(OmnigentBase):
+    """
+    SQLAlchemy model for the append-only ``role_events`` table.
+
+    Written in the transaction of the CAS it records. ``role_name`` and
+    ``role_path`` are snapshots, so events stay labelable if the role row goes.
+
+    :param kind: Int code (see :data:`omnigent.db.enum_codecs.ROLE_EVENT_KIND`).
+    :param actor: Int code (see :data:`omnigent.db.enum_codecs.ROLE_EVENT_ACTOR`).
+    """
+
+    __tablename__ = "role_events"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    role_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    prev_session_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    actor: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    at: Mapped[int] = mapped_column(Integer, nullable=False)
+    role_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    role_path: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("kind IN (1, 2, 3, 4, 5, 6)", name="ck_role_events_kind"),
+        CheckConstraint("actor IN (1, 2, 3, 4)", name="ck_role_events_actor"),
+        Index("ix_role_events_role", "workspace_id", "role_id", "generation"),
+    )
+
+
 class SqlConversation(ConversationBase):
     """
     SQLAlchemy model for the ``conversations`` table.

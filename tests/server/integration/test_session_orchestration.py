@@ -7,6 +7,7 @@ import pytest
 
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.tool_dispatch import execute_tool
+from omnigent.server import session_aliases
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.feature_flags import FeatureFlags
 from omnigent.stores.conversation_store import (
@@ -14,11 +15,16 @@ from omnigent.stores.conversation_store import (
     CREATED_BY_SESSION_LABEL_KEY,
     EXECUTOR_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    ROLE_ID_LABEL_KEY,
+    ROLE_OVERLAY_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+from omnigent.stores.role_store.sqlalchemy_store import SqlAlchemyRoleStore
+from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 from tests.server.integration.test_managed_startup_inputs import auth_app as auth_app
 from tests.server.integration.test_managed_startup_inputs import (
     startup_permissions as startup_permissions,
@@ -1242,7 +1248,7 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
         await auth_client.put(f"/v1/sessions/{source['id']}/alias", json={"alias": "Architect"})
     ).status_code == 200
     named = await auth_client.put(f"/v1/sessions/{target['id']}/alias", json={"alias": "Product"})
-    assert named.json()["handle"] == "Product"
+    assert named.json()["handle"] == "/Product"
     other = await _create_session_as(auth_client, "", "alice")
     taken = await auth_client.put(f"/v1/sessions/{other['id']}/alias", json={"alias": "product"})
     assert taken.status_code == 409
@@ -1253,7 +1259,7 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
 
     assert (await _send(auth_client, source, {"id": "Product"})).get("queued") is True
     items = await auth_client.get(f"/v1/sessions/{target['id']}/items")
-    assert f"[Message from Architect (session {source['id']}, message msg_" in items.text
+    assert f"[Message from /Architect (session {source['id']}, message msg_" in items.text
 
     store = SqlAlchemyConversationStore(db_uri)
     for session in (source, target):
@@ -1310,18 +1316,27 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
         assert refused.status_code in (400, 409), refused.text
     assert len(store.list_conversations(limit=200).data) == before
 
-    # Racing creates can leave two live holders of one alias; resolving must not pick one.
+    # A stray label on a name with a row loses to the row, and the resolve repairs it.
     store.set_labels(other["id"], {ALIAS_LABEL_KEY: "bench"})
-    ambiguous = await auth_client.get("/v1/sessions/aliases/resolve", params={"address": "Bench"})
+    resolved = await auth_client.get("/v1/sessions/aliases/resolve", params={"address": "Bench"})
+    assert resolved.json()["session_id"] == claimed.json()["id"]
+    assert ALIAS_LABEL_KEY not in store.get_conversation(other["id"]).labels
+
+    # Unadopted labels have no row, so two live holders stay ambiguous; never pick one.
+    store.set_labels(claimed.json()["id"], {ALIAS_LABEL_KEY: "Twin"})
+    store.set_labels(other["id"], {ALIAS_LABEL_KEY: "twin"})
+    ambiguous = await auth_client.get("/v1/sessions/aliases/resolve", params={"address": "Twin"})
     assert ambiguous.status_code == 409
     assert claimed.json()["id"] in ambiguous.text and other["id"] in ambiguous.text
     rows = (
         await auth_client.post(
-            "/v1/sessions/aliases/resolve", json={"addresses": ["Bench", "py-qwant/Architect"]}
+            "/v1/sessions/aliases/resolve", json={"addresses": ["Twin", "py-qwant/Architect"]}
         )
     ).json()["data"]
     assert "ambiguous" in rows[0]["error"] and other["id"] in rows[0]["error"]
     assert rows[1]["session_id"] == source["id"]
+    store.delete_label(claimed.json()["id"], ALIAS_LABEL_KEY)
+    store.delete_label(other["id"], ALIAS_LABEL_KEY)
 
     # Namespace tree: nested projects, ?path=, move/cycle/delete rules, and path addressing.
     created = await auth_client.post("/v1/projects", json={"name": "ns"})
@@ -1359,6 +1374,265 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
     )
     assert again.json()["session_id"] == source["id"]
     assert (await auth_client.delete(f"/v1/projects/{parent['id']}")).status_code == 200
+
+
+async def test_role_rows_follow_session_lifecycle(auth_client, peers, db_uri):
+    """Every exit from a live session releases the role; none of them retakes it."""
+    source, target, _ = peers
+    roles = SqlAlchemyRoleStore(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+
+    async def take(session: dict, alias: str = "Holder") -> str:
+        taken = await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        assert taken.status_code == 200, taken.text
+        assert taken.json()["path"] == "" and taken.json()["permanent"] is False
+        assert taken.json()["handle"] == f"/{alias}"
+        return taken.json()["role_id"]
+
+    async def assert_vacant(role_id: str, reason: str) -> None:
+        role = roles.get(role_id, user_id="alice")
+        assert role.holder_session_id is None
+        assert roles.events(role_id)[-1].reason == reason
+        missing = await auth_client.get(
+            "/v1/sessions/aliases/resolve", params={"address": "/Holder"}
+        )
+        assert missing.status_code == 404
+        assert "is vacant" in missing.text
+
+    role_id = await take(target)
+    labels = store.get_conversation(target["id"]).labels
+    assert labels[ROLE_ID_LABEL_KEY] == role_id
+    listed = await auth_client.get("/v1/sessions/aliases", params={"alias": "holder"})
+    assert [
+        (entry["role_id"], entry["path"], entry["permanent"], entry["handle"])
+        for entry in listed.json()["data"]
+    ] == [(role_id, "", False, "/Holder")]
+
+    # Agents still cannot set or release aliases outside creation.
+    refused = await auth_client.delete(
+        f"/v1/sessions/{target['id']}/alias", headers={ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    )
+    assert refused.status_code == 403
+    assert roles.get(role_id, user_id="alice").holder_session_id == target["id"]
+
+    # Close through the labels PATCH.
+    closed = await auth_client.patch(
+        f"/v1/sessions/{target['id']}", json={"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}}
+    )
+    assert closed.status_code == 200, closed.text
+    await assert_vacant(role_id, "close")
+    assert ALIAS_LABEL_KEY not in store.get_conversation(target["id"]).labels
+
+    # Archive releases; unarchive does not retake.
+    holder = await _create_session_as(auth_client, "", "alice")
+    assert await take(holder) == role_id
+    archived = await auth_client.patch(f"/v1/sessions/{holder['id']}", json={"archived": True})
+    assert archived.status_code == 200, archived.text
+    await assert_vacant(role_id, "archive")
+    assert (
+        await auth_client.patch(f"/v1/sessions/{holder['id']}", json={"archived": False})
+    ).status_code == 200
+    await assert_vacant(role_id, "archive")
+    assert ALIAS_LABEL_KEY not in store.get_conversation(holder["id"]).labels
+
+    # An archive whose release never ran: unarchive still leaves the session unaddressed.
+    assert await take(holder) == role_id
+    store.update_conversation_with_changes(holder["id"], archived=True)
+    assert (
+        await auth_client.patch(f"/v1/sessions/{holder['id']}", json={"archived": False})
+    ).status_code == 200
+    await assert_vacant(role_id, "unarchive")
+    assert ALIAS_LABEL_KEY not in store.get_conversation(holder["id"]).labels
+
+    # Delete, and DELETE alias as an explicit release.
+    assert await take(holder) == role_id
+    assert (await auth_client.delete(f"/v1/sessions/{holder['id']}/alias")).status_code == 204
+    await assert_vacant(role_id, "alias_cleared")
+    assert await take(holder) == role_id
+    assert (await auth_client.delete(f"/v1/sessions/{holder['id']}")).status_code in (200, 204)
+    await assert_vacant(role_id, "delete")
+
+    generations = [event.generation for event in roles.events(role_id)]
+    assert generations == list(range(1, len(generations) + 1))
+
+
+async def test_create_with_a_role_claims_after_the_session_exists(
+    auth_client, peers, db_uri, monkeypatch
+):
+    """Create then claim: a lost claim closes the orphan and the caller gets a 409."""
+    source, target, _ = peers
+    roles = SqlAlchemyRoleStore(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    body = {"agent_id": source["agent_id"], "alias": "Claimed"}
+
+    created = await auth_client.post("/v1/sessions", json=body)
+    assert created.status_code in (200, 201), created.text
+    role = roles.find("Claimed", user_id="alice", project_id=None)
+    assert role.holder_session_id == created.json()["id"]
+    assert store.get_conversation(created.json()["id"]).labels[ROLE_ID_LABEL_KEY] == role.id
+
+    # The rival claims in the window between the check and the claim.
+    real_check = session_aliases.check_alias_for_new_session
+    projects = SqlAlchemyProjectStore(db_uri)
+
+    def check_then_lose(*args, **kwargs):
+        value = real_check(*args, **kwargs)
+        session_aliases.set_session_alias(
+            store,
+            projects,
+            session=store.get_conversation(target["id"]),
+            user_id="alice",
+            alias=value,
+        )
+        return value
+
+    before = {session.id for session in store.list_conversations(limit=200).data}
+    with monkeypatch.context() as patch:
+        patch.setattr(session_aliases, "check_alias_for_new_session", check_then_lose)
+        lost = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], "alias": "Raced"}
+        )
+    assert lost.status_code == 409, lost.text
+    assert "already used" in lost.text
+    orphans = {
+        session.id for session in store.list_conversations(limit=200, include_archived=True).data
+    } - before
+    assert len(orphans) == 1
+    orphan = store.get_conversation(orphans.pop())
+    assert orphan.archived is True
+    assert orphan.labels[CLOSED_LABEL_KEY] == CLOSED_LABEL_VALUE
+    assert ALIAS_LABEL_KEY not in orphan.labels
+    assert roles.find("Raced", user_id="alice", project_id=None).holder_session_id == target["id"]
+
+    # A create into a project claims in that project's namespace.
+    project = (await auth_client.post("/v1/projects", json={"name": "home"})).json()
+    filed = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "alias": "Claimed", "project_id": project["id"]},
+    )
+    assert filed.status_code in (200, 201), filed.text
+    assert (
+        roles.find("Claimed", user_id="alice", project_id=project["id"]).holder_session_id
+        == filed.json()["id"]
+    )
+
+    # A held name is refused before anything is created.
+    count = len(store.list_conversations(limit=200, include_archived=True).data)
+    held = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "alias": "claimed"}
+    )
+    assert held.status_code == 409
+    assert len(store.list_conversations(limit=200, include_archived=True).data) == count
+
+    # An overlay needs a role to attach to, and is never a path.
+    orphaned = await auth_client.post(
+        "/v1/sessions", json={"agent_id": source["agent_id"], "overlay_ref": "Bench"}
+    )
+    assert orphaned.status_code == 400
+    traversal = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "alias": "Instance", "overlay_ref": "../Bench"},
+    )
+    assert traversal.status_code == 400
+
+    instance = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": source["agent_id"], "alias": "Instance", "overlay_ref": "Bench"},
+    )
+    assert instance.status_code in (200, 201), instance.text
+    labels = store.get_conversation(instance.json()["id"]).labels
+    assert labels[ROLE_OVERLAY_LABEL_KEY] == "Bench"
+    assert roles.find("Instance", user_id="alice", project_id=None).overlay_ref == "Bench"
+
+    # The mirror labels are server-owned on every client path.
+    for key in (ROLE_ID_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY):
+        forged = await auth_client.patch(
+            f"/v1/sessions/{target['id']}", json={"labels": {key: "Bench"}}
+        )
+        assert forged.status_code == 400, key
+        seeded = await auth_client.post(
+            "/v1/sessions", json={"agent_id": source["agent_id"], "labels": {key: "Bench"}}
+        )
+        assert seeded.status_code == 400, key
+
+    # A fork is a new session: it holds nothing.
+    forked = store.fork_conversation(instance.json()["id"])
+    assert not {ALIAS_LABEL_KEY, ROLE_ID_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY} & set(
+        store.get_conversation(forked.id).labels
+    )
+
+
+async def test_sys_role_list_shows_held_and_vacant_roles(auth_client, peers, db_uri):
+    source, target, _ = peers
+    created = await auth_client.post("/v1/projects", json={"name": "lab"})
+    project = created.json()
+    store = SqlAlchemyConversationStore(db_uri)
+    for session in (source, target):
+        assert store.set_conversation_project(session["id"], project["id"])
+    assert (
+        await auth_client.put(f"/v1/sessions/{target['id']}/alias", json={"alias": "Held"})
+    ).status_code == 200
+    assert (
+        await auth_client.put(f"/v1/sessions/{source['id']}/alias", json={"alias": "Vacant"})
+    ).status_code == 200
+    assert (await auth_client.delete(f"/v1/sessions/{source['id']}/alias")).status_code == 204
+    unadopted = await _create_session_as(auth_client, "", "alice")
+    assert store.set_conversation_project(unadopted["id"], project["id"])
+    store.set_labels(unadopted["id"], {ALIAS_LABEL_KEY: "Legacy"})
+    root = await _create_session_as(auth_client, "", "alice")
+    assert (
+        await auth_client.put(f"/v1/sessions/{root['id']}/alias", json={"alias": "Scratch"})
+    ).status_code == 200
+
+    async def role_list(**arguments: str) -> dict:
+        return json.loads(
+            await execute_tool(
+                tool_name="sys_role_list",
+                arguments=json.dumps(arguments),
+                server_client=auth_client,
+                conversation_id=source["id"],
+            )
+        )
+
+    listed = await role_list()
+    assert listed["namespace"] == "lab"
+    assert [
+        (role["handle"], role["state"], role["holder_session_id"], role["role_id"] is not None)
+        for role in listed["roles"]
+    ] == [
+        ("lab/Held", "held", target["id"], True),
+        ("lab/Legacy", "held", unadopted["id"], False),
+        ("lab/Vacant", "vacant", None, True),
+    ]
+
+    at_root = await role_list(namespace="/")
+    assert at_root["namespace"] == "/"
+    assert [role["handle"] for role in at_root["roles"]] == ["/Scratch"]
+    assert (await role_list(namespace="nowhere"))["roles"] == []
+
+
+async def test_bare_role_uses_the_namespace_the_caller_passes(auth_client, peers, db_uri):
+    """U1 over HTTP: a picker's view and the CLI's working directory."""
+    _, target, _ = peers
+    project = (
+        await auth_client.post(
+            "/v1/projects", json={"name": "picked", "config": {"workspace": "/srv/picked"}}
+        )
+    ).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    assert store.set_conversation_project(target["id"], project["id"])
+    assert (
+        await auth_client.put(f"/v1/sessions/{target['id']}/alias", json={"alias": "Picked"})
+    ).status_code == 200
+    resolve = "/v1/sessions/aliases/resolve"
+
+    assert (await auth_client.get(resolve, params={"address": "Picked"})).status_code == 404
+    for scope in ({"namespace": "picked"}, {"workspace": "/srv/picked/sub"}):
+        one = await auth_client.get(resolve, params={"address": "Picked", **scope})
+        assert one.json()["session_id"] == target["id"]
+        assert one.json()["handle"] == "picked/Picked"
+        bulk = await auth_client.post(resolve, json={"addresses": ["Picked"], **scope})
+        assert bulk.json()["data"][0]["session_id"] == target["id"]
 
 
 async def test_orchestrated_session_on_named_host_with_alias(auth_client, auth_app, peers, db_uri):

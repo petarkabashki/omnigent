@@ -7936,19 +7936,15 @@ def _native_startup_raw_instructions_from_spec(
         ``None`` when both are absent/whitespace-only.
     """
     from omnigent.runtime.prompt import raw_author_instructions
-    from omnigent.runtime.role_instructions import load_role_instructions, role_params_from_labels
-    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
+    from omnigent.runtime.role_instructions import load_session_role_overlay
 
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     author = raw_author_instructions(spec) if spec is not None else None
     role = None
     if session_init is not None:
         snapshot = session_init.snapshot
-        role = load_role_instructions(
-            snapshot.labels.get(ALIAS_LABEL_KEY),
-            snapshot.workspace,
-            session_params=role_params_from_labels(snapshot.labels),
-        )
+        overlay = load_session_role_overlay(snapshot.labels, snapshot.workspace)
+        role = overlay.instructions if overlay is not None else None
     # A spec the runner already overlaid carries the role text itself.
     if role and author and role in author:
         role = None

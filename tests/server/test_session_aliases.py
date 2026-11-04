@@ -1,8 +1,10 @@
 """Alias resolution reports duplicates as ambiguous instead of picking one."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,7 @@ from omnigent.server.session_aliases import (
     resolve_session_address,
     session_handle,
 )
+from omnigent.session_alias_client import resolve_address
 from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, PROJECT_LABEL_KEY
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
@@ -59,7 +62,7 @@ def test_no_match_is_not_found() -> None:
 def test_errors_show_the_stripped_project_name() -> None:
     with pytest.raises(OmnigentError) as missing:
         _resolve(_store(), " proj /Nobody")
-    assert "project 'proj'" in missing.value.message
+    assert "namespace 'proj'" in missing.value.message
     store = _store(_session(SESSION_A, "Bench"), _session(SESSION_B, "bench"))
     with pytest.raises(OmnigentError) as ambiguous:
         _resolve(store, " proj /Bench")
@@ -198,3 +201,28 @@ def test_alias_uniqueness_is_scoped_to_the_tree_node(tree) -> None:
     with pytest.raises(OmnigentError) as caught:
         check_alias_for_new_session(store, tree, alias="product", project_id=SUB, user_id="u")
     assert caught.value.code == ErrorCode.ALREADY_EXISTS
+
+
+# ── CLI source namespace ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("address", "sends_workspace"),
+    [("Bench", True), ("/Bench", False), ("ns/Bench", False)],
+)
+def test_cli_sends_its_working_directory_only_for_a_bare_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, address: str, sends_workspace: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    seen: dict[str, str] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.update(request.url.params)
+        return httpx.Response(200, json={"session_id": SESSION_A})
+
+    client = httpx.Client(transport=httpx.MockTransport(respond), base_url="http://server")
+
+    assert resolve_address(client, address) == {"session_id": SESSION_A}
+
+    assert seen["address"] == address
+    assert seen.get("workspace") == (str(tmp_path.resolve()) if sends_workspace else None)

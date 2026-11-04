@@ -17,6 +17,7 @@ from omnigent.server.device_grant_store import DeviceGrantStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.role_store.sqlalchemy_store import SqlAlchemyRoleStore
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 
 
@@ -46,6 +47,7 @@ def test_account_generation_survives_delete_and_rejects_old_writes(db_uri: str) 
             lambda: SqlAlchemyScheduledTaskStore(db_uri).create(
                 uuid.uuid4().hex, "job", "hello", "FREQ=DAILY", "alice", uuid.uuid4().hex, "UTC"
             ),
+            lambda: SqlAlchemyRoleStore(db_uri).create("Bench", user_id="alice", project_id=None),
             lambda: SqlAlchemyConversationStore(db_uri).add_daily_cost("alice", "2026-09-18", 1.0),
             lambda: SqlAlchemyConversationStore(db_uri).set_daily_ask_approved(
                 "alice", "2026-09-18", 0.5
@@ -56,6 +58,26 @@ def test_account_generation_survives_delete_and_rejects_old_writes(db_uri: str) 
     with account_authority_scope("alice", new.account_generation):
         permissions.ensure_user("alice")
         assert HostStore(db_uri).upsert_on_connect(uuid.uuid4().hex, "laptop", "alice")
+
+
+def test_account_deletion_removes_roles_and_their_events(db_uri: str) -> None:
+    accounts = SqlAlchemyAccountStore(db_uri)
+    roles = SqlAlchemyRoleStore(db_uri)
+    accounts.create_user_with_password("alice", "test-password-hash")
+    accounts.create_user_with_password("bob", "test-password-hash")
+    theirs = roles.create(
+        "Bench", user_id="alice", project_id=None, holder_session_id=uuid.uuid4().hex
+    )
+    kept = roles.create(
+        "Bench", user_id="bob", project_id=None, holder_session_id=uuid.uuid4().hex
+    )
+
+    assert accounts.delete_user("alice")
+
+    assert roles.list_owned(user_id="alice") == []
+    assert roles.events(theirs.id) == []
+    assert roles.get(kept.id, user_id="bob") == kept
+    assert len(roles.events(kept.id)) == 1
 
 
 def test_host_replacement_serializes_with_account_deletion(
