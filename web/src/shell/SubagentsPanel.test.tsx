@@ -1601,6 +1601,31 @@ describe("SubagentsPanel", () => {
   });
 });
 
+describe("SubagentsPanel depth cap", () => {
+  it("says agents nested deeper than the cap are not shown", () => {
+    // WHY: rows at the cap never fetch their own children, so their
+    // sub-agents would be silently absent.
+    mockChildTree({
+      conv_parent: [childInfo({ id: "conv_a" })],
+      conv_a: [childInfo({ id: "conv_a1" })],
+      conv_a1: [childInfo({ id: "conv_a2" })],
+    });
+    renderPanel();
+
+    expect(screen.getByTestId("subagent-depth-notice").textContent).toMatch(/not shown/);
+  });
+
+  it("has no depth notice when the tree stays above the cap", () => {
+    mockChildTree({
+      conv_parent: [childInfo({ id: "conv_a" })],
+      conv_a: [childInfo({ id: "conv_a1" })],
+    });
+    renderPanel();
+
+    expect(screen.queryByTestId("subagent-depth-notice")).toBeNull();
+  });
+});
+
 describe("SubagentsPanel older children", () => {
   it("says older agents are not shown and loads them on request", () => {
     // WHY: the server returns one page of children; without this notice the

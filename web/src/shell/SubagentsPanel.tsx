@@ -713,6 +713,15 @@ function SubagentRow({
             onToggleCollapsed={onToggleCollapsed}
           />
         ))}
+      {!collapsed && depth + 1 === MAX_TREE_DEPTH && hasGrandchildren && (
+        <li
+          data-testid="subagent-depth-notice"
+          style={{ paddingLeft: rowPaddingLeft(depth + 1) }}
+          className="py-1 pr-1 text-sm text-muted-foreground"
+        >
+          Agents nested more than {MAX_TREE_DEPTH} levels deep are not shown.
+        </li>
+      )}
       {!collapsed && hasMoreGrandchildren && (
         <MoreChildrenNotice
           shown={grandchildren.length}

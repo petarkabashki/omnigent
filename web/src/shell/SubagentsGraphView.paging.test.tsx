@@ -28,19 +28,24 @@ const child: ChildSessionInfo = {
 // Stable arrays and callbacks: the view compares them by identity across renders.
 const rootChildren = [child];
 const noChildren: ChildSessionInfo[] = [];
+const withId = (id: string): ChildSessionInfo => ({ ...child, id });
+// Extra levels for the depth-cap tests; empty by default.
+let deeperLevels: Record<string, ChildSessionInfo[]> = {};
 const loadMoreByLevel: Record<string, () => Promise<void>> = {
   conv_root: vi.fn(async () => {}),
   conv_child: vi.fn(async () => {}),
 };
+// Stable, as the real hook returns: a fresh function each render would loop the view.
+const noopLoadMore = vi.fn(async () => {});
 let olderLevels: string[] = [];
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: (id: string | null) => ({
-    children: id === "conv_root" ? rootChildren : noChildren,
+    children: (id !== null && deeperLevels[id]) || (id === "conv_root" ? rootChildren : noChildren),
     isLoading: false,
     error: null,
     hasMore: id !== null && olderLevels.includes(id),
-    loadMore: id === null ? vi.fn() : loadMoreByLevel[id],
+    loadMore: (id !== null && loadMoreByLevel[id]) || noopLoadMore,
     isLoadingMore: false,
     loadMoreError: null,
   }),
@@ -52,6 +57,7 @@ vi.mock("@/hooks/useSession", () => ({
 afterEach(() => {
   cleanup();
   olderLevels = [];
+  deeperLevels = {};
   vi.clearAllMocks();
 });
 
@@ -62,6 +68,23 @@ function renderGraph() {
     </MemoryRouter>,
   );
 }
+
+describe("SubagentsGraphView depth cap", () => {
+  it("says deeper agents are not shown when the tree reaches the cap", () => {
+    deeperLevels = {
+      conv_child: [withId("conv_g1")],
+      conv_g1: [withId("conv_g2")],
+    };
+    renderGraph();
+    expect(screen.getByTestId("graph-depth-notice").textContent).toMatch(/not shown/i);
+  });
+
+  it("has no depth notice for a shallower tree", () => {
+    deeperLevels = { conv_child: [withId("conv_g1")] };
+    renderGraph();
+    expect(screen.queryByTestId("graph-depth-notice")).toBeNull();
+  });
+});
 
 describe("SubagentsGraphView paging", () => {
   it("says nothing is hidden when every level is fully loaded", () => {

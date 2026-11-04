@@ -15,6 +15,7 @@ import {
   NODE_WIDTH,
   type AgentActivity,
   type AgentNodeData,
+  reachesDepthCap,
 } from "./subagentGraphLayout";
 import { activityDotClassName, sessionStatus } from "./subagentStatus";
 import { useOpenSubagentInPanel } from "./subagentPanelOpener";
@@ -273,6 +274,14 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
       data-workspace-panel-surface
       className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-card"
     >
+      {reachesDepthCap(rootSessionId, childrenMap) && (
+        <div
+          data-testid="graph-depth-notice"
+          className="border-b px-3 py-1 text-sm text-muted-foreground"
+        >
+          Agents nested more than {MAX_TREE_DEPTH} levels deep are not shown.
+        </div>
+      )}
       {partialLevels.length > 0 && (
         <div
           data-testid="graph-more-notice"

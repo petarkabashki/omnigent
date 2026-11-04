@@ -186,6 +186,26 @@ export function buildTree(
   };
 }
 
+/**
+ * Whether the tree has agents on its deepest shown level, whose own
+ * sub-agents are never fetched.
+ */
+export function reachesDepthCap(
+  rootId: string,
+  childrenMap: Map<string, ChildSessionInfo[]>,
+): boolean {
+  let frontier = [rootId];
+  const seen = new Set(frontier);
+  for (let depth = 0; depth < MAX_TREE_DEPTH && frontier.length > 0; depth++) {
+    frontier = frontier
+      .flatMap((id) => childrenMap.get(id) ?? [])
+      .map((child) => child.id)
+      .filter((id) => !seen.has(id));
+    for (const id of frontier) seen.add(id);
+  }
+  return frontier.length > 0;
+}
+
 export function buildGraphLayout(
   rootId: string,
   rootLabel: string,
