@@ -304,6 +304,51 @@ async def test_codex_native_reset_stops_the_backend_and_wipes_the_cursor_under_t
 
 
 @pytest.mark.asyncio
+async def test_codex_native_reset_refuses_when_the_sessions_labels_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without labels a rotated session's real backend can't be found, so nothing stops."""
+    launching_id = "8a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    rotated_id = "7a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    bridge_dir = codex_native_bridge.prepare_bridge_dir(launching_id)
+    closed: list[str] = []
+
+    class _Backend:
+        async def close(self) -> None:
+            closed.append(launching_id)
+
+    class _LabelsUnavailable(_SnapshotServerClient):
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            response = await super().get(url, **kwargs)
+            if url.endswith("/labels"):
+                response.status_code = 503
+            return response
+
+    monkeypatch.setitem(orchestration._AUTO_CODEX_APP_SERVERS, launching_id, _Backend())
+    monkeypatch.setitem(orchestration._AUTO_CODEX_BRIDGE_DIRS, launching_id, bridge_dir)
+    app, _ = await _build_app_for_spec(
+        _harness_spec("codex-native"), server_client=_LabelsUnavailable()
+    )
+
+    async with _runner_client(app) as client:
+        refused = await client.post(
+            f"/v1/sessions/{rotated_id}/events",
+            json={
+                "type": "reset",
+                "harness": "codex-native",
+                "phase": "prepare",
+                "pending": "reject",
+            },
+        )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"] == "reset_in_progress"
+    assert closed == []
+    assert not app.state.native_terminal_ensure_locks["codex"][rotated_id].locked()
+
+
+@pytest.mark.asyncio
 async def test_codex_native_reset_of_a_rotated_session_stops_the_launching_sessions_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

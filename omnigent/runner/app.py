@@ -141,6 +141,7 @@ from omnigent.runner.native import (
     _launch_native_terminal,
     _publish_terminal_pending,
     _read_claude_launch_spec,
+    _read_session_labels,
     _required_runner_env,
     _resolve_native_spawn_env,
     _resolved_spec_workdir,
@@ -3959,15 +3960,36 @@ def create_runner_app(
         :param conv_id: Conversation id, e.g. ``"conv_abc123"``.
         :returns: The session's bridge directory.
         """
+        labels = await _session_labels_for_runner_spawn(
+            server_client=server_client,
+            session_id=conv_id,
+        )
+        return _codex_native_bridge_dir_from_labels(conv_id, labels)
+
+    async def _codex_native_bridge_dir_for_reset(conv_id: str) -> Path:
+        """
+        Bridge directory a reset must act on, refusing rather than guessing.
+
+        A rotated or CLI-launched session's directory is not derived from its id,
+        so a guess would leave the real backend running and wipe the wrong directory.
+
+        :param conv_id: Conversation id, e.g. ``"conv_abc123"``.
+        :returns: The session's bridge directory.
+        :raises ClaudeResetBusyError: The session's labels could not be read.
+        """
+        labels = await _read_session_labels(server_client=server_client, session_id=conv_id)
+        if labels is None:
+            raise ClaudeResetBusyError(
+                "Couldn't look up this Codex session's backend. Try the reset again in a moment."
+            )
+        return _codex_native_bridge_dir_from_labels(conv_id, labels)
+
+    def _codex_native_bridge_dir_from_labels(conv_id: str, labels: dict[str, str]) -> Path:
         from omnigent.harnesses.codex_native.bridge import (
             CODEX_NATIVE_BRIDGE_ID_LABEL_KEY,
             bridge_dir_for_bridge_id,
         )
 
-        labels = await _session_labels_for_runner_spawn(
-            server_client=server_client,
-            session_id=conv_id,
-        )
         bridge_id = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
         return (
             bridge_dir_for_bridge_id(bridge_id)
@@ -8065,6 +8087,7 @@ def create_runner_app(
         _codex_native_bridge_state_and_dir_for_session=(
             _codex_native_bridge_state_and_dir_for_session
         ),
+        _codex_native_bridge_dir_for_reset=_codex_native_bridge_dir_for_reset,
         _codex_terminal_ensure_locks=_codex_terminal_ensure_locks,
         _ensure_comment_relay_started=_ensure_comment_relay_started,
         _ensure_native_terminal_for_turn=_ensure_native_terminal_for_turn,

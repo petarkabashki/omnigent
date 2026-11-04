@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.parse
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -347,6 +347,7 @@ def build_native_controls(
     _claude_model_options_rows: dict[str, tuple[float, list[dict[str, object]]]],
     _codex_native_bridge_state_for_session: _CodexNativeBridgeStateForSessionFn,
     _codex_native_bridge_state_and_dir_for_session: _CodexNativeBridgeStateAndDirForSessionFn,
+    _codex_native_bridge_dir_for_reset: Callable[[str], Awaitable[Path]],
     _claude_terminal_ensure_locks: dict[str, asyncio.Lock],
     _codex_terminal_ensure_locks: dict[str, asyncio.Lock],
     _ensure_comment_relay_started: _EnsureCommentRelayStartedFn,
@@ -1906,6 +1907,8 @@ def build_native_controls(
 
         # The caller holds the session's Codex ensure lock.
         terminal_id = terminal_resource_id("codex", "main")
+        # Ahead of any stop, so a refused lookup changes nothing.
+        bridge_dir = await _codex_native_bridge_dir_for_reset(conv_id)
         existing = None
         try:
             existing = await resource_registry.get_terminal_resource(conv_id, terminal_id)
@@ -1916,7 +1919,7 @@ def build_native_controls(
             await teardown_codex_native_app_server(conv_id)
             await _cancel_auto_forwarder_task(conv_id)
             # A rotated session's backend is registered to the session that launched it.
-            await stop_codex_native_bridge_backends(await _codex_native_reset_bridge_dir(conv_id))
+            await stop_codex_native_bridge_backends(bridge_dir)
         if existing is not None:
             _publish_terminal_deleted_event(
                 conversation_id=conv_id,
@@ -1924,12 +1927,6 @@ def build_native_controls(
                 session_key="main",
                 publish_event=_publish_event,
             )
-
-    async def _codex_native_reset_bridge_dir(conv_id: str) -> Path:
-        _, bridge_dir = await _codex_native_bridge_state_and_dir_for_session(
-            conv_id, action="reset", missing_state_log_level=logging.DEBUG
-        )
-        return bridge_dir
 
     async def _relaunch_codex_native_pane(conv_id: str) -> None:
         await _ensure_native_terminal_for_turn(conv_id, "codex-native")
@@ -2565,7 +2562,7 @@ def build_native_controls(
         ),
         codex_native_reset=ClaudeNativeReset(
             stop_pane=_stop_codex_native_pane,
-            bridge_dir_for_session=_codex_native_reset_bridge_dir,
+            bridge_dir_for_session=_codex_native_bridge_dir_for_reset,
             relaunch=_relaunch_codex_native_pane,
             ensure_lock_for_session=lambda conv_id: _codex_terminal_ensure_locks.setdefault(
                 conv_id, asyncio.Lock()

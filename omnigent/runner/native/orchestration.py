@@ -11839,6 +11839,24 @@ async def _session_labels_for_runner_spawn(
         ``"conv_abc123"``.
     :returns: String label mapping. Empty on lookup failure.
     """
+    labels = await _read_session_labels(server_client=server_client, session_id=session_id)
+    return {} if labels is None else labels
+
+
+async def _read_session_labels(
+    *,
+    server_client: httpx.AsyncClient,
+    session_id: str,
+) -> dict[str, str] | None:
+    """
+    Fetch session labels, telling a failed lookup from a session without any.
+
+    :param server_client: Omnigent server client used to fetch the session
+        labels endpoint.
+    :param session_id: Omnigent session/conversation id, e.g.
+        ``"conv_abc123"``.
+    :returns: String label mapping, or ``None`` on lookup failure.
+    """
     from omnigent.inner.databricks_executor import DatabricksAuthError
 
     path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/labels"
@@ -11854,7 +11872,7 @@ async def _session_labels_for_runner_spawn(
             type(exc).__name__,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     except (httpx.HTTPError, DatabricksAuthError) as exc:
         # DatabricksAuthError: the host credential service couldn't sign the
         # request. Like any other lookup failure, that must not fail the turn.
@@ -11864,7 +11882,7 @@ async def _session_labels_for_runner_spawn(
             type(exc).__name__,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     if resp.status_code != 200:
         _logger.warning(
             "Failed to resolve session labels; session=%s status=%s",
@@ -11872,7 +11890,7 @@ async def _session_labels_for_runner_spawn(
             resp.status_code,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     try:
         labels = resp.json().get("labels")
     except ValueError:
@@ -11887,7 +11905,7 @@ async def _session_labels_for_runner_spawn(
             resp.status_code,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     if not isinstance(labels, dict):
         return {}
     return {str(key): str(value) for key, value in labels.items()}
