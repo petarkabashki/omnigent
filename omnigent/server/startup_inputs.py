@@ -35,6 +35,7 @@ from omnigent.server.scheduled.telemetry import (
     scheduled_run_scope,
     start_fire_stage,
 )
+from omnigent.server.routing_outcomes import record_ended
 from omnigent.server.schemas import SessionEventInput, SessionStartupInput
 from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
@@ -216,8 +217,13 @@ class ManagedStartupInputs:
         No sandbox is left to deliver the saved inputs, so they are failed and
         the transcript says why.
         """
-        if await asyncio.to_thread(self.conversations.get_conversation, session_id) is None:
+        conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+        if conv is None:
             return
+        # The session never ran: close its routing outcome so it can't read as unfinished.
+        await asyncio.to_thread(
+            record_ended, session_id, conv.session_usage, reason="launch_failed"
+        )
         with contextlib.suppress(ConversationNotFoundError):
             await asyncio.to_thread(
                 self.conversations.set_labels, session_id, {STARTUP_LABEL: "failed"}

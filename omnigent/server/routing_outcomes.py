@@ -58,7 +58,7 @@ OVERRIDE_KINDS = frozenset(
     {"interrupt", "harness_change", "model_change", "host_change", "reset", "rerun"}
 )
 CHECK_STATUSES = frozenset({"passed", "failed", "error"})
-ENDED_REASONS = frozenset({"stop", "delete"})
+ENDED_REASONS = frozenset({"stop", "delete", "launch_failed"})
 COST_SOURCES = frozenset({"harness", "catalog", "mixed", "none"})
 # Field names a reader depends on; every cost/ended line and summary uses these.
 USD_TOTAL = "usd_total"

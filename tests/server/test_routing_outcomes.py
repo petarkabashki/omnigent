@@ -352,3 +352,18 @@ def test_relay_unpriced_turn_writes_no_cost_line(
     _log_decision(conv.id, "d1")
     _accumulate_session_usage(_relay_response(model="m"), conv.id, store)
     assert _lines("cost") == []
+
+
+async def test_failed_launch_closes_the_outcome_with_its_reason(data_dir: Path, db_uri: str) -> None:
+    from omnigent.server.startup_inputs import ManagedStartupInputs
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    await ManagedStartupInputs(store, hosts=None).record_launch_failure(conv.id, "no capacity")  # type: ignore[arg-type]
+    (ended,) = _lines("ended")
+    assert (ended["reason"], ended["usd_total"], ended["session_id"]) == (
+        "launch_failed",
+        None,
+        conv.id,
+    )
