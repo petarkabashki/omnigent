@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
 from omnigent.server import routing_outcomes as ro
+from omnigent.server.routes.sessions import routes_events as _status_cache_module
 from omnigent.server import shadow_routing as sr
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
@@ -19,6 +20,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
 _EVENTS = "omnigent.server.routes.sessions.routes_events"
+_STATUS_CACHE = _status_cache_module._session_status_cache
 
 
 @pytest_asyncio.fixture()
@@ -110,28 +112,6 @@ async def test_runner_originated_interrupt_is_not_an_owner_override(
     ]
 
 
-async def test_refused_reset_leaves_no_interrupt_override(
-    client: httpx.AsyncClient, routed_session: str
-) -> None:
-    from omnigent.errors import ErrorCode, OmnigentError
-
-    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
-
-    async def interrupt_then_refuse(**kwargs: object) -> None:
-        await kwargs["interrupt"]()  # type: ignore[operator]
-        raise OmnigentError("busy", code=ErrorCode.RESET_IN_PROGRESS)
-
-    with (
-        patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)),
-        patch(f"{_EVENTS}.run_context_reset", AsyncMock(side_effect=interrupt_then_refuse)),
-    ):
-        await client.post(
-            f"/v1/sessions/{routed_session}/events",
-            json={"type": "reset", "data": {"summary": "none"}},
-        )
-    assert ro.summarize_outcomes().get("d1", {}).get("overrides", []) == []
-
-
 async def test_accept_records_owner_actor_and_unknown_session_is_404(
     client: httpx.AsyncClient, routed_session: str
 ) -> None:
@@ -143,24 +123,47 @@ async def test_accept_records_owner_actor_and_unknown_session_is_404(
     assert len(_events("accept")) == 1
 
 
-@pytest.mark.parametrize("refused", [False, True])
-async def test_reset_is_an_override_only_when_it_commits(
-    client: httpx.AsyncClient, routed_session: str, refused: bool
+async def test_committed_reset_is_an_override(
+    client: httpx.AsyncClient, routed_session: str
 ) -> None:
-    from omnigent.errors import ErrorCode, OmnigentError
-
-    outcome = (
-        AsyncMock(side_effect=OmnigentError("busy", code=ErrorCode.RESET_IN_PROGRESS))
-        if refused
-        else AsyncMock(return_value=SimpleNamespace(epoch=1, boundary_item_id="item_1"))
+    resp = await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "reset", "data": {"summary": "none"}},
     )
-    with patch(f"{_EVENTS}.run_context_reset", outcome):
-        await client.post(
+    assert resp.status_code == 202 and resp.json()["epoch"] == "1"
+    overrides = ro.summarize_outcomes()["d1"]["overrides"]
+    assert [(o["kind"], o["actor"]) for o in overrides] == [("reset", "owner")]
+
+
+async def test_refused_reset_is_not_an_override(
+    client: httpx.AsyncClient, routed_session: str
+) -> None:
+    resp = await client.post(
+        f"/v1/sessions/{routed_session}/events",
+        json={"type": "reset", "data": {"summary": "auto"}},  # refused by run_context_reset
+    )
+    assert resp.status_code >= 400
+    assert ro.summarize_outcomes().get("d1", {}).get("overrides", []) == []
+
+
+async def test_reset_that_interrupts_then_is_refused_leaves_no_interrupt_override(
+    client: httpx.AsyncClient, routed_session: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.server.routes._sessions import reset as reset_module
+
+    # The running turn never stops, so the real reset interrupts it and times out busy.
+    monkeypatch.setattr(reset_module, "_STOP_WAIT_S", 0.3)
+    monkeypatch.setattr(reset_module, "_STOP_POLL_S", 0.05)
+    monkeypatch.setitem(_STATUS_CACHE, routed_session, "running")
+    runner = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=204)))
+    with patch(f"{_EVENTS}._get_runner_client", AsyncMock(return_value=runner)):
+        resp = await client.post(
             f"/v1/sessions/{routed_session}/events",
-            json={"type": "reset", "data": {"summary": "none"}},
+            json={"type": "reset", "data": {"summary": "none", "stop_running": True}},
         )
-    overrides = ro.summarize_outcomes().get("d1", {}).get("overrides", [])
-    assert [o["kind"] for o in overrides] == ([] if refused else ["reset"])
+    assert resp.status_code == 409
+    assert runner.post.await_count == 1  # the reset's own interrupt really was delivered
+    assert ro.summarize_outcomes().get("d1", {}).get("overrides", []) == []
 
 
 @pytest.mark.parametrize(("previous", "expected"), [(None, []), ("opus", ["model_change"])])
