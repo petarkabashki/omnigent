@@ -310,7 +310,16 @@ class _ProjectsClient(_RecordingClient):
         self.projects = projects
         self.create_status = create_status
 
-    async def get(self, url: str, *, timeout: object = None) -> _Resp:
+    async def get(
+        self, url: str, *, params: dict[str, str] | None = None, timeout: object = None
+    ) -> _Resp:
+        if url == "/v1/projects/resolve":
+            self.calls.append(("GET", url, params))
+            wanted = (params or {})["path"].casefold()
+            hits = [p for p in self.projects if (p.get("path") or p["name"]).casefold() == wanted]
+            if len(hits) > 1:
+                return _Resp(status_code=409, body={"detail": "matches several projects"})
+            return _Resp(body=hits[0]) if hits else _Resp(status_code=404, body={"detail": "none"})
         if url != "/v1/projects":
             return await super().get(url, timeout=timeout)
         self.calls.append(("GET", url, None))
@@ -420,14 +429,64 @@ async def test_project_args_are_refused_on_a_server_without_task_projects(
     assert [url for _, url, _ in client.calls] == ["/v1/info"]
 
 
+_NESTED = [
+    {"id": "proj_ops", "name": "ops", "path": "ops"},
+    {"id": "proj_nested", "name": "nightly", "path": "ops/nightly"},
+]
+
+
+async def _create_task_named(client: _ProjectsClient, project_name: str) -> dict:
+    out = await _execute_scheduled_task_tool(
+        "sys_scheduled_task_create",
+        json.dumps({**_REVIEW_FIELDS, "project_name": project_name}),
+        server_client=client,
+    )
+    return json.loads(out)
+
+
+def _project_creates(client: _ProjectsClient) -> list[dict | None]:
+    return [body for verb, url, body in client.calls if (verb, url) == ("POST", "/v1/projects")]
+
+
+def _task_creates(client: _ProjectsClient) -> list[dict | None]:
+    return [body for verb, url, body in client.calls if url.startswith("/v1/scheduled-tasks")]
+
+
+@pytest.mark.asyncio
+async def test_nested_project_path_files_into_that_project() -> None:
+    client = _ProjectsClient(list(_NESTED))
+    await _create_task_named(client, "ops/nightly")
+    assert _task_creates(client)[0]["project_id"] == "proj_nested"
+    assert not _project_creates(client)
+
+
+@pytest.mark.asyncio
+async def test_unknown_nested_path_is_an_error_and_creates_nothing() -> None:
+    client = _ProjectsClient(list(_NESTED))
+    result = await _create_task_named(client, "ops/missing")
+    assert "no project at path 'ops/missing'" in result["error"]
+    assert not _project_creates(client)
+    assert not _task_creates(client)
+
+
+@pytest.mark.asyncio
+async def test_a_leaf_name_never_matches_a_nested_project() -> None:
+    client = _ProjectsClient(list(_NESTED))
+    await _create_task_named(client, "nightly")
+    assert _project_creates(client) == [{"name": "nightly"}]
+    assert _task_creates(client)[0]["project_id"] == "proj_new"
+
+
 @pytest.mark.asyncio
 async def test_update_by_name_on_an_unknown_task_creates_no_project() -> None:
     class _MissingTaskClient(_ProjectsClient):
-        async def get(self, url: str, *, timeout: object = None) -> _Resp:
+        async def get(
+            self, url: str, *, params: dict[str, str] | None = None, timeout: object = None
+        ) -> _Resp:
             if url.startswith("/v1/scheduled-tasks/"):
                 self.calls.append(("GET", url, None))
                 return _Resp(status_code=404, body={"detail": "Scheduled task not found"})
-            return await super().get(url, timeout=timeout)
+            return await super().get(url, params=params, timeout=timeout)
 
     client = _MissingTaskClient([])
     out = await _execute_scheduled_task_tool(

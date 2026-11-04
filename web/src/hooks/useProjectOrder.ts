@@ -14,7 +14,9 @@ export function useSaveProjectOrder() {
     mutationFn: async (projects: ProjectSummary[] | null) => {
       if (projects === null) return saveProjectOrder(null);
       const ids = await Promise.all(
-        projects.map((project) => project.id ?? resolveOrCreateProjectId(project.name)),
+        projects
+          .filter((project) => project.id !== null || !project.name.includes("/"))
+          .map((project) => project.id ?? resolveOrCreateProjectId(project.name)),
       );
       return saveProjectOrder(ids);
     },

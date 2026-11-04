@@ -1637,7 +1637,9 @@ export function useBulkMoveToProject() {
       for (let i = 0; i < results.length; i++) {
         if (results[i].status === "rejected") failed.push(ids[i]);
       }
-      if (failed.length > 0) {
+      const rejected = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (rejected) {
+        showToast(moveFailedToast(rejected.reason), { duration: 0 });
         throw new BulkConversationMutationError("move", { failed, total: ids.length });
       }
       return results
@@ -2357,6 +2359,14 @@ export async function moveConversationToProject(
   return (await res.json()) as Conversation;
 }
 
+function failureReason(err: unknown): string {
+  return err instanceof Error ? err.message : "unknown error";
+}
+
+function moveFailedToast(err: unknown): string {
+  return `Couldn't move the session: ${failureReason(err)}`;
+}
+
 /**
  * Move a session to a project (or remove it from all projects when `project=""`).
  *
@@ -2514,7 +2524,8 @@ export function useMoveToProject() {
       overlayMembership(row, target?.id ?? null, labels, targetCacheKey);
       return previous;
     },
-    onError: (_err, { id }, previous) => {
+    onError: (err, { id }, previous) => {
+      showToast(moveFailedToast(err), { duration: 0 });
       if (previous === undefined) return;
       for (const [key, data] of [...previous.conversations, ...previous.projectSessions]) {
         if (data !== undefined) queryClient.setQueryData(key, data);
@@ -2591,16 +2602,26 @@ export async function fetchAllProjectSessionIds(project: {
   name: string;
   parent_id?: string | null;
 }): Promise<string[]> {
-  const ids = new Set<string>();
+  return (await fetchAllProjectSessions(project)).map((conv) => conv.id);
+}
+
+async function fetchAllProjectSessions(project: {
+  id: string | null;
+  name: string;
+  parent_id?: string | null;
+}): Promise<Conversation[]> {
+  const members = new Map<string, Conversation>();
   if (project.id !== null) {
-    for (const conv of await fetchAllSessionsWhere({ project_id: project.id })) ids.add(conv.id);
+    for (const conv of await fetchAllSessionsWhere({ project_id: project.id })) {
+      members.set(conv.id, conv);
+    }
   }
   if (project.id === null || !project.parent_id) {
     for (const conv of await fetchAllSessionsWhere({ project: project.name })) {
-      if (!conv.project_id) ids.add(conv.id);
+      if (!conv.project_id) members.set(conv.id, conv);
     }
   }
-  return [...ids];
+  return [...members.values()];
 }
 
 /**
@@ -2719,24 +2740,83 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
   return (await res.json()) as Conversation;
 }
 
+/** Put a label-only folder's member back as it was before the delete sweep. */
+async function restoreLabelMember(member: Conversation, folderName: string): Promise<Conversation> {
+  const pin = member.labels?.[PINNED_LABEL_KEY];
+  const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(member.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      archived: member.archived === true,
+      labels: {
+        [PROJECT_LABEL_KEY]: member.labels?.[PROJECT_LABEL_KEY] ?? folderName,
+        // Archiving drops the caller's pin, so it has to come back too.
+        ...(pin === undefined ? {} : { [PINNED_LABEL_KEY]: pin }),
+      },
+    }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return (await res.json()) as Conversation;
+}
+
 /**
- * Delete a project: archive AND unfile every member session, then delete the
+ * Undo a partial label-only folder sweep and return the error to surface.
+ * A failed restore names the stranded sessions; a sticky toast repeats it
+ * because the folder's row, and so its dialog, can unmount on the refetch.
+ */
+async function rollBackLabelSweep(
+  folderName: string,
+  swept: readonly Conversation[],
+  totalMembers: number,
+  failedCount: number,
+  sweepFailure: unknown,
+): Promise<Error> {
+  const results = await Promise.allSettled(
+    swept.map((member) => restoreLabelMember(member, folderName)),
+  );
+  const stranded: string[] = [];
+  let restoreFailure: unknown;
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      markConversationSeen(swept[index].id, result.value.updated_at);
+      return;
+    }
+    stranded.push(swept[index].title?.trim() || swept[index].id);
+    restoreFailure ??= result.reason;
+  });
+  const summary = `Couldn't delete "${folderName}": ${failedCount} of ${totalMembers} sessions couldn't be archived (${failureReason(sweepFailure)}).`;
+  if (stranded.length === 0)
+    return new Error(`${summary} Its sessions were put back as they were.`);
+  const message = `${summary} Putting the others back also failed (${failureReason(restoreFailure)}), so these are still in the archive and out of the project: ${stranded.join(", ")}. You can restore them from Settings.`;
+  showToast(message, { duration: 0 });
+  return new Error(message);
+}
+
+/**
+ * Delete a project: archive AND unfile every member session, and delete the
  * first-class `projects` row (when the folder has one). Sessions are never
  * deleted — they are detached (project_id + omni_project label cleared) and
- * archived, so they leave the sidebar but keep their history. Accepts the
- * folder's `{ id, name }`: `name` drives the member sweep (dual-read
- * `?project=`), `id` deletes the container (skipped for a label-only folder,
- * which has none). Throws a `BulkConversationMutationError` if any member
- * failed (e.g. a shared session the user can't modify), leaving those in place.
+ * archived, so they leave the sidebar but keep their history. A first-class
+ * project does all of it in one server transaction, so a refusal changes nothing
+ * and its error carries the server's words. A label-only folder has no row: it
+ * sweeps its members by name, restores those swept if one fails, and its error
+ * says which sessions stayed in the archive if that restore failed.
  */
 export function useDeleteProject() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, name, parent_id }: ProjectSummary) => {
-      const ids = await fetchAllProjectSessionIds({ id, name, parent_id });
+      if (id !== null) {
+        const { session_ids, updated_at } = await apiDeleteProject(id);
+        for (const sessionId of session_ids) markConversationSeen(sessionId, updated_at);
+        return { succeeded: session_ids, failed: [] };
+      }
+      const members = await fetchAllProjectSessions({ id, name, parent_id });
+      const ids = members.map((member) => member.id);
       const results = await Promise.allSettled(ids.map((sid) => archiveAndUnfileConversation(sid)));
       const succeeded: string[] = [];
       const failed: string[] = [];
+      let sweepFailure: unknown;
       for (let i = 0; i < results.length; i++) {
         if (results[i].status === "fulfilled") {
           succeeded.push(ids[i]);
@@ -2746,19 +2826,13 @@ export function useDeleteProject() {
           );
         } else {
           failed.push(ids[i]);
+          sweepFailure ??= (results[i] as PromiseRejectedResult).reason;
         }
       }
       if (failed.length > 0) {
-        throw new BulkConversationMutationError("archive and unfile", {
-          failed,
-          succeeded,
-          total: ids.length,
-        });
+        const swept = members.filter((member) => succeeded.includes(member.id));
+        throw await rollBackLabelSweep(name, swept, ids.length, failed.length, sweepFailure);
       }
-      // All members detached — remove the first-class container if present.
-      // (A label-only folder has no row; clearing the labels above already
-      // makes it vanish from the project list.)
-      if (id !== null) await apiDeleteProject(id);
       return { succeeded, failed };
     },
     onSettled: () => {

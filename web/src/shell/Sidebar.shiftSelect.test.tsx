@@ -69,7 +69,17 @@ vi.mock("@/hooks/useConversations", async () => {
       isError: false,
     }),
     useBulkMoveToProject: () => ({ mutate: bulkMoveMock.mutate, isPending: false, isError: false }),
-    useProjects: () => ({ data: projectsMock.map((name: string) => ({ id: `p_${name}`, name })) }),
+    useProjects: () => ({
+      data: projectsMock.map((path: string) => {
+        const segments = path.split("/");
+        return {
+          id: `p_${path}`,
+          name: segments[segments.length - 1],
+          path,
+          parent_id: segments.length > 1 ? `p_${segments[0]}` : null,
+        };
+      }),
+    }),
     useProjectSessions: (project: string, enabled: boolean) => {
       const override = projectSessionsMock.current[project];
       const rows = !enabled
@@ -336,6 +346,22 @@ describe("Sidebar shift-click selection", () => {
       expect(bulkArchiveMock.mutate).toHaveBeenCalledTimes(1);
     });
     expect([...bulkArchiveMock.mutate.mock.calls[0][0].ids].sort()).toEqual(["a0", "a4"]);
+  });
+
+  it("bulk-moves into a nested project by its path, not its leaf name", async () => {
+    projectsMock.push("a", "a/b");
+    mockConversations([conv("s1")]);
+    renderSidebar();
+
+    fireEvent.click(screen.getByTestId("toggle-selection-mode"));
+    fireEvent.click(screen.getByRole("link", { name: "s1" }));
+    fireEvent.pointerDown(screen.getByTestId("bulk-move-to-project"), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "a/b" }));
+
+    expect(bulkMoveMock.mutate.mock.calls[0]?.[0]).toEqual({ ids: ["s1"], project: "a/b" });
   });
 
   it("keeps a folder's listed rows when older sessions are bulk-moved into it", async () => {

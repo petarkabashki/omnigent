@@ -91,3 +91,43 @@ export function projectSubtreeIds(nodes: ProjectTreeNode[], id: string): Set<str
 export function pathSegments(path: string): string[] {
   return path.split("/").filter((segment) => segment !== "");
 }
+
+/** A path and every path enclosing it (`a/b/c` -> `["a", "a/b", "a/b/c"]`). */
+export function pathPrefixes(path: string): string[] {
+  return path.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/"));
+}
+
+/** Projects sharing `project`'s parent; an orphan counts as a root, as in the tree. */
+export function projectSiblings<T extends TreeProject>(projects: T[], project: T): T[] {
+  const known = new Set(projects.map((p) => p.id));
+  const parentOf = (p: T) => (p.parent_id && known.has(p.parent_id) ? p.parent_id : null);
+  return projects.filter((p) => parentOf(p) === parentOf(project));
+}
+
+/**
+ * The flat list after moving the project at path `key` among its siblings, or
+ * `null` when it is already there, so callers never save a move that changes nothing.
+ */
+export function moveAmongSiblings<T extends TreeProject>(
+  projects: T[],
+  key: string,
+  destination: "up" | "down" | "top" | "bottom",
+): T[] | null {
+  const moved = projects.find((p) => projectPathOf(p) === key);
+  if (!moved) return null;
+  const siblings = projectSiblings(projects, moved);
+  const position = siblings.indexOf(moved);
+  const targetPosition =
+    destination === "top"
+      ? 0
+      : destination === "bottom"
+        ? siblings.length - 1
+        : destination === "up"
+          ? position - 1
+          : position + 1;
+  const target = siblings[targetPosition];
+  if (!target || target === moved) return null;
+  const next = projects.filter((p) => p !== moved);
+  next.splice(next.indexOf(target) + (position < targetPosition ? 1 : 0), 0, moved);
+  return next;
+}

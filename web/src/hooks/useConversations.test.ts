@@ -25,6 +25,8 @@ import {
   useConversations,
   useSessionSearch,
   fetchAllProjectSessionIds,
+  moveConversationToProject,
+  useBulkMoveToProject,
   useDeleteProject,
   useProjects,
   useProjectConfig,
@@ -3500,6 +3502,52 @@ describe("useArchiveConversation", () => {
   });
 });
 
+describe("moveConversationToProject into a missing path", () => {
+  it("tells the user to rename the folder and sends no PATCH", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ data: [] }))
+      .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 404 }));
+
+    await expect(moveConversationToProject("conv_1", "a/b")).rejects.toThrow(
+      'If a folder shows that name, rename it without "/".',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  function missingPathWrapper() {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ data: [] }))
+      .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 404 }));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    return ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+  }
+
+  it("shows that reason when a single move fails", async () => {
+    const wrapper = missingPathWrapper();
+    const toasts: string[] = [];
+    window.addEventListener("omnigent:toast", (e) => {
+      toasts.push(String((e as CustomEvent<{ content: unknown }>).detail.content));
+    });
+    const { result } = renderHook(() => useMoveToProject(), { wrapper });
+    result.current.mutate({ id: "conv_1", project: "a/b" });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(toasts.join()).toContain("rename it without");
+  });
+
+  it("shows that reason when a bulk move fails", async () => {
+    const wrapper = missingPathWrapper();
+    const toasts: string[] = [];
+    window.addEventListener("omnigent:toast", (e) => {
+      toasts.push(String((e as CustomEvent<{ content: unknown }>).detail.content));
+    });
+    const { result } = renderHook(() => useBulkMoveToProject(), { wrapper });
+    result.current.mutate({ ids: ["conv_1"], project: "a/b" });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(toasts.join()).toContain("rename it without");
+  });
+});
+
 describe("useDeleteProject", () => {
   function archivedConv(id: string) {
     return mockResponse({
@@ -3513,105 +3561,169 @@ describe("useDeleteProject", () => {
     });
   }
 
-  it("archives + unfiles every member, then deletes the first-class project", async () => {
-    // 1st call: members by project_id; 2nd: the legacy label sweep (a root
-    // folder). Then one PATCH per member, then the DELETE of the container.
-    fetchMock
-      .mockResolvedValueOnce(
-        mockResponse({
-          data: [
-            { id: "conv_a", object: "conversation", title: "A", created_at: 0, updated_at: 1 },
-            { id: "conv_b", object: "conversation", title: "B", created_at: 0, updated_at: 2 },
-          ],
-          first_id: "conv_a",
-          last_id: "conv_b",
-          has_more: false,
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockResponse({ data: [], first_id: null, last_id: null, has_more: false }),
-      )
-      .mockResolvedValueOnce(archivedConv("conv_a"))
-      .mockResolvedValueOnce(archivedConv("conv_b"))
-      .mockResolvedValueOnce(mockResponse({ id: "p_1", object: "project.deleted", deleted: true }));
-
+  function deleteHook() {
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     const wrapper = ({ children }: { children: ReactNode }) =>
       createElement(QueryClientProvider, { client: queryClient }, children);
-    const { result } = renderHook(() => useDeleteProject(), { wrapper });
+    return { invalidateSpy, ...renderHook(() => useDeleteProject(), { wrapper }) };
+  }
+
+  it("deletes a first-class project and its sessions in one server call", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "p_1",
+        object: "project.deleted",
+        deleted: true,
+        session_ids: ["conv_a", "conv_b"],
+        updated_at: 7,
+      }),
+    );
+    const { result, invalidateSpy } = deleteHook();
 
     result.current.mutate({ id: "p_1", name: "Sprint 42" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    // The member fetch goes by project id (nested projects can share a leaf
-    // name) and includes archived members; the label sweep goes by name.
-    const listUrl = fetchMock.mock.calls[0][0] as string;
-    expect(listUrl).toContain("project_id=p_1");
-    expect(fetchMock.mock.calls[1][0] as string).toContain("project=Sprint+42");
-    expect(listUrl).toContain("include_archived=true");
-    expect(listUrl).toContain("visibility=all");
-
-    // Each member is archived AND detached (project_id cleared + label removed)
-    // via PATCH — never deleted.
-    const patches = (fetchMock.mock.calls.slice(2, 4) as [string, RequestInit][]).map(
-      ([url, init]) => ({ url, init }),
-    );
-    expect(patches.map((p) => p.url).sort()).toEqual([
-      "/v1/sessions/conv_a",
-      "/v1/sessions/conv_b",
-    ]);
-    for (const { init } of patches) {
-      expect(init.method).toBe("PATCH");
-      expect(JSON.parse(init.body as string)).toEqual({
-        archived: true,
-        project_id: "",
-        labels: { omni_project: "" },
-      });
-    }
-
-    // Finally the first-class container is removed.
-    const [delUrl, delInit] = fetchMock.mock.calls[4] as [string, RequestInit];
-    expect(delUrl).toBe("/v1/projects/p_1");
-    expect(delInit.method).toBe("DELETE");
-
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_1?archive_sessions=true");
+    expect(init.method).toBe("DELETE");
+    expect(result.current.data).toEqual({ succeeded: ["conv_a", "conv_b"], failed: [] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversations"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["projects"] });
   });
 
-  it("throws with succeeded/failed split when some archives fail", async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        mockResponse({
-          data: [
-            { id: "conv_a", object: "conversation", title: "A", created_at: 0, updated_at: 1 },
-            { id: "conv_b", object: "conversation", title: "B", created_at: 0, updated_at: 2 },
-          ],
-          first_id: "conv_a",
-          last_id: "conv_b",
-          has_more: false,
-        }),
-      )
-      .mockResolvedValueOnce(
-        mockResponse({ data: [], first_id: null, last_id: null, has_more: false }),
-      )
-      .mockResolvedValueOnce(archivedConv("conv_a"))
-      .mockResolvedValueOnce(mockResponse({}, { ok: false, status: 403 }));
-
-    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
-    const wrapper = ({ children }: { children: ReactNode }) =>
-      createElement(QueryClientProvider, { client: queryClient }, children);
-    const { result } = renderHook(() => useDeleteProject(), { wrapper });
+  it.each([
+    ["nested projects", 409, "Project has child projects; move or delete them first"],
+    ["a session the caller can't modify", 403, "This project holds a session you can't modify"],
+    ["separate databases", 409, "This server keeps sessions and projects in separate databases"],
+  ])("shows the server's words when it refuses over %s", async (_case, status, message) => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ error: { code: "conflict", message } }, { ok: false, status }),
+    );
+    const { result, invalidateSpy } = deleteHook();
 
     result.current.mutate({ id: "p_1", name: "Sprint 42" });
     await waitFor(() => expect(result.current.isError).toBe(true));
 
-    expect(result.current.error).toBeInstanceOf(Error);
-    expect(result.current.error).toMatchObject({
-      message: "Failed to archive and unfile 1 of 2 conversations",
-      failed: ["conv_b"],
-      succeeded: ["conv_a"],
-      total: 2,
+    expect(result.current.error?.message).toBe(message);
+    expect(result.current.isSuccess).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Refresh anyway: the sidebar must show what the server actually holds.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["conversations"] });
+  });
+
+  it("reports a dropped connection without sending anything else", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { result } = deleteHook();
+
+    result.current.mutate({ id: "p_1", name: "Sprint 42" });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(result.current.error?.message).toBe("Failed to fetch");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe("label-only folder rollback", () => {
+    const failedResponse = (status: number, statusText: string) =>
+      ({ ...mockResponse({}, { ok: false, status }), statusText }) as Response;
+    const member = (id: string, title: string | null, extra: Record<string, unknown> = {}) => ({
+      id,
+      object: "conversation",
+      title,
+      created_at: 0,
+      updated_at: 1,
+      labels: { omni_project: "x/y" },
+      ...extra,
+    });
+
+    /** Serve the member list, then answer each archive and restore PATCH by id. */
+    function serveSweep(
+      members: ReturnType<typeof member>[],
+      failArchive: readonly string[],
+      failRestore: readonly string[],
+    ) {
+      const restores: Record<string, unknown> = {};
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (!init?.method) {
+          return mockResponse({ data: members, first_id: null, last_id: null, has_more: false });
+        }
+        const id = url.split("/").pop() as string;
+        const body = JSON.parse(init.body as string) as { project_id?: string };
+        if (body.project_id === "") {
+          if (failArchive.includes(id)) return failedResponse(403, "Forbidden");
+          return archivedConv(id);
+        }
+        restores[id] = body;
+        if (failRestore.includes(id)) return failedResponse(500, "Server Error");
+        return archivedConv(id);
+      });
+      return restores;
+    }
+
+    async function deleteFolder() {
+      const toasts: string[] = [];
+      const listener = (e: Event) => {
+        toasts.push(String((e as CustomEvent<{ content: unknown }>).detail.content));
+      };
+      window.addEventListener("omnigent:toast", listener);
+      const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+      const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: queryClient }, children);
+      const { result } = renderHook(() => useDeleteProject(), { wrapper });
+      result.current.mutate({ id: null, name: "x/y" });
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      window.removeEventListener("omnigent:toast", listener);
+      return { message: result.current.error?.message, toasts };
+    }
+
+    it("puts swept members back exactly as they were when one archive fails", async () => {
+      const restores = serveSweep(
+        [
+          member("conv_a", "Alpha", {
+            labels: { omni_project: "X/Y", "omnigent.pinned": "1700" },
+          }),
+          member("conv_b", "Beta"),
+          member("conv_c", "Gamma", { archived: true }),
+        ],
+        ["conv_b"],
+        [],
+      );
+
+      const { message, toasts } = await deleteFolder();
+
+      expect(message).toBe(
+        "Couldn't delete \"x/y\": 1 of 3 sessions couldn't be archived (403 Forbidden). Its sessions were put back as they were.",
+      );
+      expect(toasts).toEqual([]);
+      expect(restores).toEqual({
+        conv_a: { archived: false, labels: { omni_project: "X/Y", "omnigent.pinned": "1700" } },
+        // Already archived before the delete, so it must not come back unarchived.
+        conv_c: { archived: true, labels: { omni_project: "x/y" } },
+      });
+    });
+
+    it("names the stranded sessions and both failures when the restore fails", async () => {
+      serveSweep(
+        [
+          member("conv_a", "Alpha"),
+          member("conv_b", "Beta"),
+          member("conv_c", null),
+          member("conv_d", "Delta"),
+        ],
+        ["conv_b"],
+        ["conv_a", "conv_c"],
+      );
+
+      const { message, toasts } = await deleteFolder();
+
+      expect(message).toBe(
+        "Couldn't delete \"x/y\": 1 of 4 sessions couldn't be archived (403 Forbidden). Putting the others back also failed (500 Server Error), so these are still in the archive and out of the project: Alpha, conv_c. You can restore them from Settings.",
+      );
+      // A session restored successfully is not named.
+      expect(message).not.toContain("Delta");
+      // The toast outlives the dialog if the folder's row unmounts on refetch.
+      expect(toasts).toEqual([message]);
     });
   });
 });

@@ -5760,8 +5760,12 @@ export function NewChatLandingScreen() {
       // move). A label-only folder (no first-class row yet) keeps the legacy
       // label + post-create move, which creates the project row on demand.
       const createProjectId = selectedProject !== "" ? configProjectId : null;
+      // A path naming no project (a stale `?project=a/b`) must never become a label.
+      const unknownPath = createProjectId === null && selectedProject.includes("/");
       const localProject =
-        selectedProject !== "" ? { id: createProjectId, name: selectedProject } : undefined;
+        selectedProject !== "" && !unknownPath
+          ? { id: createProjectId, name: selectedProject }
+          : undefined;
       // Server-side default-fill: a slot still holding its untouched project-
       // config seed (per the source refs) is OMITTED so the server fills it
       // from the config. Any user interaction — even re-picking the exact
@@ -5787,7 +5791,7 @@ export function NewChatLandingScreen() {
       // the move. A `project_id` create needs no label: the row is born with
       // first-class membership (and a label would go stale on project rename).
       const createLabels =
-        selectedProject && createProjectId === null
+        selectedProject && createProjectId === null && !unknownPath
           ? {
               ...(baseLabels ?? {}),
               [PROJECT_LABEL_KEY]: selectedProject,
@@ -6133,11 +6137,14 @@ export function NewChatLandingScreen() {
           // session shows up immediately (the folder fetches via
           // useProjectSessions, separate from the global conversations list).
           void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
-        } catch {
+        } catch (err) {
           // Non-fatal: the create already stamped the `omni_project` label, so
           // the session stays filed under its project by label even if this
-          // `project_id` promotion fails — the sidebar's dual-read grouping
-          // still shows it under the project.
+          // `project_id` promotion fails. A path has no label, so say so.
+          if (selectedProject.includes("/")) {
+            const reason = err instanceof Error ? err.message : selectedProject;
+            showToast(`This session wasn't filed: ${reason}`, { duration: 0 });
+          }
         }
       }
       // This start becomes the project's default for its next session.

@@ -16,10 +16,13 @@ import builtins
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final, Literal, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, TypeVar
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
+
+if TYPE_CHECKING:
+    from omnigent.stores.conversation_store import ConversationStore, ProjectSessionSweep
 
 # Deepest allowed namespace path (segments), cycle-guard bound for path walks.
 MAX_PROJECT_DEPTH: Final = 8
@@ -285,6 +288,49 @@ class ProjectStore(ABC):
         :param user_id: The requesting owner.
         :returns: ``True`` if removed; ``False`` if not found / not owned.
         :raises OmnigentError: ``CONFLICT`` while the project still has children.
+        """
+        ...
+
+    @abstractmethod
+    def member_session_ids(
+        self,
+        project_id: str,
+        *,
+        user_id: str | None,
+        conversation_store: ConversationStore,
+    ) -> builtins.list[str]:
+        """
+        Read a project's members without locking, for checks ahead of a delete.
+
+        :param project_id: Opaque project identifier.
+        :param user_id: The requesting owner.
+        :param conversation_store: The store holding membership.
+        :returns: Member session ids; empty if not found / not owned.
+        """
+        ...
+
+    @abstractmethod
+    def delete_with_sessions(
+        self,
+        project_id: str,
+        *,
+        user_id: str | None,
+        conversation_store: ConversationStore,
+        authorize: Callable[[builtins.list[str]], None],
+    ) -> ProjectSessionSweep | None:
+        """
+        Archive and unfile a project's members and delete it in one transaction.
+
+        Any refusal or failure leaves the members and the project untouched.
+
+        :param project_id: Opaque project identifier.
+        :param user_id: The requesting owner.
+        :param conversation_store: The store holding membership.
+        :param authorize: Raises to refuse; receives every member id. It may run
+            more than once, under the write lock, so keep it cheap for known ids.
+        :returns: What was swept; ``None`` if not found / not owned.
+        :raises OmnigentError: ``CONFLICT`` while the project has children, or
+            has members in a separate database.
         """
         ...
 

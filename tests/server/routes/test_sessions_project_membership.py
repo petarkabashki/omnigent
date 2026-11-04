@@ -25,6 +25,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
@@ -37,10 +38,15 @@ from omnigent.server.auth import (
     LEVEL_OWNER,
     UnifiedAuthProvider,
 )
+from omnigent.server.routes._sessions import orchestration
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.sessions import create_sessions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.conversation_store import PROJECT_LABEL_KEY
+from omnigent.stores.conversation_store import (
+    ARCHIVED_AT_LABEL_KEY,
+    PROJECT_LABEL_KEY,
+    pinned_label_key,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -80,15 +86,20 @@ def _single_user_app(db_uri: str) -> FastAPI:
         )
 
     project_store = SqlAlchemyProjectStore(db_uri)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    app.state.project_store = project_store
     app.include_router(
         create_sessions_router(
-            conversation_store=SqlAlchemyConversationStore(db_uri),
+            conversation_store=conversation_store,
             agent_store=SqlAlchemyAgentStore(db_uri),
             project_store=project_store,
         ),
         prefix="/v1",
     )
-    app.include_router(create_projects_router(project_store=project_store), prefix="/v1")
+    app.include_router(
+        create_projects_router(project_store=project_store, conversation_store=conversation_store),
+        prefix="/v1",
+    )
     return app
 
 
@@ -272,6 +283,39 @@ def test_project_filter_dual_reads_label_and_entity(db_uri: str) -> None:
     assert {s["id"] for s in listed} == {entity_member.id, label_member.id}
 
 
+def test_restoring_a_swept_label_member_undoes_archive_unfile_and_pin(db_uri: str) -> None:
+    """The label-only folder rollback PATCH returns a member to its prior state."""
+    _ensure_agent(db_uri)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    member = conv_store.create_conversation(title="label", agent_id=AGENT_ID)
+    client = TestClient(_single_user_app(db_uri))
+    url = f"/v1/sessions/{member.id}"
+    conv_store.set_labels(member.id, {PROJECT_LABEL_KEY: "x/y"})
+    assert client.patch(url, json={"labels": {"omnigent.pinned": "1700"}}).status_code == 200
+    before = client.get("/v1/sessions?project=x/y").json()["data"][0]["labels"]
+    assert before["omnigent.pinned"] == "1700"
+
+    swept = client.patch(
+        url, json={"archived": True, "project_id": "", "labels": {PROJECT_LABEL_KEY: ""}}
+    )
+    assert swept.status_code == 200
+    assert client.get("/v1/sessions?project=x/y").json()["data"] == []
+
+    restored = client.patch(
+        url,
+        json={
+            "archived": False,
+            "labels": {PROJECT_LABEL_KEY: "x/y", "omnigent.pinned": "1700"},
+        },
+    )
+
+    assert restored.status_code == 200
+    rows = client.get("/v1/sessions?project=x/y").json()["data"]
+    assert [row["id"] for row in rows] == [member.id]
+    assert rows[0]["archived"] is False
+    assert rows[0]["labels"]["omnigent.pinned"] == "1700"
+
+
 # ── Multi-user mode (header auth) — ownership boundary ───────────────────
 
 
@@ -289,18 +333,26 @@ def _multi_user_app(db_uri: str) -> FastAPI:
 
     auth = UnifiedAuthProvider(source="header")
     project_store = SqlAlchemyProjectStore(db_uri)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    app.state.project_store = project_store
     app.include_router(
         create_sessions_router(
-            conversation_store=SqlAlchemyConversationStore(db_uri),
+            conversation_store=conversation_store,
             agent_store=SqlAlchemyAgentStore(db_uri),
             auth_provider=auth,
-            permission_store=SqlAlchemyPermissionStore(db_uri),
+            permission_store=permission_store,
             project_store=project_store,
         ),
         prefix="/v1",
     )
     app.include_router(
-        create_projects_router(project_store=project_store, auth_provider=auth),
+        create_projects_router(
+            project_store=project_store,
+            auth_provider=auth,
+            conversation_store=conversation_store,
+            permission_store=permission_store,
+        ),
         prefix="/v1",
     )
     return app
@@ -611,3 +663,246 @@ def test_the_patch_migrate_slashes_describes_is_accepted(db_uri: str) -> None:
 
     assert patched.status_code == 200, patched.text
     assert patched.json()["path"] == "a/b"
+
+
+# DELETE /v1/projects/{id}?archive_sessions=true
+
+
+@pytest.fixture()
+def archive_effects(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
+    """Record the post-commit effects, which run through the PATCH route's helper."""
+    effects: dict[str, list[str]] = {"pruned": [], "stopped": []}
+    monkeypatch.setattr(orchestration, "_prune_session_read_state", effects["pruned"].append)
+
+    def stop(session_id: str, *_args: object, **_kwargs: object) -> None:
+        effects["stopped"].append(session_id)
+
+    monkeypatch.setattr(orchestration, "_spawn_archive_stop", stop)
+    return effects
+
+
+def _alice_project_with(db_uri: str, client: TestClient, session_ids: list[str]) -> dict:
+    project = client.post("/v1/projects", json={"name": "Doomed"}, headers=_hdr(ALICE)).json()
+    store = SqlAlchemyConversationStore(db_uri)
+    for session_id in session_ids:
+        assert store.set_conversation_project(session_id, project["id"])
+        store.set_labels(session_id, {PROJECT_LABEL_KEY: "Doomed"})
+    return project
+
+
+def _assert_members_intact(db_uri: str, client: TestClient, project: dict, ids: list[str]) -> None:
+    listed = client.get(f"/v1/projects/{project['id']}", headers=_hdr(ALICE))
+    assert listed.status_code == 200
+    store = SqlAlchemyConversationStore(db_uri)
+    for session_id in ids:
+        session = store.get_conversation(session_id)
+        assert session.archived is False
+        assert session.project_id == project["id"]
+        assert session.labels[PROJECT_LABEL_KEY] == "Doomed"
+        assert ARCHIVED_AT_LABEL_KEY not in session.labels
+
+
+def _archive_delete(client: TestClient, project: dict) -> Response:
+    return client.delete(
+        f"/v1/projects/{project['id']}?archive_sessions=true", headers=_hdr(ALICE)
+    )
+
+
+def test_archive_delete_sweeps_members_then_runs_side_effects(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    """Only members newly archived are owed the effects, once committed."""
+    _ensure_agent(db_uri)
+    first, second, archived = (_seed_owned_session(db_uri, ALICE) for _ in range(3))
+    client = TestClient(_multi_user_app(db_uri))
+    project = _alice_project_with(db_uri, client, [first, second, archived])
+    store = SqlAlchemyConversationStore(db_uri)
+    store.update_conversation_with_changes(archived, archived=True)
+    store.set_labels(first, {pinned_label_key(ALICE): "1"})
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert sorted(body["session_ids"]) == sorted([first, second, archived])
+    assert body["deleted"] is True
+    assert sorted(archive_effects["pruned"]) == sorted([first, second])
+    assert sorted(archive_effects["stopped"]) == sorted([first, second])
+    assert client.get(f"/v1/projects/{project['id']}", headers=_hdr(ALICE)).status_code == 404
+    swept = store.get_conversation(first)
+    assert (swept.archived, swept.project_id) == (True, None)
+    assert PROJECT_LABEL_KEY not in swept.labels
+    assert pinned_label_key(ALICE) not in swept.labels
+
+
+def test_archive_delete_sweeps_own_label_members_only(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    """Bob's like-named label is his own folder: it neither blocks nor gets swept."""
+    del archive_effects
+    _ensure_agent(db_uri)
+    mine, bobs = _seed_owned_session(db_uri, ALICE), _seed_owned_session(db_uri, BOB)
+    store = SqlAlchemyConversationStore(db_uri)
+    client = TestClient(_multi_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "Doomed"}, headers=_hdr(ALICE)).json()
+    store.set_labels(mine, {PROJECT_LABEL_KEY: "Doomed"})
+    store.set_labels(bobs, {PROJECT_LABEL_KEY: "Doomed"})
+
+    assert _archive_delete(client, project).status_code == 200
+
+    assert store.get_conversation(mine).archived is True
+    assert PROJECT_LABEL_KEY not in store.get_conversation(mine).labels
+    assert store.get_conversation(bobs).archived is False
+    assert store.get_conversation(bobs).labels[PROJECT_LABEL_KEY] == "Doomed"
+
+
+def test_archive_delete_of_a_nested_project_leaves_a_like_named_label_alone(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    """A nested project has no legacy label members; the name belongs to a root folder."""
+    del archive_effects
+    _ensure_agent(db_uri)
+    labelled = _seed_owned_session(db_uri, ALICE)
+    store = SqlAlchemyConversationStore(db_uri)
+    client = TestClient(_multi_user_app(db_uri))
+    root = client.post("/v1/projects", json={"name": "Root"}, headers=_hdr(ALICE)).json()
+    nested = client.post(
+        "/v1/projects", json={"name": "Leaf", "parent_id": root["id"]}, headers=_hdr(ALICE)
+    ).json()
+    store.set_labels(labelled, {PROJECT_LABEL_KEY: "Leaf"})
+
+    assert _archive_delete(client, nested).status_code == 200
+
+    assert store.get_conversation(labelled).archived is False
+
+
+def test_archive_delete_refuses_a_parent_and_changes_nothing(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    _ensure_agent(db_uri)
+    member = _seed_owned_session(db_uri, ALICE)
+    client = TestClient(_multi_user_app(db_uri))
+    project = _alice_project_with(db_uri, client, [member])
+    child = client.post(
+        "/v1/projects", json={"name": "Kid", "parent_id": project["id"]}, headers=_hdr(ALICE)
+    )
+    assert child.status_code == 200
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["message"].startswith("Project has child projects")
+    _assert_members_intact(db_uri, client, project, [member])
+    assert archive_effects == {"pruned": [], "stopped": []}
+
+
+@pytest.mark.parametrize("grant", [LEVEL_EDIT, None])
+def test_archive_delete_refuses_a_member_the_caller_cannot_modify(
+    db_uri: str, archive_effects: dict[str, list[str]], grant: int | None
+) -> None:
+    """PATCH's owner gate applies; a session with no grant at all refuses the same way."""
+    _ensure_agent(db_uri)
+    mine, bobs = _seed_owned_session(db_uri, ALICE), _seed_owned_session(db_uri, BOB)
+    if grant is not None:
+        perms = SqlAlchemyPermissionStore(db_uri)
+        perms.ensure_user(ALICE)
+        perms.grant(ALICE, bobs, grant)
+    client = TestClient(_multi_user_app(db_uri))
+    project = _alice_project_with(db_uri, client, [mine, bobs])
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 403
+    assert "can't modify" in response.json()["error"]["message"]
+    _assert_members_intact(db_uri, client, project, [mine, bobs])
+    assert archive_effects == {"pruned": [], "stopped": []}
+
+
+def test_archive_delete_checks_a_member_filed_after_the_preflight(
+    db_uri: str, archive_effects: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check inside the transaction reads permissions while holding the write lock."""
+    _ensure_agent(db_uri)
+    bobs = _seed_owned_session(db_uri, BOB)
+    app = _multi_user_app(db_uri)
+    client = TestClient(app)
+    project = _alice_project_with(db_uri, client, [bobs])
+    monkeypatch.setattr(app.state.project_store, "member_session_ids", lambda *_a, **_k: [])
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 403
+    _assert_members_intact(db_uri, client, project, [bobs])
+    assert archive_effects == {"pruned": [], "stopped": []}
+
+
+@pytest.mark.parametrize("failing_step", ["delete_members", "delete_row"])
+def test_archive_delete_failure_changes_nothing_and_fires_no_effects(
+    db_uri: str, archive_effects: dict[str, list[str]], failing_step: str
+) -> None:
+    _ensure_agent(db_uri)
+    members = [_seed_owned_session(db_uri, ALICE) for _ in range(3)]
+    app = _multi_user_app(db_uri)
+    client = TestClient(app, raise_server_exceptions=False)
+    project = _alice_project_with(db_uri, client, members)
+
+    def fail(operation: str) -> None:
+        if operation == failing_step:
+            raise RuntimeError("injected")
+
+    app.state.project_store.after_checks_hook = fail
+    response = _archive_delete(client, project)
+    app.state.project_store.after_checks_hook = None
+
+    assert response.status_code == 500
+    _assert_members_intact(db_uri, client, project, members)
+    assert archive_effects == {"pruned": [], "stopped": []}
+
+
+def test_archive_delete_side_effect_failure_does_not_undo_or_skip_others(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the commit the delete has happened: one member's stop can't fail the rest."""
+    _ensure_agent(db_uri)
+    members = [_seed_owned_session(db_uri, ALICE) for _ in range(2)]
+    client = TestClient(_multi_user_app(db_uri))
+    project = _alice_project_with(db_uri, client, members)
+    stopped: list[str] = []
+
+    def stop(session_id: str, *_args: object, **_kwargs: object) -> None:
+        stopped.append(session_id)
+        raise RuntimeError("no event loop")
+
+    monkeypatch.setattr(orchestration, "_spawn_archive_stop", stop)
+
+    assert _archive_delete(client, project).status_code == 200
+
+    assert sorted(stopped) == sorted(members)
+
+
+def test_archive_delete_of_an_unknown_project_is_404(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    del archive_effects
+    client = TestClient(_multi_user_app(db_uri))
+
+    response = _archive_delete(client, {"id": uuid.uuid4().hex})
+
+    assert response.status_code == 404
+
+
+def test_plain_delete_still_leaves_members_for_the_caller(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    _ensure_agent(db_uri)
+    member = _seed_owned_session(db_uri, ALICE)
+    client = TestClient(_multi_user_app(db_uri))
+    project = _alice_project_with(db_uri, client, [member])
+
+    response = client.delete(f"/v1/projects/{project['id']}", headers=_hdr(ALICE))
+
+    assert response.status_code == 200
+    assert "session_ids" not in response.json()
+    stored = SqlAlchemyConversationStore(db_uri).get_conversation(member)
+    assert (stored.archived, stored.project_id) == (False, project["id"])
+    assert archive_effects == {"pruned": [], "stopped": []}

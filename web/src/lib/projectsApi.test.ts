@@ -135,12 +135,13 @@ describe("renameProject", () => {
 });
 
 describe("deleteProject", () => {
-  it("DELETEs /v1/projects/{id}", async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse({ deleted: true }));
-    await deleteProject("p_1");
+  it("DELETEs /v1/projects/{id} with its sessions and returns what was swept", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ session_ids: ["conv_a"], updated_at: 7 }));
+    const swept = await deleteProject("p_1");
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/v1/projects/p_1");
+    expect(url).toBe("/v1/projects/p_1?archive_sessions=true");
     expect(init.method).toBe("DELETE");
+    expect(swept).toEqual({ session_ids: ["conv_a"], updated_at: 7 });
   });
 
   it("throws on non-2xx", async () => {

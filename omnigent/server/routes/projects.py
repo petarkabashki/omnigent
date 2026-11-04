@@ -15,15 +15,18 @@ projects share that scope.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import AuthProvider
-from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.auth import LEVEL_OWNER, AuthProvider
+from omnigent.server.routes._auth_helpers import _require_access_sync, require_user
+from omnigent.server.routes._sessions.orchestration import _finish_archive
 from omnigent.server.routes.sessions import announce_projects_changed
 from omnigent.server.schemas import (
     CreateProjectRequest,
@@ -31,6 +34,8 @@ from omnigent.server.schemas import (
     ProjectOrderResponse,
     UpdateProjectRequest,
 )
+from omnigent.stores.conversation_store import ConversationStore, pinned_label_key
+from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import (
     UNSET,
     ProjectOrderPreference,
@@ -38,6 +43,8 @@ from omnigent.stores.project_store import (
     apply_project_order,
     project_path,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _to_response(project: Project, path: str | None = None) -> dict[str, Any]:
@@ -62,15 +69,98 @@ def _to_response(project: Project, path: str | None = None) -> dict[str, Any]:
 def create_projects_router(
     project_store: ProjectStore,
     auth_provider: AuthProvider | None = None,
+    conversation_store: ConversationStore | None = None,
+    permission_store: PermissionStore | None = None,
+    runner_router: Any = None,
 ) -> APIRouter:
     """Build the projects router (``/v1/projects``).
 
     :param project_store: The store backing project persistence.
     :param auth_provider: Auth provider used to identify the requesting user.
         ``None`` in single-user mode (owner scope is ``None``).
+    :param conversation_store: Holds session membership; needed to delete a
+        project together with its sessions.
+    :param permission_store: Session permissions, or ``None`` when unchecked.
+    :param runner_router: Stops the runners of archived sessions.
     :returns: A configured :class:`APIRouter`.
     """
     router = APIRouter()
+
+    def _require_modifiable(
+        session_ids: Iterable[str],
+        user_id: str | None,
+        store: ConversationStore,
+        approved: set[str],
+    ) -> None:
+        """Apply PATCH's archive/unfile check to each session not yet approved."""
+        for session_id in session_ids:
+            if session_id in approved:
+                continue
+            try:
+                _require_access_sync(user_id, session_id, LEVEL_OWNER, permission_store, store)
+            except OmnigentError as exc:
+                if exc.code not in (ErrorCode.FORBIDDEN, ErrorCode.NOT_FOUND):
+                    raise
+                raise OmnigentError(
+                    "This project holds a session you can't modify, so it wasn't deleted. "
+                    "Nothing was changed.",
+                    code=ErrorCode.FORBIDDEN,
+                ) from exc
+            approved.add(session_id)
+
+    async def _delete_with_sessions(
+        request: Request,
+        store: ConversationStore,
+        project_id: str,
+        user_id: str | None,
+    ) -> dict[str, Any]:
+        """Delete a project and its sessions' membership, then run the side effects."""
+        # Checked before the write lock so it isn't held for N permission reads;
+        # the transaction re-checks only sessions filed since.
+        approved: set[str] = set()
+        member_ids = await asyncio.to_thread(
+            project_store.member_session_ids,
+            project_id,
+            user_id=user_id,
+            conversation_store=store,
+        )
+        await asyncio.to_thread(_require_modifiable, member_ids, user_id, store, approved)
+        sweep = await asyncio.to_thread(
+            project_store.delete_with_sessions,
+            project_id,
+            user_id=user_id,
+            conversation_store=store,
+            authorize=lambda ids: _require_modifiable(ids, user_id, store, approved),
+        )
+        if sweep is None:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+
+        # Committed: a failure from here on must not fail the delete or skip the
+        # remaining sessions. Already-archived members had these effects then.
+        host_registry = getattr(request.app.state, "host_registry", None)
+        for session_id in sweep.newly_archived_ids:
+            try:
+                _finish_archive(session_id, store, runner_router, host_registry)
+            except Exception:
+                logger.exception("Post-archive cleanup failed for session %s", session_id)
+
+        def drop_pins() -> None:
+            pin_key = pinned_label_key(user_id)
+            for session_id in sweep.newly_archived_ids:
+                try:
+                    store.delete_label(session_id, pin_key)
+                except Exception:
+                    logger.exception("Dropping the pin failed for session %s", session_id)
+
+        await asyncio.to_thread(drop_pins)
+        announce_projects_changed(user_id)
+        return {
+            "id": project_id,
+            "object": "project.deleted",
+            "deleted": True,
+            "session_ids": list(sweep.session_ids),
+            "updated_at": sweep.updated_at,
+        }
 
     def _find(path: str, user_id: str | None) -> list[dict[str, Any]]:
         """Projects at ``path`` (tree walk, then legacy flat name) as response dicts.
@@ -237,19 +327,41 @@ def create_projects_router(
         return _to_response(project, path)
 
     @router.delete("/projects/{project_id}")
-    async def delete_project(request: Request, project_id: str) -> dict[str, Any]:
+    async def delete_project(
+        request: Request,
+        project_id: str,
+        archive_sessions: bool = Query(
+            default=False,
+            description=(
+                "Also archive and unfile every member session in one transaction; "
+                "a refusal or failure changes nothing."
+            ),
+        ),
+    ) -> dict[str, Any]:
         """Delete one of the caller's projects.
 
-        Member sessions are not deleted; they are left for the caller to
-        unfile (clearing their ``project_id``).
+        Member sessions are not deleted. By default they are left for the caller
+        to unfile (clearing their ``project_id``); ``archive_sessions`` archives
+        and unfiles them atomically with the delete.
 
         :param request: The incoming request, used to identify the user.
         :param project_id: The project to delete.
-        :returns: ``{"id": ..., "object": "project.deleted", "deleted": True}``.
-        :raises OmnigentError: 401 if unauthenticated, 404 if not found / not
-            owned by the caller.
+        :param archive_sessions: Sweep the member sessions in the same transaction.
+        :returns: ``{"id": ..., "object": "project.deleted", "deleted": True}``,
+            plus ``session_ids`` and ``updated_at`` with ``archive_sessions``.
+        :raises OmnigentError: 401 if unauthenticated, 403 if a member can't be
+            modified by the caller, 404 if not found / not owned by the caller,
+            409 if the project has children or its members are in a separate
+            database.
         """
         user_id = require_user(request, auth_provider)
+        if archive_sessions:
+            if conversation_store is None:
+                raise OmnigentError(
+                    "Deleting a project with its sessions is not supported by this server",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            return await _delete_with_sessions(request, conversation_store, project_id, user_id)
         deleted = await asyncio.to_thread(project_store.delete, project_id, user_id=user_id)
         if not deleted:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)

@@ -103,6 +103,7 @@ from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    PROJECT_SWEEP_SPLIT_DB_MESSAGE,
     RUNNER_LIVENESS_TTL_S,
     ConversationAlreadyExistsError,
     ConversationNotFoundError,
@@ -111,6 +112,7 @@ from omnigent.stores.conversation_store import (
     CreatedSession,
     DailyCostState,
     ProfileHostBinding,
+    ProjectSessionSweep,
     SessionActivity,
     SessionConnectivity,
     pinned_label_key,
@@ -137,6 +139,7 @@ _logger = logging.getLogger(__name__)
 
 _SESSION_TODOS_STATE_KEY = "_omnigent_native_plan_snapshot_v1"
 _RUNNER_BINDING_LIMIT = 200
+_PROJECT_SWEEP_CHUNK_SIZE = 500
 _RUNNER_HOST_LOOKUP_LIMIT = 10_000
 
 
@@ -532,16 +535,29 @@ def _upsert_prepared_labels(
     updated_at: int,
 ) -> None:
     """UPSERT label values already normalized for the persistence schema."""
+    _write_label_rows(
+        session,
+        [
+            {
+                "conversation_id": conversation_id,
+                "key": key,
+                "value": value,
+                "updated_at": updated_at,
+            }
+            for key, value in updates.items()
+        ],
+    )
+
+
+def _chunks(items: list[str], size: int) -> Iterator[list[str]]:
+    """Yield ``items`` in slices of at most ``size``."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _write_label_rows(session: Session, rows: list[dict[str, Any]]) -> None:
+    """UPSERT prepared label rows, one statement where the dialect allows it."""
     dialect = session.bind.dialect.name if session.bind is not None else ""
-    rows = [
-        {
-            "conversation_id": conversation_id,
-            "key": key,
-            "value": value,
-            "updated_at": updated_at,
-        }
-        for key, value in updates.items()
-    ]
     if dialect == "sqlite" or is_postgresql_family(dialect):
         _dialect_upsert_labels(session, dialect, rows)
         return
@@ -1213,7 +1229,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     git_branch=git_branch,
                     terminal_launch_args=encoded_terminal_launch_args,
                     inference_snapshot=encoded_inference_snapshot,
-                    project_id=project_id,
+                    project_id=self._live_project_id(meta_sess, project_id),
                 )
                 meta_sess.add(meta)
                 return meta
@@ -1714,10 +1730,13 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param conversation_id: The conversation to update, e.g. ``"conv_abc"``.
         :param project_id: The project id to file under, or ``None`` to unfile.
         :returns: ``True`` if a metadata row was updated; ``False`` if the
-            conversation has no metadata row.
+            conversation has no metadata row or the project no longer exists.
         """
 
         def write(session: Session) -> bool:
+            target = self._live_project_id(session, project_id)
+            if project_id is not None and target is None:
+                return False
             result = cast(
                 _RowCountResult,
                 session.execute(
@@ -1726,7 +1745,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                         SqlConversationMetadata.workspace_id == current_workspace_id(),
                         SqlConversationMetadata.id == conversation_id,
                     )
-                    .values(project_id=project_id)
+                    .values(project_id=target)
                 ),
             )
             return result.rowcount > 0
@@ -1765,6 +1784,204 @@ class SqlAlchemyConversationStore(ConversationStore):
             return current
 
         return run_write_transaction(self._session_immediate, "update_session_usage", write)
+
+    def _live_project_id(self, session: Session, project_id: str | None) -> str | None:
+        """
+        Resolve a filing target, share-locking its row until the filing commits.
+
+        ``metadata.project_id`` has no foreign key, so this lock is what stops a
+        concurrent project delete from leaving the session pointing at nothing.
+        Taken before any metadata write: the same order as the deleter.
+
+        :param session: The Omnigent DB session writing the filing.
+        :param project_id: The requested project, or ``None``.
+        :returns: ``project_id``, or ``None`` when no such project exists.
+        """
+        if project_id is None:
+            return None
+        return session.execute(
+            select(SqlProject.id)
+            .where(
+                SqlProject.workspace_id == current_workspace_id(),
+                SqlProject.id == project_id,
+            )
+            .with_for_update(read=True)
+        ).scalar()
+
+    def project_member_ids(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        legacy_name: str | None,
+        owner_id: str | None,
+        lock: bool = False,
+    ) -> list[str]:
+        """See :meth:`ConversationStore.project_member_ids`."""
+        from omnigent.server.auth import LEVEL_OWNER
+
+        bind = session.get_bind()
+
+        def read_metadata(statement: Any) -> list[str]:
+            if self._engine is bind:
+                return list(session.execute(statement).scalars())
+            with self._session("select_project_members") as metadata_session:
+                return list(metadata_session.execute(statement).scalars())
+
+        def read_labels(statement: Any) -> list[str]:
+            if self._conv_engine is bind:
+                return list(session.execute(statement).scalars())
+            with self._conv_session("select_project_members") as label_session:
+                return list(label_session.execute(statement).scalars())
+
+        workspace_id = current_workspace_id()
+        filed_statement = (
+            select(SqlConversationMetadata.id)
+            .where(
+                SqlConversationMetadata.workspace_id == workspace_id,
+                SqlConversationMetadata.project_id == project_id,
+            )
+            .order_by(SqlConversationMetadata.id)
+        )
+        if lock:
+            filed_statement = filed_statement.with_for_update()
+        filed = read_metadata(filed_statement)
+        if legacy_name is None:
+            return filed
+        known = set(filed)
+        candidates = [
+            conversation_id
+            for conversation_id in read_labels(
+                select(SqlConversationLabel.conversation_id).where(
+                    SqlConversationLabel.workspace_id == workspace_id,
+                    SqlConversationLabel.key == PROJECT_LABEL_KEY,
+                    SqlConversationLabel.value == legacy_name,
+                )
+            )
+            if conversation_id not in known
+        ]
+        labelled: list[str] = []
+        for chunk in _chunks(candidates, _PROJECT_SWEEP_CHUNK_SIZE):
+            filed_elsewhere = set(
+                read_metadata(
+                    select(SqlConversationMetadata.id).where(
+                        SqlConversationMetadata.workspace_id == workspace_id,
+                        SqlConversationMetadata.id.in_(chunk),
+                        SqlConversationMetadata.project_id.is_not(None),
+                    )
+                )
+            )
+            # Same scope as the folder listing: another user's like-named label is
+            # a different folder, not a member of this project.
+            owned = None
+            if owner_id is not None:
+                owned = set(
+                    read_metadata(
+                        select(SqlSessionPermission.conversation_id).where(
+                            SqlSessionPermission.workspace_id == workspace_id,
+                            SqlSessionPermission.user_id == owner_id,
+                            SqlSessionPermission.level >= LEVEL_OWNER,
+                            SqlSessionPermission.conversation_id.in_(chunk),
+                        )
+                    )
+                )
+            labelled += [
+                conversation_id
+                for conversation_id in chunk
+                if conversation_id not in filed_elsewhere
+                and (owned is None or conversation_id in owned)
+            ]
+        return sorted([*filed, *labelled])
+
+    def archive_project_members(
+        self,
+        session: Session,
+        *,
+        project_id: str,
+        legacy_name: str | None,
+        owner_id: str | None,
+        authorize: Callable[[list[str]], None],
+        after_chunk: Callable[[], None] | None = None,
+    ) -> ProjectSessionSweep:
+        """See :meth:`ConversationStore.archive_project_members`."""
+        now = now_epoch()
+        member_ids = self.project_member_ids(
+            session,
+            project_id=project_id,
+            legacy_name=legacy_name,
+            owner_id=owner_id,
+            lock=True,
+        )
+        if not member_ids:
+            return ProjectSessionSweep(session_ids=(), newly_archived_ids=(), updated_at=now)
+        bind = session.get_bind()
+        if self._engine is not bind or self._conv_engine is not bind:
+            raise OmnigentError(PROJECT_SWEEP_SPLIT_DB_MESSAGE, code=ErrorCode.CONFLICT)
+        authorize(member_ids)
+        newly_archived: list[str] = []
+        for chunk in _chunks(member_ids, _PROJECT_SWEEP_CHUNK_SIZE):
+            newly_archived += self._archive_and_unfile(session, chunk, now)
+            if after_chunk is not None:
+                after_chunk()
+        return ProjectSessionSweep(
+            session_ids=tuple(member_ids),
+            newly_archived_ids=tuple(newly_archived),
+            updated_at=now,
+        )
+
+    def _archive_and_unfile(self, session: Session, chunk: list[str], now: int) -> list[str]:
+        """
+        Set-based archive and unfile of one chunk, as PATCH would do per session.
+
+        :param session: The shared transaction.
+        :param chunk: Member ids, sorted so concurrent writers lock in one order.
+        :param now: Timestamp for this sweep.
+        :returns: The ids that were not archived before this call.
+        """
+        workspace_id = current_workspace_id()
+        rows = session.execute(
+            select(SqlConversation.id, SqlConversation.archived)
+            .where(SqlConversation.workspace_id == workspace_id, SqlConversation.id.in_(chunk))
+            .order_by(SqlConversation.id)
+            .with_for_update()
+        ).all()
+        newly_archived = [row.id for row in rows if not row.archived]
+        # A re-archive must not reset the retention clock, as on PATCH.
+        if newly_archived:
+            archived_at = _prepare_label_updates({ARCHIVED_AT_LABEL_KEY: str(now)})
+            _write_label_rows(
+                session,
+                [
+                    {"conversation_id": member_id, "key": key, "value": value, "updated_at": now}
+                    for member_id in newly_archived
+                    for key, value in archived_at.items()
+                ],
+            )
+        session.execute(
+            update(SqlConversation)
+            .where(SqlConversation.workspace_id == workspace_id, SqlConversation.id.in_(chunk))
+            .values(archived=True, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        session.execute(
+            delete(SqlConversationLabel)
+            .where(
+                SqlConversationLabel.workspace_id == workspace_id,
+                SqlConversationLabel.conversation_id.in_(chunk),
+                SqlConversationLabel.key == PROJECT_LABEL_KEY,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        session.execute(
+            update(SqlConversationMetadata)
+            .where(
+                SqlConversationMetadata.workspace_id == workspace_id,
+                SqlConversationMetadata.id.in_(chunk),
+            )
+            .values(project_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        return newly_archived
 
     def increment_session_usage(
         self,
@@ -5262,7 +5479,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 conversation_id,
                 parent_conversation_id=parent_conversation_id,
                 runner_id=runner_id,
-                project_id=project_id,
+                project_id=self._live_project_id(session, project_id),
                 workspace=workspace,
                 terminal_launch_args=terminal_launch_args,
                 host_id=host_id,
@@ -5935,7 +6152,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 inference_snapshot=(
                     source_meta_ref.inference_snapshot if source_meta_ref else None
                 ),
-                project_id=project_id,
+                project_id=self._live_project_id(meta_sess, project_id),
             )
             meta_sess.add(fork_meta)
             if creating_clone and agent_id is not None:

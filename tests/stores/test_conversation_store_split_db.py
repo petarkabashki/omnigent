@@ -9,14 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.stores.conversation_store import (
+    ARCHIVED_AT_LABEL_KEY,
+    PROJECT_LABEL_KEY,
+    PROJECT_SWEEP_SPLIT_DB_MESSAGE,
+)
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
 
 @pytest.fixture()
@@ -332,6 +340,7 @@ def test_set_conversation_project_lands_in_omnigent_db(
 ) -> None:
     """``project_id`` is written to the metadata row in the Omnigent DB."""
     project_id = "b" * 32
+    SqlAlchemyProjectStore(f"sqlite:///{omnigent_db}").create(project_id, "Work", None)
     conv = store.create_conversation(title="filed")
     filed = store.set_conversation_project(conv.id, project_id)
     assert filed is True
@@ -340,6 +349,72 @@ def test_set_conversation_project_lands_in_omnigent_db(
     assert stored == [project_id]
     # Reads back through the entity (which merges both DBs).
     assert store.get_conversation(conv.id).project_id == project_id
+
+
+def _split_project(omnigent_db: Path, name: str = "Split") -> tuple[SqlAlchemyProjectStore, str]:
+    projects = SqlAlchemyProjectStore(f"sqlite:///{omnigent_db}")
+    return projects, projects.create(uuid.uuid4().hex, name, None).id
+
+
+def test_atomic_project_delete_refuses_members_across_databases(
+    omnigent_db: Path, store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Split mode can't sweep in one transaction: it refuses before any write."""
+
+    def refuse_to_write(*_args: object) -> None:
+        raise AssertionError("wrote before refusing")
+
+    monkeypatch.setattr(store, "_archive_and_unfile", refuse_to_write)
+    projects, project_id = _split_project(omnigent_db)
+    filed = store.create_conversation(title="filed")
+    store.set_conversation_project(filed.id, project_id)
+    store.set_labels(filed.id, {PROJECT_LABEL_KEY: "Split"})
+
+    with pytest.raises(OmnigentError) as refusal:
+        projects.delete_with_sessions(
+            project_id, user_id=None, conversation_store=store, authorize=lambda _ids: None
+        )
+
+    assert refusal.value.code == ErrorCode.CONFLICT
+    assert refusal.value.message == PROJECT_SWEEP_SPLIT_DB_MESSAGE
+    assert "separate databases" in refusal.value.message
+    assert projects.get(project_id, user_id=None) is not None
+    stored = store.get_conversation(filed.id)
+    assert (stored.archived, stored.project_id) == (False, project_id)
+    assert stored.labels[PROJECT_LABEL_KEY] == "Split"
+    assert ARCHIVED_AT_LABEL_KEY not in stored.labels
+
+
+def test_atomic_project_delete_refuses_a_label_only_member_across_databases(
+    omnigent_db: Path, store: SqlAlchemyConversationStore
+) -> None:
+    """A legacy label member lives only on the AP DB and still counts."""
+    projects, project_id = _split_project(omnigent_db)
+    labelled = store.create_conversation(title="labelled")
+    store.set_labels(labelled.id, {PROJECT_LABEL_KEY: "Split"})
+
+    with pytest.raises(OmnigentError, match="separate databases"):
+        projects.delete_with_sessions(
+            project_id, user_id=None, conversation_store=store, authorize=lambda _ids: None
+        )
+
+    assert projects.get(project_id, user_id=None) is not None
+    assert store.get_conversation(labelled.id).archived is False
+
+
+def test_atomic_project_delete_of_an_empty_project_works_across_databases(
+    omnigent_db: Path, store: SqlAlchemyConversationStore
+) -> None:
+    """No members means nothing spans the two databases, so it isn't refused."""
+    projects, project_id = _split_project(omnigent_db)
+
+    sweep = projects.delete_with_sessions(
+        project_id, user_id=None, conversation_store=store, authorize=lambda _ids: None
+    )
+
+    assert sweep is not None
+    assert sweep.session_ids == ()
+    assert projects.get(project_id, user_id=None) is None
 
 
 def test_list_conversations_project_name_filter_crosses_dbs(

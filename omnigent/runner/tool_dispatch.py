@@ -4923,14 +4923,15 @@ def _scheduled_task_url(task_id: object) -> str | None:
 
 async def _project_id_for_name(server_client: httpx.AsyncClient, name: str) -> str:
     """
-    Return the id of the caller's project named *name*, creating it if missing.
+    Return the id of the caller's project at path *name*, creating a missing root.
 
     Uses the projects API the web picker uses, so a typed name files sessions
-    and automations into the same project. A create that loses a race to the
-    same name (409) reuses the project the other request made.
+    and automations into the same project. Only a single-segment name is ever
+    created; a nested path must already exist. A create that loses a race to
+    the same name (409) reuses the project the other request made.
 
     :param server_client: HTTP client pointed at the Omnigent server.
-    :param name: The project name, e.g. ``"nightly triage"``.
+    :param name: The project path, e.g. ``"nightly triage"`` or ``"ops/nightly"``.
     :returns: The project id.
     :raises ValueError: If the name is blank or the project can't be resolved.
     """
@@ -4939,15 +4940,28 @@ async def _project_id_for_name(server_client: httpx.AsyncClient, name: str) -> s
         raise ValueError("project_name must not be empty")
 
     async def find() -> str | None:
-        resp = await server_client.get("/v1/projects", timeout=30.0)
+        resp = await server_client.get(
+            "/v1/projects/resolve", params={"path": trimmed}, timeout=30.0
+        )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 409:
+            # Siblings differing only by case: an exact path still picks one.
+            listed = await server_client.get("/v1/projects", timeout=30.0)
+            projects = listed.json().get("data", []) if listed.status_code < 400 else []
+            exact = (p["id"] for p in projects if (p.get("path") or p.get("name")) == trimmed)
+            match = next(exact, None)
+            if match is not None:
+                return match
         if resp.status_code >= 400:
-            raise ValueError(f"could not list projects: {resp.text[:200]}")
-        projects = resp.json().get("data", [])
-        return next((p["id"] for p in projects if p.get("name") == trimmed), None)
+            raise ValueError(f"could not resolve project {trimmed!r}: {resp.text[:200]}")
+        return str(resp.json()["id"])
 
     existing = await find()
     if existing is not None:
         return existing
+    if "/" in trimmed:
+        raise ValueError(f"no project at path {trimmed!r}")
     created = await server_client.post("/v1/projects", json={"name": trimmed}, timeout=30.0)
     if created.status_code < 400:
         return str(created.json()["id"])

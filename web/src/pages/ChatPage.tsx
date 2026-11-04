@@ -1,3 +1,4 @@
+import { projectPathOf } from "@/lib/projectTree";
 import { SelectionPopup } from "@/components/chat/SelectionPopup";
 import { useLoadedConversations } from "@/hooks/useSidebarData";
 import { useConversationRedirect } from "@/hooks/useConversationRedirect";
@@ -1186,7 +1187,7 @@ export function ChatPage() {
   const openNewSession = useCallback(async () => {
     try {
       const projectName = newSessionProjectId
-        ? (await getProject(newSessionProjectId)).name
+        ? projectPathOf(await getProject(newSessionProjectId))
         : newSessionProjectLabel;
       navigate(projectName ? `/?project=${encodeURIComponent(projectName)}` : "/");
     } catch (error) {

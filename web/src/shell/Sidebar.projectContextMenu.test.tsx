@@ -224,6 +224,21 @@ describe("project folder header context menu", () => {
     );
   });
 
+  it("shows a failed delete's message in the dialog, keeping it open", () => {
+    const message = "These are still in the archive and out of the project: Alpha, conv_c.";
+    Object.assign(mocks.deleteProject, { isError: true, error: new Error(message) });
+    try {
+      renderSidebar();
+      fireEvent.contextMenu(folderHeader());
+      fireEvent.click(screen.getByTestId("delete-project"));
+
+      expect(screen.getByRole("dialog")).toHaveTextContent("Delete project?");
+      expect(screen.getByRole("alert")).toHaveTextContent(message);
+    } finally {
+      Object.assign(mocks.deleteProject, { isError: false, error: null });
+    }
+  });
+
   it("keeps New session reachable when a touch opens the menu on hover-capable hardware", () => {
     renderSidebar();
 

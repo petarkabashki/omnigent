@@ -164,7 +164,6 @@ from omnigent.server.routes._sessions.helpers import (
     _permission_level_from_grants,
     _pin_claude_permission_launch_args,
     _presentation_labels_for_agent,
-    _prune_session_read_state,
     _publish_codex_approval_mode,
     _publish_collaboration_mode,
     _publish_permission_mode,
@@ -200,13 +199,13 @@ from omnigent.server.routes._sessions.orchestration import (
     _ensure_native_terminal_ready,
     _ensure_runner_relay_ready,
     _ensure_runner_session_initialized,
+    _finish_archive,
     _get_session_snapshot,
     _is_native_terminal_session,
     _labels_for_viewer,
     _persist_model_change_note,
     _publish_runner_recovered_status,
     _run_managed_launch,
-    _spawn_archive_stop,
     _validate_session_model_selection,
     ensure_runner_connected,
 )
@@ -3804,20 +3803,13 @@ def register_core_routes(
                     if key in body.model_fields_set
                 },
             )
-        # Archiving hides the session from the default view (and its unread
-        # dot), so drop its per-user read-state to bound in-memory growth.
-        # Only on archive→true; unarchiving leaves it pruned (reads as seen).
+        # Only on archive→true; unarchiving leaves read-state pruned (reads as
+        # seen). Detached, not awaited: the response must not wait out the
+        # stop's per-runner timeouts (seconds against a wedged or asleep
+        # runner). The teardown sleeps past the Undo window, then re-reads the
+        # archived flag and skips if undone, so undoing keeps the runner alive.
         if body.archived is True:
-            _prune_session_read_state(session_id)
-            # Defer the stop now that the flag is committed, so a request
-            # rejected after this point can't leave a live runner on a session
-            # that ends up archived. Detached, not awaited: the response must
-            # not wait out the stop's per-runner timeouts (seconds against a
-            # wedged or asleep runner). The teardown sleeps past the Undo
-            # window, then re-reads the archived flag and skips if undone, so
-            # undoing keeps the runner alive. Archive has no client-side stop,
-            # so this also carries the host-runner teardown.
-            _spawn_archive_stop(
+            _finish_archive(
                 session_id,
                 conversation_store,
                 runner_router,
@@ -4186,7 +4178,8 @@ def register_core_routes(
                     target_project_id,
                 )
                 if not filed:
-                    raise _session_not_found()
+                    # The session was resolved above, so the project went meanwhile.
+                    raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         level = await _get_permission_level(user_id, session_id, permission_store)
         # PATCH callers consume only the snapshot's scalar fields (clients
         # hydrate transcripts via GET /sessions/{id}/items), so skip the

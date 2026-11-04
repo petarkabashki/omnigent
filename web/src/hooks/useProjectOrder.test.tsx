@@ -73,4 +73,20 @@ describe("saving project order", () => {
     expect(client.getQueryState(["projects"])?.isInvalidated).toBe(true);
     expect(client.getQueryState(["project-order"])?.isInvalidated).toBe(true);
   });
+
+  it("leaves a label-only folder with a slash out of the saved ids", async () => {
+    vi.mocked(saveProjectOrder).mockResolvedValue(undefined as never);
+    vi.mocked(resolveOrCreateProjectId).mockResolvedValue("c");
+    const { result } = setup();
+    act(() =>
+      result.current.mutate([
+        { id: "a", name: "A" },
+        { id: null, name: "x/y" },
+        { id: null, name: "C" },
+      ]),
+    );
+    await waitFor(() => expect(saveProjectOrder).toHaveBeenCalledWith(["a", "c"]));
+    expect(resolveOrCreateProjectId).toHaveBeenCalledTimes(1);
+    expect(resolveOrCreateProjectId).toHaveBeenCalledWith("C");
+  });
 });

@@ -1849,6 +1849,22 @@ describe("CreateScheduledTaskDialog project", () => {
     expect(resolveOrCreateProjectId).not.toHaveBeenCalled();
   });
 
+  it("shows and files a nested project by its path", async () => {
+    projectsQuery.current = {
+      ...projectsQuery.current,
+      data: [
+        ...PROJECTS,
+        { id: "proj_3", name: "Triage", icon: null, parent_id: "proj_2", path: "Reports/Triage" },
+      ],
+    };
+    renderWithProjects();
+    fillRequired();
+    openProjectMenu();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Reports/Triage" }));
+    expect(screen.getByTestId("task-project-trigger")).toHaveTextContent("Reports/Triage");
+    expect(await submitCreate()).toMatchObject({ projectId: "proj_3" });
+  });
+
   it("files runs into an existing project picked from the menu", async () => {
     renderWithProjects();
     fillRequired();

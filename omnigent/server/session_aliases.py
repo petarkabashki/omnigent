@@ -83,7 +83,7 @@ def namespace_for_project(
         path,
         project.name,
         frozenset({project.id}),
-        label_name=path if "/" not in path else None,
+        label_name=path if project.parent_id is None else None,
         exact=True,
     )
 
@@ -152,7 +152,7 @@ def resolve_namespace(
             path,
             tree[0].name,
             frozenset({tree[0].id}),
-            label_name=None if nested else path,
+            label_name=None if nested else tree[0].name,
             exact=True,
         )
     return Namespace(

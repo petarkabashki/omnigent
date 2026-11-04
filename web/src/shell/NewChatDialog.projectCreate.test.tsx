@@ -413,6 +413,26 @@ describe("NewChatLandingScreen project-aware create (first-class project_id)", (
     expect(vi.mocked(moveConversationToProject)).not.toHaveBeenCalled();
   });
 
+  it("stamps no label for a stale nested path and says the session wasn't filed", async () => {
+    searchParams = new URLSearchParams("project=a/b");
+    setProjects([{ id: null, name: "Alpha" }]);
+    setProjectConfig(undefined);
+    vi.mocked(moveConversationToProject).mockRejectedValue(new Error('No project at "a/b".'));
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("foo"),
+    );
+
+    const body = await submitAndReadBody();
+    expect((body.labels as Record<string, string> | undefined)?.omni_project).toBeUndefined();
+    await waitFor(() =>
+      expect(vi.mocked(showToast)).toHaveBeenCalledWith(
+        'This session wasn\'t filed: No project at "a/b".',
+        { duration: 0 },
+      ),
+    );
+  });
+
   it("keeps the label + follow-up move for a label-only folder (no first-class id)", async () => {
     // The folder exists only as a legacy label: no project row to address by
     // id, so the create cannot send project_id — it stamps the born-filed

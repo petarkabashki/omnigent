@@ -200,6 +200,8 @@ import {
   buildProjectTree,
   canCreateProjectNamed,
   flattenProjectTree,
+  moveAmongSiblings,
+  pathPrefixes,
   projectPathOf,
   projectSubtreeIds,
   type ProjectTreeNode,
@@ -2068,17 +2070,8 @@ function ConversationList({
   const { mutate: reorderPins } = useReorderPinnedConversations();
   const moveProject = (name: string, destination: "up" | "down" | "top" | "bottom") => {
     if (saveOrder.isPending) return;
-    const from = projects.findIndex((p) => (p.path ?? p.name) === name);
-    const to =
-      destination === "top"
-        ? 0
-        : destination === "bottom"
-          ? projects.length - 1
-          : destination === "up"
-            ? from - 1
-            : from + 1;
-    if (from < 0 || to < 0 || to >= projects.length || from === to) return;
-    saveOrder.mutate(arrayMove(projects, from, to));
+    const next = moveAmongSiblings(projects, name, destination);
+    if (next) saveOrder.mutate(next);
   };
 
   // Drag-reorder only works among siblings; nesting changes through "Move under…".
@@ -2497,8 +2490,10 @@ function ConversationList({
   // opens to reveal the session instead of appearing collapsed.
   const expandProject = useCallback((projectName: string) => {
     setExpandedProjects((prev) => {
-      if (prev.includes(projectName)) return prev;
-      const next = [...prev, projectName];
+      // A nested folder only renders while every enclosing folder is open too.
+      const missing = pathPrefixes(projectName).filter((key) => !prev.includes(key));
+      if (missing.length === 0) return prev;
+      const next = [...prev, ...missing];
       writeExpandedProjectSections(next);
       return next;
     });
@@ -3227,9 +3222,11 @@ function ConversationList({
                                 !projectOrder.data ||
                                 saveOrder.isPending ||
                                 selectionMode ||
-                                editingIds.size > 0,
-                              first: index === 0,
-                              last: index === projects.length - 1,
+                                editingIds.size > 0 ||
+                                // A label folder with "/" cannot get an id, so it has no saved place.
+                                (group.id === null && group.key.includes("/")),
+                              first: !moveAmongSiblings(projects, group.key, "up"),
+                              last: !moveAmongSiblings(projects, group.key, "down"),
                               move: (destination) => moveProject(group.key, destination),
                               insertion:
                                 overProject === group.key &&
@@ -6813,8 +6810,8 @@ function useProjectFolderMenu(
             </DialogDescription>
           </DialogHeader>
           {deleteProject.isError && (
-            <p className="text-ui text-destructive" role="alert">
-              Some sessions couldn't be archived (you may not own them); the rest were archived.
+            <p className="text-ui break-words text-destructive" role="alert">
+              {deleteProject.error?.message}
             </p>
           )}
           <DialogFooter className="border-t-0 bg-transparent">
@@ -7337,14 +7334,14 @@ function BulkActionBar({
                 <div className="max-h-48 overflow-y-auto">
                   {(moveSearch
                     ? projects.filter((p) =>
-                        p.name.toLowerCase().includes(moveSearch.toLowerCase()),
+                        projectPathOf(p).toLowerCase().includes(moveSearch.toLowerCase()),
                       )
                     : projects
                   ).map((p) => (
                     <DropdownMenuItem
                       key={p.id ?? p.name}
                       className="px-2 py-1"
-                      onSelect={() => handleMoveToProject(p.name)}
+                      onSelect={() => handleMoveToProject(projectPathOf(p))}
                     >
                       <span className="flex-1 truncate text-left" title={projectPathOf(p)}>
                         {projectPathOf(p)}

@@ -113,6 +113,24 @@ def test_depth_one_tree_project_still_unions_label_members(tree) -> None:
     labelled = _filed(SESSION_B, "Bench", label="ns")
     assert _resolve_in(tree, [filed, labelled], "ns/Product") == SESSION_A
     assert _resolve_in(tree, [filed, labelled], "ns/Bench") == SESSION_B
+    # Labels hold the stored name, whatever case the address used.
+    assert _resolve_in(tree, [filed, labelled], "NS/Bench") == SESSION_B
+
+
+def test_legacy_root_with_slash_unions_its_label_members(tree, db_uri: str) -> None:
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.add(SqlProject(id=LEGACY, name="x/y", user_id="u", created_at=1))
+        session.commit()
+    source = _filed(SESSION_A, "Product", LEGACY)
+    labelled = _filed(SESSION_B, "Bench", label="x/y")
+    assert _resolve_in(tree, [source, labelled], "Bench", source=source) == SESSION_B
+
+
+def test_nested_project_does_not_union_a_label_spelling_its_path(tree) -> None:
+    source = _filed(SESSION_A, "Product", SUB)
+    labelled = _filed(SESSION_B, "Bench", label="ns/sub")
+    with pytest.raises(OmnigentError):
+        _resolve_in(tree, [source, labelled], "Bench", source=source)
 
 
 def test_bare_role_uses_the_source_namespace(tree) -> None:

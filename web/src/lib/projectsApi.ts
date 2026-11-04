@@ -107,6 +107,10 @@ export async function getProject(id: string): Promise<Project> {
 /** The caller's project at a namespace path; rejects when none matches or it is ambiguous. */
 export async function resolveProjectPath(path: string): Promise<Project> {
   const res = await authenticatedFetch(`/v1/projects/resolve?path=${encodeURIComponent(path)}`);
+  // A label-only folder can show this name but has no project to file into.
+  if (res.status === 404) {
+    throw new Error(`No project at "${path}". If a folder shows that name, rename it without "/".`);
+  }
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;
 }
@@ -171,16 +175,23 @@ export async function updateProjectConfig(id: string, config: ProjectConfig): Pr
 }
 
 /**
- * Delete a project. Only the container is removed; member sessions are kept
- * (never cascade-deleted). Their `project_id` is left dangling server-side, but
- * the dual-read listing joins against the (now-absent) project, so they surface
- * as unfiled. Returns 404 if not found / not owned.
+ * Delete a project and archive and unfile its member sessions, all in one server
+ * transaction: a refusal or failure changes nothing, and the error carries the
+ * server's words. Sessions are never deleted.
  */
-export async function deleteProject(id: string): Promise<void> {
-  const res = await authenticatedFetch(`/v1/projects/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-  });
+export async function deleteProject(id: string): Promise<ProjectDeleteResult> {
+  const res = await authenticatedFetch(
+    `/v1/projects/${encodeURIComponent(id)}?archive_sessions=true`,
+    { method: "DELETE" },
+  );
   if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as ProjectDeleteResult;
+}
+
+/** The sessions a project delete archived, and the timestamp written to them. */
+export interface ProjectDeleteResult {
+  session_ids: string[];
+  updated_at: number;
 }
 
 export interface ProjectOrder {

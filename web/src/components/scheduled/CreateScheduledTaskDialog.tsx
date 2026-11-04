@@ -1,6 +1,7 @@
 // Dialog for creating or editing a scheduled task. Reuses the existing agent,
 // host, and workspace pickers where the backend can persist those fields.
 
+import { projectPathOf } from "@/lib/projectTree";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDownIcon, FolderOpenIcon, TriangleAlertIcon } from "lucide-react";
 import {
@@ -361,13 +362,16 @@ export function CreateScheduledTaskDialog({
   }, [open, isEdit, sandboxMode, hostId, defaultHostId]);
 
   const savedProjectId = editingTask?.projectId ?? null;
+  const savedProject = projects.find((p) => p.id === savedProjectId);
   const savedProjectName =
-    savedProjectId !== null ? projects.find((p) => p.id === savedProjectId)?.name : "";
+    savedProjectId === null ? "" : savedProject && projectPathOf(savedProject);
   // A picked project is shown by its id, so a rename elsewhere shows the new name.
   const pickedProject =
     pickedProjectId !== null ? projects.find((p) => p.id === pickedProjectId) : undefined;
-  const projectName = pickedProject?.name ?? projectChoice ?? savedProjectName ?? "";
-  const projectIcon = (pickedProject ?? projects.find((p) => p.name === projectName))?.icon;
+  const projectName =
+    (pickedProject && projectPathOf(pickedProject)) ?? projectChoice ?? savedProjectName ?? "";
+  const projectIcon = (pickedProject ?? projects.find((p) => projectPathOf(p) === projectName))
+    ?.icon;
   // The saved project has no name while the list loads, if it fails to load,
   // or once the project is deleted. Only a loaded list proves it is deleted,
   // and a deleted one reads as "No project": runs already file nothing there.
@@ -844,7 +848,9 @@ export function CreateScheduledTaskDialog({
                       currentProject={projectName || null}
                       onSelect={(next) => {
                         setProjectChoice(next);
-                        setPickedProjectId(projects.find((p) => p.name === next)?.id ?? null);
+                        setPickedProjectId(
+                          projects.find((p) => projectPathOf(p) === next)?.id ?? null,
+                        );
                       }}
                     />
                   </DropdownMenuContent>

@@ -14075,7 +14075,7 @@
     },
     "/v1/projects/{project_id}": {
       "delete": {
-        "description": "Delete one of the caller's projects.\n\nMember sessions are not deleted; they are left for the caller to\nunfile (clearing their `project_id`).\n\n**Returns:** `{\"id\": ..., \"object\": \"project.deleted\", \"deleted\": True}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if not found / not owned by the caller.",
+        "description": "Delete one of the caller's projects.\n\nMember sessions are not deleted. By default they are left for the caller\nto unfile (clearing their `project_id`); `archive_sessions` archives\nand unfiles them atomically with the delete.\n\n**Returns:** `{\"id\": ..., \"object\": \"project.deleted\", \"deleted\": True}`, plus `session_ids` and `updated_at` with `archive_sessions`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 403 if a member can't be modified by the caller, 404 if not found / not owned by the caller, 409 if the project has children or its members are in a separate database.",
         "operationId": "delete_project_v1_projects__project_id__delete",
         "parameters": [
           {
@@ -14086,6 +14086,18 @@
             "schema": {
               "title": "Project Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Also archive and unfile every member session in one transaction; a refusal or failure changes nothing.",
+            "in": "query",
+            "name": "archive_sessions",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Also archive and unfile every member session in one transaction; a refusal or failure changes nothing.",
+              "title": "Archive Sessions",
+              "type": "boolean"
             }
           }
         ],

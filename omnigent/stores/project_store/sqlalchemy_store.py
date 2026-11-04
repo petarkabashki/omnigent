@@ -6,7 +6,7 @@ import builtins
 import json
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import zstandard
 from sqlalchemy import LargeBinary, asc, select, type_coerce, update
@@ -39,6 +39,9 @@ from omnigent.stores.project_store import (
     validate_project_segment,
 )
 from omnigent.util.uuid import uuid_to_bytes
+
+if TYPE_CHECKING:
+    from omnigent.stores.conversation_store import ConversationStore, ProjectSessionSweep
 
 # Max serialized length of a project's config blob. The value is persisted
 # verbatim and reflected back on every read, so an unbounded blob is a mild
@@ -242,9 +245,13 @@ class SqlAlchemyProjectStore(ProjectStore):
             one owner serialize on Postgres/MySQL. SQLite already serializes writers
             (``BEGIN IMMEDIATE``) and ignores the clause.
         """
-        stmt = select(SqlProject).where(
-            SqlProject.workspace_id == current_workspace_id(),
-            SqlProject.user_id == user_id,
+        stmt = (
+            select(SqlProject)
+            .where(
+                SqlProject.workspace_id == current_workspace_id(),
+                SqlProject.user_id == user_id,
+            )
+            .order_by(SqlProject.id)
         )
         if lock:
             stmt = stmt.with_for_update()
@@ -468,31 +475,106 @@ class SqlAlchemyProjectStore(ProjectStore):
         project_key = _canonical_id(project_id)
 
         def write(session: Session) -> bool:
-            rows = self._owner_rows(session, user_id, lock=True)
-            row = rows.get(project_key)
-            if row is None:
-                return False
-            # A fresh statement: the locking read above keeps the snapshot it took before
-            # waiting, so it cannot see a child committed by the lock holder.
-            child = (
-                select(SqlProject.id)
-                .where(
-                    SqlProject.workspace_id == current_workspace_id(),
-                    SqlProject.parent_id == project_key,
-                )
-                .limit(1)
-                .with_for_update()
-            )
-            if session.execute(child).first() is not None:
-                raise OmnigentError(
-                    "Project has child projects; move or delete them first",
-                    code=ErrorCode.CONFLICT,
-                )
-            self._after_checks("delete")
-            session.delete(row)
-            return True
+            return self._delete_row(session, project_key, user_id)
 
         return run_write_transaction(self._session_immediate, "delete_project", write)
+
+    def _delete_row(
+        self,
+        session: Session,
+        project_key: str,
+        user_id: str | None,
+        before_delete: Callable[[SqlProject], None] | None = None,
+    ) -> bool:
+        """Delete an owned, childless project inside the caller's transaction.
+
+        :param session: The open write transaction.
+        :param project_key: The canonical project id.
+        :param user_id: The requesting owner.
+        :param before_delete: Runs after the locks and checks, before the row goes.
+        :returns: ``False`` if not found / not owned.
+        :raises OmnigentError: ``CONFLICT`` while the project has children.
+        """
+        rows = self._owner_rows(session, user_id, lock=True)
+        row = rows.get(project_key)
+        if row is None:
+            return False
+        # A fresh statement: the locking read above keeps the snapshot it took before
+        # waiting, so it cannot see a child committed by the lock holder.
+        child = (
+            select(SqlProject.id)
+            .where(
+                SqlProject.workspace_id == current_workspace_id(),
+                SqlProject.user_id == user_id,
+                SqlProject.parent_id == project_key,
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        if session.execute(child).first() is not None:
+            raise OmnigentError(
+                "Project has child projects; move or delete them first",
+                code=ErrorCode.CONFLICT,
+            )
+        self._after_checks("delete")
+        if before_delete is not None:
+            before_delete(row)
+            self._after_checks("delete_row")
+        session.delete(row)
+        return True
+
+    def member_session_ids(
+        self,
+        project_id: str,
+        *,
+        user_id: str | None,
+        conversation_store: ConversationStore,
+    ) -> builtins.list[str]:
+        """List a project's members unlocked; empty if not found / not owned."""
+        with self._session("select_project_members") as session:
+            row = session.get(SqlProject, (current_workspace_id(), _canonical_id(project_id)))
+            if row is None or row.user_id != user_id:
+                return []
+            return conversation_store.project_member_ids(
+                session,
+                project_id=row.id,
+                legacy_name=None if row.parent_id is not None else row.name,
+                owner_id=user_id,
+            )
+
+    def delete_with_sessions(
+        self,
+        project_id: str,
+        *,
+        user_id: str | None,
+        conversation_store: ConversationStore,
+        authorize: Callable[[builtins.list[str]], None],
+    ) -> ProjectSessionSweep | None:
+        """Archive and unfile the members and delete the project, all or nothing."""
+        project_key = _canonical_id(project_id)
+
+        def write(session: Session) -> ProjectSessionSweep | None:
+            swept: builtins.list[ProjectSessionSweep] = []
+
+            def archive_members(row: SqlProject) -> None:
+                swept.append(
+                    conversation_store.archive_project_members(
+                        session,
+                        project_id=row.id,
+                        legacy_name=None if row.parent_id is not None else row.name,
+                        owner_id=user_id,
+                        authorize=authorize,
+                        after_chunk=lambda: self._after_checks("delete_members"),
+                    )
+                )
+
+            if not self._delete_row(session, project_key, user_id, archive_members):
+                return None
+            return swept[0]
+
+        return run_write_transaction(
+            self._session_immediate, "delete_project_with_sessions", write
+        )
 
     def get_path(self, project_id: str, *, user_id: str | None) -> str | None:
         """Return the owned project's namespace path (names joined by ``/``)."""

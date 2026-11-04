@@ -5818,11 +5818,14 @@ def test_fork_of_sub_agent_is_top_level(
 
 
 def test_fork_conversation_files_into_project(
-    conversation_store: SqlAlchemyConversationStore,
+    conversation_store: SqlAlchemyConversationStore, db_uri: str
 ) -> None:
     """``project_id=`` files the fork; the default leaves it unfiled even
     when the source itself is filed (the route resolves ownership)."""
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
     project_id = "b" * 32
+    SqlAlchemyProjectStore(db_uri).create(project_id, "Work", None)
     source = conversation_store.create_conversation(title="src")
     conversation_store.set_conversation_project(source.id, project_id)
 
@@ -7511,10 +7514,13 @@ def test_list_conversations_project_none_disables_filter(
 
 
 def test_set_conversation_project_files_and_unfiles(
-    conversation_store: SqlAlchemyConversationStore,
+    conversation_store: SqlAlchemyConversationStore, db_uri: str
 ) -> None:
     """``set_conversation_project`` sets and clears first-class membership."""
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
     project_id = "b" * 32
+    SqlAlchemyProjectStore(db_uri).create(project_id, "Work", None)
     conv = conversation_store.create_conversation()
     assert conv.project_id is None
 
@@ -7526,6 +7532,31 @@ def test_set_conversation_project_files_and_unfiles(
     unfiled = conversation_store.set_conversation_project(conv.id, None)
     assert unfiled is True
     assert conversation_store.get_conversation(conv.id).project_id is None
+
+
+def test_filing_into_a_missing_project_never_leaves_a_dangling_id(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Filing is refused; a new session or fork is created unfiled instead of failing."""
+    missing = "e" * 32
+    conv = conversation_store.create_conversation(title="s")
+
+    assert conversation_store.set_conversation_project(conv.id, missing) is False
+    assert conversation_store.get_conversation(conv.id).project_id is None
+
+    created = conversation_store.create_conversation(title="new", project_id=missing)
+    assert conversation_store.get_conversation(created.id).project_id is None
+    forked = conversation_store.fork_conversation(conv.id, project_id=missing)
+    assert conversation_store.get_conversation(forked.id).project_id is None
+    with_agent = conversation_store.create_session_with_agent(
+        agent_id=uuid.uuid4().hex,
+        agent_name="a",
+        agent_bundle_location="a/1",
+        agent_description=None,
+        project_id=missing,
+    )
+    stored = conversation_store.get_conversation(with_agent.conversation.id)
+    assert stored.project_id is None
 
 
 def test_set_conversation_project_unknown_session_returns_false(

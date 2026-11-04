@@ -12,6 +12,9 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.stores.conversation_store import ARCHIVED_AT_LABEL_KEY, PROJECT_LABEL_KEY
+from omnigent.stores.conversation_store import sqlalchemy_store as conversation_module
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
 
@@ -1041,3 +1044,310 @@ def test_a_dashed_id_reaches_the_same_project_everywhere(store: SqlAlchemyProjec
     store.update(kid, user_id="alice", parent_id=None)
     assert store.delete(dashed, user_id="alice") is True
     assert store.get(project, user_id="alice") is None
+
+
+# Atomic delete with sessions. Runs on SQLite and on OMNIGENT_TEST_DB_URI.
+
+
+@pytest.fixture()
+def conversations(db_uri: str) -> SqlAlchemyConversationStore:
+    return SqlAlchemyConversationStore(db_uri)
+
+
+def _allow(_session_ids: list[str]) -> None:
+    return None
+
+
+def _project_with_members(
+    store: SqlAlchemyProjectStore,
+    conversations: SqlAlchemyConversationStore,
+    *,
+    count: int = 3,
+) -> tuple[str, str, list[str]]:
+    """A project whose members carry both the id and the legacy label."""
+    project_id, name = _uid("sweep"), f"sweep-{uuid.uuid4().hex[:8]}"
+    store.create(project_id, name, "alice")
+    member_ids = []
+    for _ in range(count):
+        member = conversations.create_conversation(title="member")
+        assert conversations.set_conversation_project(member.id, project_id)
+        conversations.set_labels(member.id, {PROJECT_LABEL_KEY: name})
+        member_ids.append(member.id)
+    return project_id, name, member_ids
+
+
+def _assert_untouched(
+    store: SqlAlchemyProjectStore,
+    conversations: SqlAlchemyConversationStore,
+    project_id: str,
+    name: str,
+    member_ids: list[str],
+) -> None:
+    assert store.get(project_id, user_id="alice") is not None
+    for member_id in member_ids:
+        member = conversations.get_conversation(member_id)
+        assert member.archived is False
+        assert member.project_id == project_id
+        assert member.labels[PROJECT_LABEL_KEY] == name
+        assert ARCHIVED_AT_LABEL_KEY not in member.labels
+
+
+def _delete(
+    store: SqlAlchemyProjectStore,
+    conversations: SqlAlchemyConversationStore,
+    project_id: str,
+    authorize=_allow,
+):
+    return store.delete_with_sessions(
+        project_id, user_id="alice", conversation_store=conversations, authorize=authorize
+    )
+
+
+def test_delete_with_sessions_archives_unfiles_and_removes_the_row(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    project_id, _name, member_ids = _project_with_members(store, conversations)
+
+    sweep = _delete(store, conversations, project_id)
+
+    assert sweep is not None
+    assert sorted(sweep.session_ids) == sorted(member_ids)
+    assert sorted(sweep.newly_archived_ids) == sorted(member_ids)
+    assert store.get(project_id, user_id="alice") is None
+    for member_id in member_ids:
+        member = conversations.get_conversation(member_id)
+        assert member.archived is True
+        assert member.project_id is None
+        assert PROJECT_LABEL_KEY not in member.labels
+        assert member.labels[ARCHIVED_AT_LABEL_KEY] == str(sweep.updated_at)
+        assert member.updated_at == sweep.updated_at
+
+
+def test_delete_with_sessions_keeps_an_archived_members_retention_clock(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    project_id, _name, member_ids = _project_with_members(store, conversations, count=2)
+    conversations.update_conversation_with_changes(member_ids[0], archived=True)
+    archived_at = conversations.get_conversation(member_ids[0]).labels[ARCHIVED_AT_LABEL_KEY]
+    conversations.set_labels(member_ids[0], {ARCHIVED_AT_LABEL_KEY: "1"})
+
+    sweep = _delete(store, conversations, project_id)
+
+    assert archived_at
+    assert sweep is not None
+    assert sweep.newly_archived_ids == (member_ids[1],)
+    kept = conversations.get_conversation(member_ids[0])
+    assert kept.labels[ARCHIVED_AT_LABEL_KEY] == "1"
+    assert kept.project_id is None
+
+
+def test_delete_with_sessions_of_an_unowned_project_changes_nothing(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    project_id, name, member_ids = _project_with_members(store, conversations)
+
+    swept = store.delete_with_sessions(
+        project_id, user_id="mallory", conversation_store=conversations, authorize=_allow
+    )
+
+    assert swept is None
+    _assert_untouched(store, conversations, project_id, name, member_ids)
+
+
+@pytest.mark.parametrize("failing_step", ["delete_members", "delete_row"])
+def test_delete_with_sessions_failure_leaves_every_member_as_it_was(
+    store: SqlAlchemyProjectStore,
+    conversations: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_step: str,
+) -> None:
+    """A failure after some members were written, or at the row delete, undoes all of it."""
+    monkeypatch.setattr(conversation_module, "_PROJECT_SWEEP_CHUNK_SIZE", 2)
+    project_id, name, member_ids = _project_with_members(store, conversations)
+    written: list[bool] = []
+
+    def fail(operation: str) -> None:
+        if operation == failing_step:
+            with conversations._session("count_written") as session:
+                written.append(bool(session.execute(_archived_count(member_ids)).scalar()))
+            raise RuntimeError("injected")
+
+    store.after_checks_hook = fail
+    with pytest.raises(RuntimeError, match="injected"):
+        _delete(store, conversations, project_id)
+    store.after_checks_hook = None
+
+    assert written == [False]
+    _assert_untouched(store, conversations, project_id, name, member_ids)
+
+
+def _archived_count(member_ids: list[str]):
+    from sqlalchemy import func, select
+
+    from omnigent.db.db_models import SqlConversation
+
+    return select(func.count()).where(
+        SqlConversation.id.in_(member_ids), SqlConversation.archived.is_(True)
+    )
+
+
+def test_delete_with_sessions_refused_by_authorize_changes_nothing(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    project_id, name, member_ids = _project_with_members(store, conversations)
+    seen: list[str] = []
+
+    def refuse(session_ids: list[str]) -> None:
+        seen.extend(session_ids)
+        raise OmnigentError("no", code=ErrorCode.FORBIDDEN)
+
+    with pytest.raises(OmnigentError) as refusal:
+        _delete(store, conversations, project_id, refuse)
+
+    assert refusal.value.code == ErrorCode.FORBIDDEN
+    assert sorted(seen) == sorted(member_ids)
+    _assert_untouched(store, conversations, project_id, name, member_ids)
+
+
+def test_delete_with_sessions_of_a_parent_changes_nothing(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    project_id, name, member_ids = _project_with_members(store, conversations)
+    store.create(_uid("sweep-kid"), "kid", "alice", parent_id=project_id)
+
+    with pytest.raises(OmnigentError) as refusal:
+        _delete(store, conversations, project_id)
+
+    assert refusal.value.code == ErrorCode.CONFLICT
+    _assert_untouched(store, conversations, project_id, name, member_ids)
+
+
+def test_delete_with_sessions_sweeps_a_session_filed_while_it_waited(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    """The filing commits first: the delete waits on its lock, then reads and sweeps it."""
+    import threading
+
+    from sqlalchemy import update
+
+    from omnigent.db.db_models import SqlConversationMetadata
+
+    project_id, _name, member_ids = _project_with_members(store, conversations, count=1)
+    late = conversations.create_conversation(title="late")
+    outcome: dict[str, object] = {}
+
+    def delete() -> None:
+        outcome["sweep"] = _delete(store, conversations, project_id)
+
+    deleter = threading.Thread(target=delete)
+    with conversations._session_immediate("file_during_delete") as session:
+        assert conversations._live_project_id(session, project_id) == project_id
+        session.execute(
+            update(SqlConversationMetadata)
+            .where(SqlConversationMetadata.id == late.id)
+            .values(project_id=project_id)
+        )
+        deleter.start()
+        deleter.join(timeout=1)
+        assert deleter.is_alive()
+    deleter.join(timeout=15)
+
+    sweep = outcome["sweep"]
+    assert sorted(sweep.session_ids) == sorted([*member_ids, late.id])
+    stored = conversations.get_conversation(late.id)
+    assert (stored.archived, stored.project_id) == (True, None)
+    assert store.get(project_id, user_id="alice") is None
+
+
+def test_delete_with_sessions_leaves_a_member_unfiled_while_it_waited(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore
+) -> None:
+    """Unfiling locks no project row, so only the member row lock stops the sweep."""
+    import threading
+
+    from sqlalchemy import update
+
+    from omnigent.db.db_models import SqlConversationMetadata
+
+    project_id, _name, member_ids = _project_with_members(store, conversations, count=2)
+    unfiled, staying = member_ids
+    conversations.delete_label(unfiled, PROJECT_LABEL_KEY)
+    outcome: dict[str, object] = {}
+
+    def delete() -> None:
+        outcome["sweep"] = _delete(store, conversations, project_id)
+
+    deleter = threading.Thread(target=delete)
+    with conversations._session_immediate("unfile_during_delete") as session:
+        session.execute(
+            update(SqlConversationMetadata)
+            .where(SqlConversationMetadata.id == unfiled)
+            .values(project_id=None)
+        )
+        deleter.start()
+        deleter.join(timeout=1)
+        assert deleter.is_alive()
+    deleter.join(timeout=15)
+
+    assert outcome["sweep"].session_ids == (staying,)
+    stored = conversations.get_conversation(unfiled)
+    assert (stored.archived, stored.project_id) == (False, None)
+
+
+def _file_late(conversations, late_id, project_id):
+    return conversations.set_conversation_project(late_id, project_id)
+
+
+def _create_late(conversations, late_id, project_id):
+    del late_id
+    return conversations.create_conversation(title="new", project_id=project_id).id
+
+
+def _fork_late(conversations, late_id, project_id):
+    return conversations.fork_conversation(late_id, project_id=project_id).id
+
+
+@pytest.mark.parametrize("file_it", [_file_late, _create_late, _fork_late])
+def test_filing_during_a_delete_waits_and_never_dangles(
+    store: SqlAlchemyProjectStore, conversations: SqlAlchemyConversationStore, file_it
+) -> None:
+    """The delete holds the lock first: the filing waits, then finds no project."""
+    import threading
+
+    project_id, _name, _members = _project_with_members(store, conversations, count=1)
+    late = conversations.create_conversation(title="late")
+    reached, release = threading.Event(), threading.Event()
+
+    def hold_deleter(operation: str) -> None:
+        if operation == "delete_row":
+            reached.set()
+            assert release.wait(timeout=15)
+
+    store.after_checks_hook = hold_deleter
+    outcome: dict[str, object] = {}
+
+    def delete() -> None:
+        outcome["sweep"] = _delete(store, conversations, project_id)
+
+    def file_session() -> None:
+        outcome["filed"] = file_it(conversations, late.id, project_id)
+
+    deleter, filer = threading.Thread(target=delete), threading.Thread(target=file_session)
+    deleter.start()
+    assert reached.wait(timeout=15)
+    filer.start()
+    filer.join(timeout=1)
+    assert filer.is_alive()
+    release.set()
+    deleter.join(timeout=15)
+    filer.join(timeout=15)
+    store.after_checks_hook = None
+
+    assert outcome["sweep"] is not None
+    assert store.get(project_id, user_id="alice") is None
+    filed = outcome["filed"]
+    if isinstance(filed, bool):
+        assert filed is False
+        assert conversations.get_conversation(late.id).project_id is None
+    else:
+        assert conversations.get_conversation(filed).project_id is None

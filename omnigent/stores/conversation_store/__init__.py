@@ -23,7 +23,31 @@ PENDING_INPUT_RESPONSE_ID = "pending_input"
 MAX_PENDING_INPUTS = 100
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from omnigent.db.account_authority import AccountAuthority
+
+PROJECT_SWEEP_SPLIT_DB_MESSAGE = (
+    "This server keeps sessions and projects in separate databases, so a project "
+    "with sessions can't be deleted in one step. Move its sessions out first, "
+    "then delete it."
+)
+
+
+@dataclass(frozen=True)
+class ProjectSessionSweep:
+    """What one atomic project delete did to its member sessions.
+
+    :param session_ids: Every member archived and unfiled.
+    :param newly_archived_ids: Members that were not already archived, which
+        are the ones owed post-commit archive side effects.
+    :param updated_at: The timestamp written to each member.
+    """
+
+    session_ids: tuple[str, ...]
+    newly_archived_ids: tuple[str, ...]
+    updated_at: int
+
 
 # Label set on a fork of a session that had a working directory, or a
 # runner-bound native session whose working-directory metadata was lost.
@@ -1505,6 +1529,60 @@ class ConversationStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def project_member_ids(
+        self,
+        session: "Session",
+        *,
+        project_id: str,
+        legacy_name: str | None,
+        owner_id: str | None,
+        lock: bool = False,
+    ) -> list[str]:
+        """
+        List the sessions in a project: those filed by id, plus the owner's
+        legacy ``omni_project``-labelled sessions that are filed nowhere else.
+
+        :param session: A session on the project's database.
+        :param project_id: The stored project id.
+        :param legacy_name: The name legacy labels use; ``None`` for a nested
+            project, which has no label members.
+        :param owner_id: The project owner, or ``None`` in single-user mode.
+        :param lock: Lock the filed rows, for use inside a write transaction.
+        :returns: Sorted member ids.
+        """
+        ...
+
+    @abstractmethod
+    def archive_project_members(
+        self,
+        session: "Session",
+        *,
+        project_id: str,
+        legacy_name: str | None,
+        owner_id: str | None,
+        authorize: Callable[[list[str]], None],
+        after_chunk: Callable[[], None] | None = None,
+    ) -> ProjectSessionSweep:
+        """
+        Archive and unfile a project's members inside the caller's transaction.
+
+        Writes nothing itself to commit: the caller's transaction decides.
+        Call it holding the project's row lock, so a concurrent filing is
+        either read here or refused once the project is gone.
+
+        :param session: The project store's open write transaction.
+        :param project_id: The stored project id.
+        :param legacy_name: See :meth:`project_member_ids`.
+        :param owner_id: See :meth:`project_member_ids`.
+        :param authorize: Raises to refuse; receives every member id.
+        :param after_chunk: Called after each chunk of writes.
+        :returns: What was swept, for post-commit side effects.
+        :raises OmnigentError: ``CONFLICT`` before any write when the project
+            has members and they cannot share ``session``'s transaction.
+        """
+        ...
+
+    @abstractmethod
     def set_conversation_project(
         self,
         conversation_id: str,
@@ -1520,7 +1598,7 @@ class ConversationStore(ABC):
         :param conversation_id: The conversation to update, e.g. ``"conv_abc"``.
         :param project_id: The project id to file under, or ``None`` to unfile.
         :returns: ``True`` if a metadata row was updated; ``False`` if the
-            conversation has no metadata row.
+            conversation has no metadata row or the project no longer exists.
         """
         ...
 

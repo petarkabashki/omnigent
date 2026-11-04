@@ -1,3 +1,4 @@
+import { projectPathOf } from "@/lib/projectTree";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FolderIcon,
@@ -66,7 +67,7 @@ export function ComposerAddMenu({
   /** Start a new side chat (a fork of this conversation opened as a rail tab).
    *  Absent when the session can't host one. */
   onSideChat?: () => void;
-  projects?: readonly { name: string }[];
+  projects?: readonly { name: string; path?: string | null }[];
   onProjectSelect?: (name: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -158,13 +159,13 @@ export function ComposerAddMenu({
             {projects.map((project) => (
               <DropdownMenuItem
                 className="mobile-touch-target"
-                key={project.name}
-                onSelect={() => onProjectSelect?.(project.name)}
+                key={projectPathOf(project)}
+                onSelect={() => onProjectSelect?.(projectPathOf(project))}
               >
                 <span className="flex size-4 shrink-0 items-center justify-center">
                   <FolderIcon className="size-3.5" />
                 </span>
-                <span className="min-w-0 truncate">{project.name}</span>
+                <span className="min-w-0 truncate">{projectPathOf(project)}</span>
               </DropdownMenuItem>
             ))}
           </div>

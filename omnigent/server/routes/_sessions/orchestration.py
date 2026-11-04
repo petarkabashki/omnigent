@@ -323,6 +323,7 @@ from omnigent.server.routes._sessions.helpers import (
     _priced_cost_for_display,
     _provision_managed_sandbox,
     _prune_pre_resolved_harness_elicitations,
+    _prune_session_read_state,
     _publish_elicitation_request_to_ancestors,
     _publish_elicitation_resolved,
     _publish_elicitation_resolved_to_ancestors,
@@ -1056,6 +1057,38 @@ async def _archive_stop(
                 exc_info=True,
                 extra={"session_id": session_id},
             )
+
+
+def _finish_archive(
+    session_id: str,
+    conversation_store: ConversationStore,
+    runner_router: Any,
+    host_registry: Any = None,
+    *,
+    delete_worktree: bool = False,
+) -> None:
+    """
+    Run the post-commit effects of archiving one session.
+
+    Call only once the archived flag is committed, so a rejected request can't
+    leave a live runner on a session that ends up archived. Archiving hides the
+    session (and its unread dot), so its per-user read-state is dropped to bound
+    in-memory growth, and the stop carries the host-runner teardown.
+
+    :param session_id: Session/conversation identifier.
+    :param conversation_store: Store for descendant and row lookups.
+    :param runner_router: The ``RunnerRouter`` for runner-client lookups.
+    :param host_registry: The host registry, when one is wired.
+    :param delete_worktree: Also delete the session's git worktree.
+    """
+    _prune_session_read_state(session_id)
+    _spawn_archive_stop(
+        session_id,
+        conversation_store,
+        runner_router,
+        host_registry,
+        delete_worktree=delete_worktree,
+    )
 
 
 def _spawn_archive_stop(

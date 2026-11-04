@@ -1,3 +1,4 @@
+import { projectPathOf } from "@/lib/projectTree";
 import { useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
@@ -141,11 +142,14 @@ export function useExtensionHostServices(extension: ExtensionCatalogItem) {
         if (typeof projectId !== "string" || !projectId || projectId.length > 256) {
           throw new ExtensionHostServiceError("InvalidParams", "projectId is invalid");
         }
-        // The composer takes the project by name (`?project=`), so resolve it here.
+        // The composer takes the project by path (`?project=`), so resolve it here.
         const project = (await listProjectSummaries()).find((item) => item.id === projectId);
         throwIfAborted(signal);
         if (!project) throw new ExtensionHostServiceError("InvalidParams", "Project not found");
-        navigate({ pathname: "/", search: `?project=${encodeURIComponent(project.name)}` });
+        navigate({
+          pathname: "/",
+          search: `?project=${encodeURIComponent(projectPathOf(project))}`,
+        });
         return null;
       },
       "theme.getCurrent": (_params: unknown, signal: AbortSignal) => {

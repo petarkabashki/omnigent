@@ -24,6 +24,7 @@
  *   is remembered per server so coming back to `/canvas` reopens it.
  */
 
+import { projectPathOf } from "@/lib/projectTree";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyNodeChanges,
@@ -539,7 +540,7 @@ function CanvasSurface({ selectedSessionId }: { selectedSessionId?: string | nul
   const newSession = () => {
     trackClick("canvas.new-session");
     const params = new URLSearchParams({ [CANVAS_QUERY_PARAM]: activeCanvas });
-    if (activeProject) params.set("project", activeProject.name);
+    if (activeProject) params.set("project", projectPathOf(activeProject));
     navigate({ pathname: "/", search: `?${params.toString()}` });
   };
 
