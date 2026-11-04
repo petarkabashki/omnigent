@@ -12,9 +12,14 @@ import pytest
 from omnigent.harnesses.claude_native import bridge as claude_native_bridge
 from omnigent.harnesses.codex_native import bridge as codex_native_bridge
 from omnigent.harnesses.codex_native import process_registry
+from omnigent.harnesses.codex_native.bridge import (
+    read_child_usage_baselines,
+    record_child_usage_baseline,
+)
 from omnigent.runner import app as runner_app
 from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
+from omnigent.runner.turn_routing import read_pending_replay, write_pending_replay
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
 from tests.runner.conftest import _build_app_for_spec, _runner_client
@@ -276,6 +281,55 @@ async def test_codex_reset_relaunches_when_labels_fail_after_prepare(
     assert relaunched == [session_id]
 
 
+async def test_codex_prepare_leaves_what_an_aborted_reset_still_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a ``commit`` there is no boundary, so the old thread resumes on this state."""
+    session_id = "ab1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path)
+    bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id("rotated-bridge")
+    bridge_dir.mkdir()
+    write_pending_replay(
+        bridge_dir, session_id=session_id, prompt="blocked prompt", blocked_turn_id="turn_old"
+    )
+    record_child_usage_baseline(bridge_dir, "thread_child", (5000, 4000, 100))
+    app, _ = await _build_app_for_spec(
+        _harness_spec("codex-native"),
+        server_client=_LabelsFailAfterFirstReadServerClient(),
+        terminal_registry=TerminalRegistry(),
+    )
+
+    async def skip_bridge_stop(_bridge_dir: Path) -> None:
+        return None
+
+    async def skip_relaunch(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "omnigent.runner.native.stop_codex_native_bridge_backends", skip_bridge_stop
+    )
+    monkeypatch.setattr(orchestration, "_auto_create_codex_terminal", skip_relaunch)
+    event = {"type": "reset", "harness": "codex-native"}
+
+    async with _runner_client(app) as client:
+        prepared = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={**event, "phase": "prepare", "pending": "reject"},
+        )
+        assert prepared.status_code == 200, prepared.text
+        replay_after_prepare = read_pending_replay(bridge_dir)
+        baselines_after_prepare = read_child_usage_baselines(bridge_dir)
+        committed = await client.post(
+            f"/v1/sessions/{session_id}/events", json={**event, "phase": "commit"}
+        )
+        assert committed.status_code == 200, committed.text
+
+    assert replay_after_prepare is not None
+    assert baselines_after_prepare != {}
+    assert read_pending_replay(bridge_dir) is None
+    assert read_child_usage_baselines(bridge_dir) == {}
+
+
 async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_nothing_late(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -320,7 +374,7 @@ async def test_claude_reset_held_past_the_forward_budget_refuses_and_applies_not
 
 
 @pytest.mark.asyncio
-async def test_codex_native_reset_stops_the_backend_and_wipes_the_cursor_under_the_launch_hold(
+async def test_codex_native_prepare_stops_the_backend_under_the_launch_hold_and_keeps_the_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session_id = "9a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
@@ -358,7 +412,7 @@ async def test_codex_native_reset_stops_the_backend_and_wipes_the_cursor_under_t
 
         assert prepared.status_code == 200, prepared.text
         assert closed == [session_id]
-        assert codex_native_bridge.read_bridge_state(bridge_dir) is None
+        assert codex_native_bridge.read_bridge_state(bridge_dir) is not None
         assert ensure_locks[session_id].locked()
 
 

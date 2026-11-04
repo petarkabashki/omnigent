@@ -97,6 +97,8 @@ class ClaudeNativeReset:
         run again.
     :param wipe: Removes the bridge's local resume and forward-cursor state.
     :param runtime_label: Vendor name for the busy refusal, e.g. ``"Codex"``.
+    :param wipe_in_prepare: Also wipe in ``prepare``. Off when ``commit`` and the
+        launch's own catch-up cover it, so an aborted reset keeps the state.
     """
 
     stop_pane: Callable[[str, Path], Awaitable[None]]
@@ -106,6 +108,7 @@ class ClaudeNativeReset:
     hold_s: float = RESET_ENSURE_HOLD_S
     wipe: Callable[[Path], None] = wipe_claude_resume_state
     runtime_label: str = "Claude"
+    wipe_in_prepare: bool = True
     _holds: dict[str, _EnsureHold] = field(default_factory=dict)
 
     async def prepare(self, session_id: str) -> None:
@@ -126,7 +129,8 @@ class ClaudeNativeReset:
         try:
             bridge_dir = await self.bridge_dir_for_session(session_id)
             await self.stop_pane(session_id, bridge_dir)
-            await self._wipe(bridge_dir)
+            if self.wipe_in_prepare:
+                await self._wipe(bridge_dir)
         except BaseException:
             lock.release()
             raise

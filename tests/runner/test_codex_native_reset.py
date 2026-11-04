@@ -245,6 +245,7 @@ def _codex_reset(
         hold_s=hold_s,
         wipe=wipe,
         runtime_label="Codex",
+        wipe_in_prepare=False,
     )
     return reset, ensure_lock
 
@@ -263,7 +264,6 @@ async def test_prepare_holds_launches_off_until_commit_relaunches_without_the_cu
     assert calls == [
         "lookup conv_a",
         "stop conv_a locked=True",
-        "wipe cursor=True",
         "stop conv_a locked=True",
         "wipe cursor=True",
         "relaunch conv_a cursor=False locked=False",

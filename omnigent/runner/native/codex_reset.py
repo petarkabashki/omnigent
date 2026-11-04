@@ -18,8 +18,8 @@ from omnigent.runner.turn_routing import clear_pending_replay
 def wipe_codex_resume_state(bridge_dir: Path) -> None:
     """Remove the local state that would replay the pre-reset conversation.
 
-    Dead letters stay: this runs before the boundary exists and the file also holds
-    letters of the session this one replaced. Replay compares their epochs instead.
+    Dead letters stay: the file also holds letters of the session this one replaced.
+    Replay compares their epochs instead.
 
     :param bridge_dir: The session's Codex bridge directory.
     """
@@ -33,8 +33,9 @@ def stamp_codex_launch_epoch(
 ) -> None:
     """Stamp a launch's epoch, catching up on a reset no runner ran.
 
-    A reset with no bound runner never wipes the bridge dir, so the first launch
-    after it sees the boundary as an older stamp and a cleared thread id.
+    A reset whose ``commit`` never ran, or that had no bound runner, leaves the bridge
+    dir unwiped, so the first launch after it sees the boundary as an older stamp and
+    a cleared thread id.
 
     :param bridge_dir: The session's Codex bridge directory.
     :param context_epoch: The session's current context epoch.

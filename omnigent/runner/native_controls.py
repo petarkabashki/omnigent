@@ -2567,6 +2567,7 @@ def build_native_controls(
             ),
             wipe=wipe_codex_resume_state,
             runtime_label="Codex",
+            wipe_in_prepare=False,
         ),
         codex_native_model_options=_codex_native_model_options,
         handle_claude_native_btw_dismiss=_handle_claude_native_btw_dismiss,
