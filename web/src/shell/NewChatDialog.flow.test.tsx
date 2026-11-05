@@ -442,6 +442,21 @@ afterEach(() => {
 });
 
 describe("NewChatLandingScreen create flow", () => {
+  it("restores the typed message after a same-tab reload", async () => {
+    renderLanding([]);
+    await waitForWorkspaceSeed();
+    typeMessage("half-written thought");
+    const stored = sessionStorage.getItem("omnigent.landingDraftMessage");
+    cleanup();
+    // A reload drops module memory; only sessionStorage survives.
+    resetLandingDraft();
+    sessionStorage.setItem("omnigent.landingDraftMessage", stored ?? "");
+
+    renderLanding([]);
+    await waitForWorkspaceSeed();
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue("half-written thought");
+  });
+
   it.each([
     { query: "canvas=main", canvasId: "main", project: undefined },
     {

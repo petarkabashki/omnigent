@@ -116,6 +116,18 @@ describe("FolderTree runner-offline state", () => {
     expect(screen.getByText(/failed to load: 500 internal server error/i)).toBeInTheDocument();
     expect(screen.queryByText(/agent is asleep/i)).not.toBeInTheDocument();
   });
+
+  it("keeps the listed files when the connection drops, but not on a real HTTP error", () => {
+    const files = [file("aaa.txt")];
+    const view = renderTree({ files, isError: true, error: new TypeError("Failed to fetch") });
+
+    expect(screen.getByText("aaa.txt")).toBeInTheDocument();
+    expect(screen.queryByText(/failed to load/i)).not.toBeInTheDocument();
+
+    view.unmount();
+    renderTree({ files, isError: true, error: new Error("500 Internal Server Error") });
+    expect(screen.getByText(/failed to load: 500/i)).toBeInTheDocument();
+  });
 });
 
 describe("FolderTree sorting", () => {

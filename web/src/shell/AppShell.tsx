@@ -1,3 +1,4 @@
+import { ServerUnreachableBanner } from "@/components/ServerUnreachableBanner";
 import { useLoadedConversations } from "@/hooks/useSidebarData";
 import { RenderErrorBoundary } from "@/components/RenderErrorBoundary";
 import { GridSessionsProvider, useGridSessions } from "@/grid/GridSessionsContext";
@@ -2517,7 +2518,7 @@ function AppShellImpl() {
         sidebar below the traffic lights and supplies a drag strip in the
         freed space. */}
           <div
-            className="app-shell relative flex h-dvh bg-sidebar text-foreground"
+            className="app-shell relative flex h-dvh bg-sidebar pt-[var(--server-banner-height,0px)] text-foreground"
             style={
               {
                 "--app-sidebar-width": `${sidebarOpen ? sidebarWidth : 0}px`,
@@ -2535,6 +2536,7 @@ function AppShellImpl() {
           sidebar's electron top margin (see index.css) frees this strip of
           canvas for the traffic lights, and the strip is the window's one
           drag surface — content below and right stays fully clickable. */}
+            <ServerUnreachableBanner />
             {isMacElectronShell() && <div className="electron-drag-strip" aria-hidden="true" />}
             {/* The Search/Settings/toggle cluster lives HERE on the macOS shell,
           not in the sidebar, so the three icons hold one fixed position beside
