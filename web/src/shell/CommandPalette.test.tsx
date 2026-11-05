@@ -11,6 +11,7 @@ vi.mock("@/lib/routing", () => ({
 
 const useConversations = vi.fn();
 const useSessionSearch = vi.fn();
+const useProjects = vi.fn();
 const serverInfo = vi.fn();
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => serverInfo(),
@@ -18,6 +19,7 @@ vi.mock("@/lib/CapabilitiesContext", () => ({
 vi.mock("@/hooks/useConversations", () => ({
   useConversations: (...args: unknown[]) => useConversations(...args),
   useSessionSearch: (...args: unknown[]) => useSessionSearch(...args),
+  useProjects: (...args: unknown[]) => useProjects(...args),
 }));
 
 function conv(
@@ -29,7 +31,13 @@ function conv(
   return { id, title, agent_name, archived: false, search_snippet };
 }
 
-function setSessions(sessions: ReturnType<typeof conv>[], isFetching = false) {
+function setSessions(
+  sessions: (ReturnType<typeof conv> & {
+    project_id?: string;
+    labels?: Record<string, string>;
+  })[],
+  isFetching = false,
+) {
   useConversations.mockReturnValue({ data: { pages: [{ data: sessions }] }, isFetching });
 }
 
@@ -80,6 +88,8 @@ beforeEach(() => {
   navigate.mockClear();
   useConversations.mockReset();
   useSessionSearch.mockReset();
+  useProjects.mockReset();
+  useProjects.mockReturnValue({ data: [] });
   serverInfo.mockReturnValue({ session_search_scope: true });
   setSessions([]);
   setSearchGroups({});
@@ -104,6 +114,25 @@ describe("CommandPalette — sessions", () => {
       expect(screen.queryByText("Archived session")).toBeNull();
     },
   );
+
+  it("shows a held role beside the title and matches the handle", () => {
+    useProjects.mockReturnValue({ data: [{ id: "proj-omnigent", path: "omnigent" }] });
+    setSessions([
+      {
+        ...conv("scratch", "how's work going"),
+        project_id: "proj-omnigent",
+        labels: { "omnigent.alias": "Scratch" },
+      },
+      conv("other", "Deploy API"),
+    ]);
+    renderPalette({ sessionsOnly: true });
+    expect(screen.getByText("omnigent/Scratch")).toBeTruthy();
+    expect(screen.getByText("how's work going")).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("command-palette-input"), { target: { value: "Scratch" } });
+    expect(screen.getByText("omnigent/Scratch")).toBeTruthy();
+    expect(screen.queryByText("Deploy API")).toBeNull();
+  });
 
   it("fuzzy-matches session names without showing unrelated actions", () => {
     setSessions([

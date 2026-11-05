@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as IdentityModule from "@/lib/identity";
-import { listNamespaceRoles, releaseSessionRole, roleHandle, takeSessionRole } from "./rolesApi";
+import {
+  listNamespaceRoles,
+  releaseSessionRole,
+  roleHandle,
+  sessionRoleHandle,
+  takeSessionRole,
+} from "./rolesApi";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 
@@ -27,6 +33,24 @@ describe("roleHandle", () => {
 
   it("joins a namespace path and the role name", () => {
     expect(roleHandle("forthkit", "Product")).toBe("forthkit/Product");
+  });
+});
+
+describe("sessionRoleHandle", () => {
+  it("prints an unfiled role with a leading slash", () => {
+    expect(sessionRoleHandle({ "omnigent.alias": "Scratch" }, null, false)).toBe("/Scratch");
+  });
+
+  it("joins the project path once it is known", () => {
+    expect(sessionRoleHandle({ "omnigent.alias": "Scratch" }, "omnigent", true)).toBe(
+      "omnigent/Scratch",
+    );
+  });
+
+  it("waits for a filed session's path and ignores a blank alias", () => {
+    expect(sessionRoleHandle({ "omnigent.alias": "Scratch" }, null, true)).toBeNull();
+    expect(sessionRoleHandle({ "omnigent.alias": "  " }, "omnigent", true)).toBeNull();
+    expect(sessionRoleHandle(undefined, null, false)).toBeNull();
   });
 });
 

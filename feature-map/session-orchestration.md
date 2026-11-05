@@ -29,7 +29,8 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   Resolve repairs labels to match the row and never creates one. Names with no row
   fall back to the label scan; legacy label-projects have no rows. `sys_role_list`
   lists a namespace's held and vacant roles. The session header shows a holder's
-  handle at every width, outside the breadcrumb the native shells hide. Opening
+  handle at every width, outside the breadcrumb the native shells hide. The
+  session switcher and the sidebar row show that same handle beside the title. Opening
   it lists that namespace: a filled chip is held, a hollow chip is vacant. Take
   claims a vacant name with `PUT /v1/sessions/{id}/alias`. A live holder is not
   taken over from the web UI. Release role is in the session menu and calls

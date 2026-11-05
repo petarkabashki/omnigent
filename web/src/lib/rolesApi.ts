@@ -36,6 +36,22 @@ export function roleHandle(path: string, name: string): string {
   return `${path}/${name}`;
 }
 
+/**
+ * The handle a session picker should show, or null when this session holds
+ * no role. A filed session waits until its namespace path is known, so a
+ * missing project list does not flash `/Role` for a project session.
+ */
+export function sessionRoleHandle(
+  labels: Record<string, string> | null | undefined,
+  projectPath: string | null | undefined,
+  hasProject: boolean,
+): string | null {
+  const alias = labels?.[ALIAS_LABEL_KEY]?.trim() ?? "";
+  if (!alias) return null;
+  if (hasProject && !projectPath) return null;
+  return roleHandle(projectPath ?? "", alias);
+}
+
 function mapRole(wire: WireRole): NamespaceRole {
   const holderSessionId = wire.holder_session_id ?? null;
   // `state` is the server's liveness decision. A dead holder is vacant even

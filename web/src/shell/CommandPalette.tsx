@@ -19,8 +19,10 @@ import { useNavigate } from "@/lib/routing";
 import {
   type ConversationsPage,
   useConversations,
+  useProjects,
   useSessionSearch,
 } from "@/hooks/useConversations";
+import { sessionRoleHandle } from "@/lib/rolesApi";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { BOOT_PROBE_TIMEOUT_MS } from "@/lib/bootCapabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -102,6 +104,8 @@ const SELECTION_KEYS = new Set(["ArrowUp", "ArrowDown", "Home", "End", "PageUp",
 interface PaletteSession {
   id: string;
   label: string;
+  /** `project/Role` or `/Role` when the session holds one. */
+  handle: string | null;
   agent: string;
   archived: boolean;
   snippet: string | null;
@@ -111,6 +115,7 @@ interface PaletteSession {
     `includeArchived`, archived sessions. */
 function paletteSessions(
   pages: readonly ConversationsPage[],
+  projectPathById: ReadonlyMap<string, string>,
   {
     includeArchived = false,
     excludeIds = new Set(),
@@ -122,9 +127,15 @@ function paletteSessions(
     for (const c of page.data) {
       if ((c.archived && !includeArchived) || seen.has(c.id)) continue;
       seen.add(c.id);
+      const projectId = c.project_id ?? null;
       out.push({
         id: c.id,
         label: conversationDisplayLabel(c),
+        handle: sessionRoleHandle(
+          c.labels,
+          projectId ? projectPathById.get(projectId) : null,
+          projectId !== null,
+        ),
         agent: getConversationAgentType(c),
         archived: c.archived === true,
         // Present only when the match was in chat content (not the title);
@@ -277,31 +288,45 @@ export function CommandPalette({
     fetchNextPage,
   ]);
 
+  const { data: projects } = useProjects({ enabled: open });
+  const projectPathById = useMemo(() => {
+    const paths = new Map<string, string>();
+    for (const project of projects ?? []) {
+      if (project.id && project.path) paths.set(project.id, project.path);
+    }
+    return paths;
+  }, [projects]);
   const sessions = useMemo(() => {
-    if (searching) return paletteSessions(titleSearch.data?.pages ?? [], { includeArchived: true });
+    if (searching)
+      return paletteSessions(titleSearch.data?.pages ?? [], projectPathById, {
+        includeArchived: true,
+      });
     // Rows archived after they loaded are still cached here, so drop them.
-    const out = paletteSessions(data?.pages ?? []);
+    const out = paletteSessions(data?.pages ?? [], projectPathById);
     if (sessionsOnly) {
       if (!query.trim()) return out;
       return out
-        .map((session) => ({ ...session, score: defaultFilter(session.label, query.trim()) }))
+        .map((session) => ({
+          ...session,
+          score: defaultFilter(`${session.handle ?? ""} ${session.label}`, query.trim()),
+        }))
         .filter((session) => session.score > 0)
         .sort((first, second) => second.score - first.score);
     }
     // The full first page would push Actions below the fold.
     return out.slice(0, IDLE_SESSION_LIMIT);
-  }, [data, titleSearch.data, query, searching, sessionsOnly]);
+  }, [data, titleSearch.data, query, searching, sessionsOnly, projectPathById]);
   // Excludes title matches again in case a rename moved a session between the
   // two groups' requests: cmdk needs each item value to be unique.
   const contentSessions = useMemo(
     () =>
       searching
-        ? paletteSessions(contentSearch.data?.pages ?? [], {
+        ? paletteSessions(contentSearch.data?.pages ?? [], projectPathById, {
             includeArchived: true,
             excludeIds: new Set(sessions.map((s) => s.id)),
           })
         : [],
-    [contentSearch.data, searching, sessions],
+    [contentSearch.data, searching, sessions, projectPathById],
   );
   const visibleSessions = sessionsOnly ? sessions.slice(0, SESSION_SEARCH_RESULT_LIMIT) : sessions;
   const searchGroups = [titleSearch, contentSearch];
@@ -368,9 +393,12 @@ export function CommandPalette({
       className="items-start pl-6"
     >
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-left">
-          <HighlightedText text={s.label} query={sessionsOnly ? query : debouncedQuery} />
-        </span>
+        <div className="flex min-w-0 items-baseline gap-1.5 text-left">
+          {s.handle && <span className="shrink-0 text-muted-foreground">{s.handle}</span>}
+          <span className="min-w-0 truncate">
+            <HighlightedText text={s.label} query={sessionsOnly ? query : debouncedQuery} />
+          </span>
+        </div>
         {s.snippet && (
           // Where the match was found in the chat body — the session is often
           // unidentifiable from the title alone.

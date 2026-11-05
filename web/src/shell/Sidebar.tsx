@@ -185,6 +185,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode, sandboxOptionLabel } from "@/lib/capabilities";
 import { useBranding } from "@/lib/branding";
 import { relativeTime } from "@/lib/relativeTime";
+import { sessionRoleHandle } from "@/lib/rolesApi";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
 import { unpinWithUndo } from "./unpinUndoToast";
@@ -5314,6 +5315,17 @@ function ConversationRowImpl({
   }, [conversation.title, pendingTitle, rename.isSuccess, rename.isError]);
 
   const label = pendingTitle ?? conversationDisplayLabel(conversation);
+  // The list-level map is the namespace path (`path`, else the project name).
+  // A filed session with no entry yet stays unlabeled rather than flashing `/Role`.
+  const roleProjectPath =
+    conversation.project_id != null
+      ? (projectNamesById.get(conversation.project_id) ?? null)
+      : null;
+  const roleHandleText = sessionRoleHandle(
+    conversation.labels,
+    roleProjectPath,
+    conversation.project_id != null,
+  );
   // Subscribed so the just-recorded optimistic label flips the row
   // immediately instead of at the next conversations poll.
   const optimisticTitle = useOptimisticTitle(conversation.id);
@@ -5674,16 +5686,23 @@ function ConversationRowImpl({
       {/* Row 1: the session name. Working, needs-approval, unseen, and draft
           markers render in the shared trailing indicator slot below. */}
       <div className="flex w-full items-center">
-        <span
-          className={cn(
-            "relative min-w-0 truncate",
-            // The optimistic first-prompt label is a placeholder until the
-            // server's title lands — dim it so it doesn't read as final.
-            isProvisionalLabel && "italic text-muted-foreground",
+        <span className="relative flex min-w-0 items-center gap-1.5">
+          {roleHandleText && (
+            <span data-testid="sidebar-role-handle" className="shrink-0 text-muted-foreground">
+              {roleHandleText}
+            </span>
           )}
-        >
-          {label}
-          {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
+          <span
+            className={cn(
+              "min-w-0 truncate",
+              // The optimistic first-prompt label is a placeholder until the
+              // server's title lands — dim it so it doesn't read as final.
+              isProvisionalLabel && "italic text-muted-foreground",
+            )}
+          >
+            {label}
+            {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
+          </span>
         </span>
       </div>
       {/* Row 2: the "Show" metadata, each part omitted when it has no value. */}
