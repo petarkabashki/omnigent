@@ -511,6 +511,7 @@ def test_usage_baseline_survives_native_restart(baseline_source: str) -> None:
     ...(reasserts ? [[150000, 30000, 0.75]] : []),
     [150900, 30250, 1],
   ]);
+  assert.ok(usageEvents().every(({data}) => data.cost_source === "catalog"));
 })().catch(error => { console.error(error); process.exit(1); });
 """
     )

@@ -994,7 +994,9 @@ async def test_shutdown_interrupt_posts_interrupted_then_idle() -> None:
     await fwd.handle_event(_step_started("msg_1"))
     await fwd.handle_event(_event("session.execution.interrupted", reason="shutdown"))
     types = _types(server.posts)
-    assert _datas(server.posts, "external_session_interrupted") == [{"response_id": "msg_1"}]
+    assert _datas(server.posts, "external_session_interrupted") == [
+        {"response_id": "msg_1", "origin": "system"}
+    ]
     assert types.index("external_session_interrupted") < len(types) - 1
     assert _status_edges(server.posts)[-1]["status"] == "idle"
 

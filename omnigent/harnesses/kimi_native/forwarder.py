@@ -1335,6 +1335,7 @@ class _KimiUsageSync:
             # that under-charged expensive→cheap switches to $0 turns (the
             # clamp ate the decrease) and overcharged cheap→expensive ones.
             body["cumulative_cost_usd"] = cost
+            body["cost_source"] = "catalog"
         if await self._post(client, "external_session_usage", body):
             self._last_posted = payload
 

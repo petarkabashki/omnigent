@@ -480,13 +480,16 @@ async def _post_session_cost(
     """POST Kiro's cumulative credit spend as authoritative session cost.
 
     kiro-cli reports cost in credits and there is no credit->USD conversion
-    available, so credits are forwarded 1:1 into ``cumulative_cost_usd`` (the
-    same convention the Copilot relay uses for its AI-credit total). The server
+    available, so credits are forwarded 1:1 into ``cumulative_cost_usd`` and
+    declared as ``credits`` so no reader takes them for dollars. The server
     treats this value as authoritative and monotonic, in preference to
     token x catalog pricing, via the ``external_session_usage`` event used by
     the claude-/codex-native forwarders.
     """
-    data: dict[str, object] = {"cumulative_cost_usd": cumulative_cost_usd}
+    data: dict[str, object] = {
+        "cumulative_cost_usd": cumulative_cost_usd,
+        "cost_source": "credits",
+    }
     if model:
         data["model"] = model
     resp = await client.post(

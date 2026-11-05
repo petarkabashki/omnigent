@@ -918,6 +918,11 @@ async def test_tool_call_ask_returns_deny_on_decline(
     tool must not run.
     """
     _patch_default_policies(monkeypatch, f"{__name__}._ask_for_bash")
+    overrides: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.routes_hooks.record_override",
+        lambda *args: overrides.append(args),
+    )
     agent = await create_test_agent(client)
     session_id = await _create_session(client, agent["id"])
 
@@ -940,6 +945,8 @@ async def test_tool_call_ask_returns_deny_on_decline(
     resp = await evaluate
     assert resp.status_code == 200, resp.text
     assert resp.json()["result"] == "POLICY_ACTION_DENY"
+    # The decline interrupts the harness, and the hook can't say who declined.
+    assert overrides == [(session_id, "interrupt", "unknown")]
 
 
 async def test_tool_call_ask_forwards_popup_event_to_runner(

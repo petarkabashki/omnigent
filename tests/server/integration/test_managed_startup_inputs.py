@@ -844,6 +844,8 @@ async def test_refused_recovery_launch_is_reported_once(
         error="harness is not configured on this host",
     )
     startup = env.app.state.startup_inputs
+    closed = Mock()
+    monkeypatch.setattr("omnigent.server.startup_inputs.record_ended", closed)
 
     await startup._recover_session(env.app, session_id, connection)
     await startup._recover_session(env.app, session_id, connection)
@@ -851,6 +853,9 @@ async def test_refused_recovery_launch_is_reported_once(
     [error] = env.conv_store.list_items(session_id).data
     assert isinstance(error.data, ErrorData) and error.data.code == "startup_input_failed"
     assert "harness is not configured on this host" in error.data.message
+    closed.assert_called_once()
+    assert closed.call_args.args[0] == session_id
+    assert closed.call_args.kwargs == {"reason": "launch_failed", "native": True}
 
 
 async def test_finished_startup_skips_pending_input_reads(

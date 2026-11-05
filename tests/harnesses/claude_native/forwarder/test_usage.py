@@ -475,6 +475,7 @@ async def test_forward_session_cost_splits_display_and_policy(
         assert posted == [
             {
                 "cumulative_cost_usd": pytest.approx(0.01),
+                "cost_source": "harness",
                 "policy_cost_usd": pytest.approx(0.65),
             }
         ]
@@ -509,6 +510,7 @@ async def test_forward_session_cost_splits_display_and_policy(
         await run()
         assert posted[-1] == {
             "cumulative_cost_usd": pytest.approx(0.95),
+            "cost_source": "harness",
             "policy_cost_usd": pytest.approx(0.95),
         }
         assert dedupe.posted_cost == pytest.approx(0.95)
@@ -565,6 +567,7 @@ async def test_forward_session_cost_posts_status_when_no_subagents(
     assert posted == [
         {
             "cumulative_cost_usd": pytest.approx(0.25),
+            "cost_source": "harness",
             "policy_cost_usd": pytest.approx(0.25),
         }
     ]
@@ -616,6 +619,7 @@ async def test_forward_session_cost_reposts_a_lower_total_when_the_launch_change
         assert posted == [
             {
                 "cumulative_cost_usd": pytest.approx(0.25),
+                "cost_source": "harness",
                 "policy_cost_usd": pytest.approx(0.25),
                 "launch_id": first,
             }
@@ -625,6 +629,7 @@ async def test_forward_session_cost_reposts_a_lower_total_when_the_launch_change
         await forwarder._forward_session_cost(**kwargs)
     assert posted[-1] == {
         "cumulative_cost_usd": pytest.approx(0.05),
+        "cost_source": "harness",
         "policy_cost_usd": pytest.approx(0.05),
         "launch_id": second,
     }
@@ -745,6 +750,7 @@ async def test_forward_session_cost_tags_display_advance_with_model(
         assert posted == [
             {
                 "cumulative_cost_usd": pytest.approx(0.01),
+                "cost_source": "harness",
                 "policy_cost_usd": pytest.approx(0.65),
                 "model": "claude-opus-4-8",
             }

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     prepare_bridge_dir,
     read_active_session_id,
+    read_rotated_cost_base,
     record_hook_event,
     record_launch_epoch,
     write_active_session_id,
@@ -1130,7 +1132,11 @@ async def test_external_id_mirror_only_conflicts_on_a_stale_stamp(
 
 
 async def _forward_cost(
-    *, bridge_dir: Path, dedupe: forwarder._ForwardDedupeState, posted: list[dict[str, object]]
+    *,
+    bridge_dir: Path,
+    dedupe: forwarder._ForwardDedupeState,
+    posted: list[dict[str, object]],
+    session_id: str = "conv_abc",
 ) -> None:
     """Run one cost poll, collecting the usage posts it makes."""
 
@@ -1143,7 +1149,7 @@ async def _forward_cost(
     ) as client:
         await forwarder._forward_session_cost(
             client=client,
-            session_id="conv_abc",
+            session_id=session_id,
             bridge_dir=bridge_dir,
             parent_transcript_path=bridge_dir / "transcript.jsonl",
             subagent_state=forwarder.SubagentForwardState(subagents={}),
@@ -1164,6 +1170,161 @@ def _age_status_snapshot(bridge_dir: Path, *, filename: str = "context.json") ->
     os.utime(bridge_dir / filename, ns=(launched - 1_000_000, launched - 1_000_000))
 
 
+async def _rotate_after_old_total(bridge_dir: Path, *, old_total: float) -> Any:
+    """Post *old_total* on the old session, then rotate; returns the new dedupe state."""
+    _write_status_snapshot(bridge_dir, cost=old_total)
+    dedupe = forwarder._ForwardDedupeState()
+    await _forward_cost(bridge_dir=bridge_dir, dedupe=dedupe, posted=[])
+    return await forwarder._rotated_dedupe_state(
+        bridge_dir, session_id="conv_new", previous=dedupe
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_totals", "new_session_posts"),
+    [
+        # S carries across /clear: the new session owns only what S gained since.
+        pytest.param([10.0, 10.0, 12.0, 15.0], [2.0, 5.0], id="S-carries"),
+        # S restarts, and a poll lands before the statusLine refreshes.
+        pytest.param([10.0, 0.5, 3.0], [0.5, 3.0], id="S-restarts-after-a-stale-poll"),
+        # S restarts and runs past the old total: still all this session's.
+        pytest.param([0.5, 12.0], [0.5, 12.0], id="S-restarts-and-passes-the-old-total"),
+    ],
+)
+async def test_rotation_never_posts_the_old_total_to_the_new_session(
+    tmp_path: Path, status_totals: list[float], new_session_posts: list[float]
+) -> None:
+    dedupe = await _rotate_after_old_total(tmp_path, old_total=10.0)
+    posted: list[dict[str, object]] = []
+
+    for total in status_totals:
+        _write_status_snapshot(tmp_path, cost=total)
+        await _forward_cost(
+            bridge_dir=tmp_path, dedupe=dedupe, posted=posted, session_id="conv_new"
+        )
+
+    assert [post["cumulative_cost_usd"] for post in posted] == new_session_posts
+    assert [post["policy_cost_usd"] for post in posted] == new_session_posts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_total", "expected"),
+    [pytest.param(12.0, [2.0], id="S-carries"), pytest.param(10.0, [], id="stale-poll")],
+)
+async def test_restarted_forwarder_keeps_the_rotation_base(
+    tmp_path: Path, status_total: float, expected: list[float]
+) -> None:
+    await _rotate_after_old_total(tmp_path, old_total=10.0)
+    posted: list[dict[str, object]] = []
+
+    _write_status_snapshot(tmp_path, cost=status_total)
+    await _forward_cost(
+        bridge_dir=tmp_path,
+        dedupe=forwarder._ForwardDedupeState(),
+        posted=posted,
+        session_id="conv_new",
+    )
+
+    assert [post["cumulative_cost_usd"] for post in posted] == expected
+
+
+@pytest.mark.asyncio
+async def test_restarted_s_is_not_measured_from_the_base_again(tmp_path: Path) -> None:
+    dedupe = await _rotate_after_old_total(tmp_path, old_total=10.0)
+    posted: list[dict[str, object]] = []
+    _write_status_snapshot(tmp_path, cost=0.5)
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted, session_id="conv_new")
+
+    # A forwarder restarted now must not read S as carried once it passes 10.
+    _write_status_snapshot(tmp_path, cost=12.0)
+    await _forward_cost(
+        bridge_dir=tmp_path,
+        dedupe=forwarder._ForwardDedupeState(),
+        posted=posted,
+        session_id="conv_new",
+    )
+
+    assert [post["cumulative_cost_usd"] for post in posted] == [0.5, 12.0]
+
+
+@pytest.mark.asyncio
+async def test_rotation_base_belongs_to_the_rotated_session_only(tmp_path: Path) -> None:
+    await _rotate_after_old_total(tmp_path, old_total=10.0)
+    posted: list[dict[str, object]] = []
+
+    _write_status_snapshot(tmp_path, cost=12.0)
+    await _forward_cost(
+        bridge_dir=tmp_path,
+        dedupe=forwarder._ForwardDedupeState(),
+        posted=posted,
+        session_id="conv_other",
+    )
+
+    assert [post["cumulative_cost_usd"] for post in posted] == [12.0]
+
+
+@pytest.mark.asyncio
+async def test_context_reset_retires_the_rotation_base(tmp_path: Path) -> None:
+    record_launch_epoch(tmp_path, 0)
+    dedupe = await _rotate_after_old_total(tmp_path, old_total=10.0)
+    posted: list[dict[str, object]] = []
+    _write_status_snapshot(tmp_path, cost=11.0)
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted, session_id="conv_new")
+
+    record_launch_epoch(tmp_path, 1)
+    _write_status_snapshot(tmp_path, cost=12.0)
+    await _forward_cost(bridge_dir=tmp_path, dedupe=dedupe, posted=posted, session_id="conv_new")
+
+    assert posted[-1]["cumulative_cost_usd"] == 12.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rotating_hook", ["_maybe_rotate_session_on_clear", "_maybe_rotate_session_on_fork"]
+)
+async def test_forward_loop_rotation_records_the_old_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rotating_hook: str
+) -> None:
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    _write_status_snapshot(bridge_dir, cost=10.0)
+    rotations = iter(["conv_new"])
+
+    async def rotate_once(**_kwargs: Any) -> str | None:
+        return next(rotations, None)
+
+    for hook in ("_maybe_rotate_session_on_clear", "_maybe_rotate_session_on_fork"):
+        monkeypatch.setattr(
+            forwarder, hook, rotate_once if hook == rotating_hook else AsyncMock(return_value=None)
+        )
+    monkeypatch.setattr(forwarder, "_post_clear_supersession", AsyncMock())
+    task = asyncio.create_task(
+        forwarder.forward_claude_transcript_to_session(
+            base_url="http://127.0.0.1:9",
+            headers={},
+            session_id="conv_old",
+            bridge_dir=bridge_dir,
+            agent_name="claude-native-ui",
+            start_at_end=False,
+            poll_interval_s=0.01,
+        )
+    )
+
+    async def base_recorded() -> float | None:
+        while (base := read_rotated_cost_base(bridge_dir, "conv_new")) is None:
+            await asyncio.sleep(0.01)
+        return base
+
+    try:
+        assert await asyncio.wait_for(base_recorded(), timeout=5.0) == 10.0
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 @pytest.mark.asyncio
 async def test_cost_post_carries_the_launch_epoch(tmp_path: Path) -> None:
     record_launch_epoch(tmp_path, 2)
@@ -1172,7 +1333,14 @@ async def test_cost_post_carries_the_launch_epoch(tmp_path: Path) -> None:
 
     await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
 
-    assert posted == [{"cumulative_cost_usd": 0.5, "policy_cost_usd": 0.5, "context_epoch": 2}]
+    assert posted == [
+        {
+            "cumulative_cost_usd": 0.5,
+            "policy_cost_usd": 0.5,
+            "cost_source": "harness",
+            "context_epoch": 2,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1182,7 +1350,13 @@ async def test_cost_post_without_a_launch_stamp_omits_the_epoch(tmp_path: Path) 
 
     await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
 
-    assert posted == [{"cumulative_cost_usd": 0.5, "policy_cost_usd": 0.5}]
+    assert posted == [
+        {
+            "cumulative_cost_usd": 0.5,
+            "policy_cost_usd": 0.5,
+            "cost_source": "harness",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1203,6 +1377,7 @@ async def test_epoch_change_clears_the_cost_dedupe_so_a_restarted_total_posts(
     assert posted[-1] == {
         "cumulative_cost_usd": 0.25,
         "policy_cost_usd": 0.25,
+        "cost_source": "harness",
         "context_epoch": 1,
     }
 
@@ -1255,4 +1430,11 @@ async def test_never_reset_session_still_reports_an_older_snapshot(tmp_path: Pat
 
     await _forward_cost(bridge_dir=tmp_path, dedupe=forwarder._ForwardDedupeState(), posted=posted)
 
-    assert posted == [{"cumulative_cost_usd": 3.0, "policy_cost_usd": 3.0, "context_epoch": 0}]
+    assert posted == [
+        {
+            "cumulative_cost_usd": 3.0,
+            "policy_cost_usd": 3.0,
+            "cost_source": "harness",
+            "context_epoch": 0,
+        }
+    ]

@@ -262,6 +262,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     set_server_runner_router,
     user_session_stream,
 )
+from omnigent.server.routing_outcomes import ACTOR_UNKNOWN, record_override
 from omnigent.server.schemas import (
     BackgroundTaskInfo,
     ChildSessionSummary,
@@ -2420,6 +2421,11 @@ async def _persist_external_model_change(
         session_id,
         reported_model=model,
     )
+    if conv.reported_model is not None and model != conv.model_override:
+        # A switch inside the pane replaces a known model; the launch report does not,
+        # and PATCH already recorded the one it requested. The report can't tell
+        # ``/model`` typed by a person from the harness falling back on its own.
+        await asyncio.to_thread(record_override, session_id, "model_change", ACTOR_UNKNOWN)
     event = SessionModelEvent(
         type="session.model",
         conversation_id=session_id,

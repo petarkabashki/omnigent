@@ -27,6 +27,7 @@ from omnigent.entities.conversation import (
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime import pending_inputs
 from omnigent.server.host_registry import HostConnection, HostRegistry
+from omnigent.server.routing_outcomes import record_ended
 from omnigent.server.scheduled.telemetry import (
     current_fire_stage,
     current_scheduled_run,
@@ -209,6 +210,13 @@ class ManagedStartupInputs:
                 )
         return saved[0]
 
+    async def _close_failed_launch(self, conv: Conversation) -> None:
+        """The session never ran: close its routing outcome so it can't read as unfinished."""
+        # Native-only fields come from the stored usage, so a relay session stays null.
+        await asyncio.to_thread(
+            record_ended, conv.id, conv.session_usage, reason="launch_failed", native=True
+        )
+
     async def record_launch_failure(self, session_id: str, reason: str) -> None:
         """
         Mark a failed create launch on the session, for replicas without its tracker.
@@ -216,8 +224,10 @@ class ManagedStartupInputs:
         No sandbox is left to deliver the saved inputs, so they are failed and
         the transcript says why.
         """
-        if await asyncio.to_thread(self.conversations.get_conversation, session_id) is None:
+        conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+        if conv is None:
             return
+        await self._close_failed_launch(conv)
         with contextlib.suppress(ConversationNotFoundError):
             await asyncio.to_thread(
                 self.conversations.set_labels, session_id, {STARTUP_LABEL: "failed"}
@@ -368,6 +378,7 @@ class ManagedStartupInputs:
             )
             if attempt.error or attempt.error_code:
                 reason = attempt.error or attempt.error_code or "the host refused the launch"
+                await self._close_failed_launch(conv)
                 await self._report_failure(
                     session_id,
                     f"launch_{attempt.runner_id}",

@@ -401,6 +401,40 @@ async def test_subagent_activity_uses_effective_harness_for_runner_completion(
 
 
 @pytest.mark.asyncio
+async def test_relay_writes_turn_usage_off_the_event_loop(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The usage write does blocking store and outcome I/O, so it must not stall the loop."""
+    from omnigent.server.routes._sessions import orchestration
+
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation()
+    usage_threads: list[int] = []
+    real_accumulate = orchestration._accumulate_session_usage
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        usage_threads.append(threading.get_ident())
+        return real_accumulate(*args, **kwargs)
+
+    monkeypatch.setattr(orchestration, "_accumulate_session_usage", spy)
+    release = asyncio.Event()
+    release.set()
+    await orchestration._relay_runner_stream_once(
+        conv.id,
+        _ScriptedRunnerClient(
+            release,
+            [
+                {"type": "response.in_progress", "response": {"id": "turn", "model": "test"}},
+                {"type": "response.completed", "response": {"id": "turn", "model": "test"}},
+            ],
+        ),
+        store,  # type: ignore[arg-type]
+    )
+    assert len(usage_threads) == 1
+    assert usage_threads[0] != threading.get_ident()
+
+
+@pytest.mark.asyncio
 async def test_relay_persists_acp_reported_model(db_uri: str) -> None:
     """An ACP report lands on ``reported_model`` and leaves the user's pinned request alone.
 

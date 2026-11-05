@@ -14,12 +14,15 @@ model) implement :class:`ShadowRouter` and are registered in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -347,23 +350,42 @@ def _encode_record(record: dict[str, Any]) -> str:  # type: ignore[explicit-any]
     return json.dumps(stub, separators=(",", ":"))
 
 
-def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  # type: ignore[explicit-any]  # JSON record
-    """Append one record as a single line (one ``O_APPEND`` write)."""
-    target = path or decisions_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    data = (_encode_record(record) + "\n").encode()
+def append_jsonl_line(target: Path, line: str) -> None:
+    """Append *line* plus a newline to *target* (``O_APPEND``, dir 0700, file 0600).
+
+    A short write is finished; a failed one is closed with a newline so the next
+    record never joins a fragment.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data = (line + "\n").encode()
     fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    written = 0
     try:
-        os.write(fd, data)
+        # Tighten a pre-existing file and directory created with looser modes.
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o600)
+            os.chmod(target.parent, 0o700)
+        try:
+            while written < len(data):
+                written += os.write(fd, data[written:])
+        except OSError:
+            if written:
+                with contextlib.suppress(OSError):
+                    os.write(fd, b"\n")
+            raise
     finally:
         os.close(fd)
 
 
-def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
-    """Yield records from the log, skipping blank or corrupt lines."""
-    source = path or decisions_path()
+def append_decision(record: dict[str, Any], path: Path | None = None) -> None:  # type: ignore[explicit-any]  # JSON record
+    """Append one record as a single line (one ``O_APPEND`` write)."""
+    append_jsonl_line(path or decisions_path(), _encode_record(record))
+
+
+def iter_jsonl_records(source: Path) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
+    """Yield dict records from a JSONL file, skipping blank, corrupt or non-UTF-8 lines."""
     try:
-        handle = source.open(encoding="utf-8")
+        handle = source.open("rb")
     except FileNotFoundError:
         return
     with handle:
@@ -373,16 +395,40 @@ def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # typ
                 continue
             try:
                 record = json.loads(line)
-            except ValueError:
+            except ValueError:  # includes UnicodeDecodeError
                 continue
             if isinstance(record, dict):
                 yield record
+
+
+def iter_decisions(path: Path | None = None) -> Iterator[dict[str, Any]]:  # type: ignore[explicit-any]  # JSON record
+    """Yield records from the log, skipping blank or corrupt lines."""
+    return iter_jsonl_records(path or decisions_path())
 
 
 # ── Hook ───────────────────────────────────────────────────────────────────
 
 # custom-lint: disable-next=workspace-scoped-cache -- holds task objects
 _background_tasks: set[asyncio.Task[None]] = set()
+_EXPECTED_MAX = 4096
+_expected_lock = threading.Lock()
+# custom-lint: disable-next=workspace-scoped-cache -- bounded, keyed by unique session id
+_expected_decisions: OrderedDict[str, None] = OrderedDict()
+
+
+def expect_decision(session_id: str) -> None:
+    """Note that a decision for *session_id* is on its way to the log."""
+    with _expected_lock:
+        _expected_decisions[session_id] = None
+        _expected_decisions.move_to_end(session_id)
+        while len(_expected_decisions) > _EXPECTED_MAX:
+            _expected_decisions.popitem(last=False)
+
+
+def decision_expected(session_id: str) -> bool:
+    """Whether this process routed *session_id*, so its decision can still land."""
+    with _expected_lock:
+        return session_id in _expected_decisions
 
 
 def shadow_backend_names() -> list[str]:
@@ -424,6 +470,10 @@ async def run_shadow_routing(
                 "latency_ms": round((time.monotonic() - started) * 1000, 2),
             }
             await asyncio.to_thread(append_decision, record, path)
+            if path is None:
+                from omnigent.server.routing_outcomes import flush_pending_outcomes
+
+                await asyncio.to_thread(flush_pending_outcomes)
         except Exception:
             _logger.warning("shadow router %r failed", getattr(router, "name", "?"), exc_info=True)
 
@@ -498,12 +548,15 @@ def shadow_route_created_session(  # type: ignore[explicit-any]  # schema object
 
         actual_harness = harness or getattr(resp, "harness", None)
         family_models = infer_models(actual_harness)
+        session_id = getattr(resp, "id", None) or getattr(resp, "session_id", None)
+        if session_id:
+            expect_decision(session_id)
         schedule_shadow_routing(
             DecisionRequest(
                 message=first_message_text(
                     getattr(body, "initial_input", None), getattr(body, "initial_items", ())
                 ),
-                session_id=getattr(resp, "id", None) or getattr(resp, "session_id", None),
+                session_id=session_id,
                 project=getattr(resp, "project_id", None) or getattr(body, "project_id", None),
                 alias=getattr(body, "alias", None),
                 actual=ActualChoice(

@@ -1465,6 +1465,7 @@ class TestUsageSync:
         await sync.sync(client)
         first = _usage_posts(client)[-1]["data"]
         assert first["cumulative_cost_usd"] == pytest.approx(3.00)
+        assert first["cost_source"] == "catalog"
 
         sync.note_model("system.ai.kimi-k2.7")
         sync.record(_usage_item(2, input_other=1_000_000), wire="/w/a")

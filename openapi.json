@@ -1,6 +1,20 @@
 {
   "components": {
     "schemas": {
+      "AcceptSessionResponse": {
+        "description": "Whether the accept reached the outcome stream.",
+        "properties": {
+          "recorded": {
+            "title": "Recorded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "recorded"
+        ],
+        "title": "AcceptSessionResponse",
+        "type": "object"
+      },
       "AddCommentRequest": {
         "description": "Request body for `POST /sessions/{id}/comments`.",
         "properties": {
@@ -15287,6 +15301,49 @@
           }
         },
         "summary": "Update Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/accept": {
+      "post": {
+        "description": "Record that the owner accepts this session's result.\n\nRequires owner access. `recorded` is false when the session has no\nlogged routing decision (shadow routing off), which is not an error.",
+        "operationId": "accept_session_v1_sessions__session_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptSessionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept Session",
         "tags": [
           "sessions"
         ]

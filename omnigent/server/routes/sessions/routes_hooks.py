@@ -100,6 +100,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _spawn_gateway_backed,
     _spawn_native_blocked_notice_forward,
 )
+from omnigent.server.routing_outcomes import ACTOR_UNKNOWN, record_override
 from omnigent.server.schemas import (
     ElicitationRequestParams,
 )
@@ -115,6 +116,19 @@ from omnigent.stores.policy_store import PolicyStore
 #: ``POLICY_NAME_VENDORS`` in ``web/src/lib/nativeCodingAgents.ts``, which resolves
 #: a card's glyph and name from the ``<vendor>_native_`` prefix.
 _NATIVE_POLICY_VENDORS: dict[str, str] = {"antigravity": "agy"}
+
+
+async def _interrupt_after_decline(session_id: str) -> None:
+    """Interrupt the harness for an explicit decline and record the interrupt.
+
+    The verdict reaches a hook with no caller attached, so the actor is unknown.
+    """
+    await _forward_session_change_to_runner(
+        session_id,
+        get_server_runner_router(),
+        {"type": "interrupt"},
+    )
+    await asyncio.to_thread(record_override, session_id, "interrupt", ACTOR_UNKNOWN)
 
 
 def _no_policy_allow_body(
@@ -1058,11 +1072,7 @@ def register_hooks_routes(
                             # By the time the DENY response reaches the hook
                             # subprocess, the abort signal is already queued.
                             # Best-effort: forwarding failures are swallowed.
-                            await _forward_session_change_to_runner(
-                                session_id,
-                                get_server_runner_router(),
-                                {"type": "interrupt"},
-                            )
+                            await _interrupt_after_decline(session_id)
                             decline_body = {
                                 "result": "POLICY_ACTION_DENY",
                                 "reason": exc.args[0] or "Approval was declined.",
@@ -1255,11 +1265,7 @@ def register_hooks_routes(
             # deny response, same as the Claude-native path. The await
             # ensures the abort signal reaches Codex before it processes
             # the decline result and lets the LLM continue.
-            await _forward_session_change_to_runner(
-                session_id,
-                get_server_runner_router(),
-                {"type": "interrupt"},
-            )
+            await _interrupt_after_decline(session_id)
         body = codex_request.build_response(result)
         return Response(
             content=json.dumps(body),
@@ -1359,11 +1365,7 @@ def register_hooks_routes(
         if result.action == "decline":
             # Explicit user decline: interrupt the native harness before
             # returning the decline so the abort signal arrives first.
-            await _forward_session_change_to_runner(
-                session_id,
-                get_server_runner_router(),
-                {"type": "interrupt"},
-            )
+            await _interrupt_after_decline(session_id)
         return Response(
             content=result.model_dump_json(),
             media_type="application/json",
@@ -1476,11 +1478,7 @@ def register_hooks_routes(
         if result.action == "decline":
             # Explicit user decline: interrupt the native harness before
             # returning the decline so the abort signal arrives first.
-            await _forward_session_change_to_runner(
-                session_id,
-                get_server_runner_router(),
-                {"type": "interrupt"},
-            )
+            await _interrupt_after_decline(session_id)
         return Response(
             content=json.dumps(result.model_dump(exclude_none=True)),
             media_type="application/json",
@@ -1610,11 +1608,7 @@ def register_hooks_routes(
         if result.action == "decline" and native_delivery is None:
             # Explicit user decline: interrupt the native harness before
             # returning the decline so the abort signal arrives first.
-            await _forward_session_change_to_runner(
-                session_id,
-                get_server_runner_router(),
-                {"type": "interrupt"},
-            )
+            await _interrupt_after_decline(session_id)
         result_payload = result.model_dump(exclude_none=True)
         if native_delivery is not None:
             result_payload["native_delivery_attempt"] = native_delivery["attempt"]

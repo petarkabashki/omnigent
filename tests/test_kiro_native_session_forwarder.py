@@ -831,3 +831,23 @@ async def test_forward_kiro_session_mirrors_current_model_once(
 
     # Mirrored once; the unchanged second poll does not re-post.
     assert models == [("conv_kiro", "claude-haiku-4.5")]
+
+
+async def test_session_cost_is_declared_as_credits() -> None:
+    posted: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        await forwarder._post_session_cost(
+            client, session_id="conv_1", cumulative_cost_usd=7.5, model=None
+        )
+    assert posted == [
+        {
+            "type": "external_session_usage",
+            "data": {"cumulative_cost_usd": 7.5, "cost_source": "credits"},
+        }
+    ]

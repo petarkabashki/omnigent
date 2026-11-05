@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 
 from fastapi import Request
 
@@ -38,6 +39,7 @@ from omnigent.server.permissions import (
     resolved_allows,
     resolved_level,
 )
+from omnigent.server.routing_outcomes import record_override
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 
@@ -520,3 +522,27 @@ def require_agent_owner(
         f"{user_id!r} is not the owner of agent {agent.id!r}",
         code=ErrorCode.FORBIDDEN,
     )
+
+
+async def record_person_override(
+    permission_store: PermissionStore | None,
+    user_id: str | None,
+    session_id: str,
+    kind: str,
+) -> None:
+    """Record a person's request as an override; never raises.
+
+    The actor is the caller's resolved access: ``owner`` (admins included, or
+    auth off) or ``collaborator``.
+    """
+    try:
+        if permission_store is None or user_id is None:
+            actor = "owner"
+        else:
+            access = await asyncio.to_thread(permission_store.resolve_access, user_id, session_id)
+            actor = "owner" if resolved_allows(access, LEVEL_OWNER) else "collaborator"
+        await asyncio.to_thread(record_override, session_id, kind, actor)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "%s override not recorded for %r", kind, session_id, exc_info=True
+        )

@@ -101,6 +101,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
 )
+from omnigent.server.routes._auth_helpers import record_person_override
 from omnigent.server.routes._auth_helpers import (
     require_access as _require_access,
 )
@@ -3515,12 +3516,14 @@ def register_core_routes(
                     f"invalid model_override: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+        previous_model: str | None = None
         if model_override is not None:
             conv_for_model = await asyncio.to_thread(
                 conversation_store.get_conversation, session_id
             )
             if conv_for_model is None:
                 raise _session_not_found()
+            previous_model = conv_for_model.model_override
             from omnigent.server.routes.sandbox_inference import (
                 configured_snapshot,
                 validate_saved_selection,
@@ -4104,6 +4107,9 @@ def register_core_routes(
                     updated.model_override,
                     conversation_store,
                 )
+            # Here the switch survived every refusal above. Silent writes are startup metadata.
+            if updated.model_override != previous_model:
+                await record_person_override(permission_store, user_id, session_id, "model_change")
         if requested_codex_collaboration_mode is not None and live_forward:
             _codex_plan_enabled = _codex_plan_mode_enabled(requested_codex_collaboration_mode)
             _runner_result = await _forward_session_change_to_runner(

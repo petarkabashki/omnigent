@@ -36,6 +36,7 @@ from omnigent.harnesses.claude_native.bridge import (
     _transcript_timestamp,
     clear_alias_paths,
     clear_replacement_identity,
+    clear_rotated_cost_base,
     compute_transcript_cumulative_cost,
     labels_for_clear_replacement,
     read_active_session_id,
@@ -48,10 +49,12 @@ from omnigent.harnesses.claude_native.bridge import (
     read_launch_id,
     read_message_deltas_from_offset,
     read_pane_signals,
+    read_rotated_cost_base,
     read_seen_claude_session_ids,
     read_transcript_items_from_offset,
     read_transcript_items_since_with_position,
     read_transcript_path,
+    record_rotated_cost_base,
     status_snapshot_predates_reset,
     transcript_has_forked_from_marker,
     transcript_has_recent_local_command,
@@ -910,6 +913,11 @@ class _ForwardDedupeState:
     # Launch id the cost baselines belong to. A new Claude process restarts S
     # near zero, so a changed id clears them and the lower total is posted.
     cost_launch_id: str | None = None
+    # Latest statusLine total read, and the total this session rotated in on.
+    # S is not known to restart on /clear, so posts are measured from the base.
+    seen_status_cost: float | None = None
+    rotated_cost_base: float | None = None
+    rotated_cost_base_loaded: bool = False
     # Last permission mode POSTed as ``external_permission_mode_change`` —
     # mirrors the launch mode and any in-pane shift+tab switch, neither of
     # which the web UI can observe on its own.
@@ -1484,7 +1492,9 @@ async def forward_claude_transcript_to_session(
                         # A rotated session is a fresh dedupe context — reseed
                         # so the new session's first model observation doesn't
                         # post against the prior session's baseline.
-                        dedupe = _ForwardDedupeState()
+                        dedupe = await _rotated_dedupe_state(
+                            bridge_dir, session_id=rotation, previous=dedupe
+                        )
                         # The rotated session resolves to a new transcript +
                         # subagents/ dir, so prior cost entries are dead; drop
                         # them so cost is recomputed fresh for the new session.
@@ -1526,7 +1536,9 @@ async def forward_claude_transcript_to_session(
                         # A rotated session is a fresh dedupe context — reseed
                         # so the new session's first model observation doesn't
                         # post against the prior session's baseline.
-                        dedupe = _ForwardDedupeState()
+                        dedupe = await _rotated_dedupe_state(
+                            bridge_dir, session_id=rotation, previous=dedupe
+                        )
                         # The rotated session resolves to a new transcript +
                         # subagents/ dir, so prior cost entries are dead; drop
                         # them so cost is recomputed fresh for the new session.
@@ -3114,6 +3126,64 @@ def _transcript_cost_size_cached(
     return cost
 
 
+def _cost_since_rotation(
+    bridge_dir: Path,
+    session_id: str,
+    dedupe: _ForwardDedupeState,
+    status_cost: float | None,
+) -> float | None:
+    """
+    Return this session's share of the statusLine total.
+
+    ``context.json`` survives a rotation, and S may carry across it or restart.
+    At or above the base it is measured from the base, so the old total never
+    posts; below the base S has restarted and all of it belongs here.
+
+    :param bridge_dir: Bridge directory holding the recorded base.
+    :param session_id: The session being forwarded, e.g. ``"conv_new"``.
+    :param dedupe: Carries the base and the latest total; mutated in place.
+    :param status_cost: The statusLine total, or ``None`` when unavailable.
+    :returns: The session's cost, or ``None`` when it has none to report yet.
+    """
+    if status_cost is None:
+        return None
+    dedupe.seen_status_cost = status_cost
+    if not dedupe.rotated_cost_base_loaded:
+        dedupe.rotated_cost_base = read_rotated_cost_base(bridge_dir, session_id)
+        dedupe.rotated_cost_base_loaded = True
+    base = dedupe.rotated_cost_base
+    if base is None:
+        return status_cost
+    if status_cost < base:
+        dedupe.rotated_cost_base = None
+        clear_rotated_cost_base(bridge_dir)
+        return status_cost
+    return status_cost - base if status_cost > base else None
+
+
+async def _rotated_dedupe_state(
+    bridge_dir: Path,
+    *,
+    session_id: str,
+    previous: _ForwardDedupeState,
+) -> _ForwardDedupeState:
+    """
+    Build the fresh dedupe context of a rotated session.
+
+    :param bridge_dir: Bridge directory holding the statusLine snapshot.
+    :param session_id: The rotated-to session, e.g. ``"conv_new"``.
+    :param previous: The rotated-from session's dedupe state.
+    :returns: A reset state that remembers the old statusLine total.
+    """
+    await asyncio.to_thread(sync_raw_status_context, bridge_dir, None)
+    state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
+    totals = (_cumulative_cost_from_status_state(state), previous.seen_status_cost)
+    base = max((total for total in totals if total is not None), default=None)
+    if base is not None:
+        await asyncio.to_thread(record_rotated_cost_base, bridge_dir, session_id, base)
+    return _ForwardDedupeState(rotated_cost_base=base, rotated_cost_base_loaded=True)
+
+
 def _session_cost_estimate(
     *,
     parent_transcript_path: Path,
@@ -3236,6 +3306,9 @@ async def _forward_session_cost(
         if dedupe.cost_epoch is not None:
             dedupe.posted_cost = None
             dedupe.posted_policy_cost = None
+            dedupe.rotated_cost_base = None
+            dedupe.rotated_cost_base_loaded = True
+            await asyncio.to_thread(clear_rotated_cost_base, bridge_dir)
         dedupe.cost_epoch = launch_epoch
     launch_id = await asyncio.to_thread(read_launch_id, bridge_dir)
     if launch_id != dedupe.cost_launch_id:
@@ -3247,7 +3320,13 @@ async def _forward_session_cost(
     status_state = None
     if not await asyncio.to_thread(status_snapshot_predates_reset, bridge_dir):
         status_state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
-    status_cost = _cumulative_cost_from_status_state(status_state)
+    status_cost = await asyncio.to_thread(
+        _cost_since_rotation,
+        bridge_dir,
+        session_id,
+        dedupe,
+        _cumulative_cost_from_status_state(status_state),
+    )
     active_subagents = [
         entry for entry in subagent_state.subagents.values() if entry.child_conversation_id
     ]
@@ -3291,6 +3370,8 @@ async def _forward_session_cost(
     # of the TOKEN USAGE breakdown while the session total still counts it. Sent
     # only when the display cost moves: that is the value being attributed
     # (``policy_cost_usd``-only mid-turn posts carry no new display cost).
+    if "cumulative_cost_usd" in payload:
+        payload["cost_source"] = "harness"
     if "cumulative_cost_usd" in payload and isinstance(status_state, dict):
         model = status_state.get("model")
         if isinstance(model, str) and model:

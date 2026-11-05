@@ -6066,9 +6066,10 @@ async def test_sys_cancel_task_reports_codex_native_cancel_as_best_effort() -> N
     finally:
         subagent_work.unregister_subagent_work(child_id)
 
-    # Codex-native routes to interrupt; ``data`` rides along for
-    # SessionEventInput compatibility with older servers.
-    assert stops == [{"type": "interrupt", "data": {}}]
+    # Codex-native routes to interrupt. ``origin`` keeps an agent's cancel
+    # from scoring as an owner override; ``data`` is also required by servers
+    # that reject a bare control event.
+    assert stops == [{"type": "interrupt", "data": {"origin": "agent"}}]
     assert cancel_output == {
         "cancel_requested": True,
         "cancel_confirmed": False,
@@ -6139,9 +6140,9 @@ async def test_sys_cancel_task_interrupts_non_native_subagent() -> None:
         subagent_work.unregister_subagent_work(child_id)
 
     # The regression guard: a non-native child must route to interrupt, never
-    # ``stop_session``. ``data`` rides along for SessionEventInput compatibility
-    # with older servers.
-    assert posts == [{"type": "interrupt", "data": {}}]
+    # ``stop_session``. ``origin`` marks the cancel as the agent's, and ``data``
+    # is required by servers that reject a bare control event.
+    assert posts == [{"type": "interrupt", "data": {"origin": "agent"}}]
     # Not codex → generic (non-best-effort) pending result; the terminal
     # status will arrive on the inbox once the interrupted turn ends.
     assert cancel_output == {
@@ -6644,7 +6645,8 @@ async def test_sys_cancel_task_native_harness_cancel_matrix(
         }
         assert not str(output).startswith("Error:")
         return
-    assert posts == [{"type": expect_event, "data": {}}], (
+    expected_data = {"origin": "agent"} if expect_event == "interrupt" else {}
+    assert posts == [{"type": expect_event, "data": expected_data}], (
         f"{row_id}: expected {expect_event} , got {posts}"
     )
     if expect_status == "unconfirmed":

@@ -115,6 +115,7 @@ from omnigent.server.routes._auth_helpers import (
 from omnigent.server.routes._auth_helpers import (
     get_user_id as _get_user_id,
 )
+from omnigent.server.routes._auth_helpers import record_person_override
 from omnigent.server.routes._auth_helpers import (
     require_access as _require_access,
 )
@@ -249,6 +250,7 @@ from omnigent.server.routes._sessions.helpers import (
     require_filesystem_attachment_runtime,
 )
 from omnigent.server.routes._sessions.orchestration import (
+    _MID_TURN_STATUSES,
     _best_effort_stop,
     _cancel_runner_relays,
     _child_snapshot_events,
@@ -289,6 +291,12 @@ from omnigent.server.routes._sessions.reset import (
     RESET_FORWARD_TIMEOUT_S,
     is_reset_in_flight,
     run_context_reset,
+)
+from omnigent.server.routing_outcomes import (
+    ACTOR_UNKNOWN,
+    record_ended,
+    record_override,
+    record_rotation,
 )
 from omnigent.server.scheduled.telemetry import start_fire_stage
 from omnigent.server.schemas import (
@@ -1141,6 +1149,28 @@ def register_events_routes(
         )
         return {**ack, "message_id": message_id}
 
+    async def _record_interrupt_override(
+        user_id: str | None, session_id: str, data: dict[str, Any]
+    ) -> None:
+        """Record an interrupt that stopped a turn as an override; never raises.
+
+        ``data.origin`` names a non-human sender: ``agent`` (a runner tool),
+        ``system`` (timeout or watchdog), or ``reset`` (the reset's own
+        interrupt, which the reset records itself). Otherwise the actor is the
+        caller's resolved access: ``owner`` (admins included, or auth off) or
+        ``collaborator``.
+        """
+        try:
+            origin = data.get("origin")
+            if origin == "reset":
+                return
+            if origin in ("agent", "system"):
+                await asyncio.to_thread(record_override, session_id, "interrupt", origin)
+            else:
+                await record_person_override(permission_store, user_id, session_id, "interrupt")
+        except Exception:
+            _logger.warning("interrupt override not recorded for %r", session_id, exc_info=True)
+
     async def _dispatch_event(
         request: Request | _RunnerEventContext | StartupInputContext,
         session_id: str,
@@ -1868,6 +1898,7 @@ def register_events_routes(
             codex_child = conv.kind == "sub_agent" and _is_codex_native_subagent(conv)
             response_id = None
             queued_pending_ids: list[str] = []
+            turn_active = False
             if codex_child:
                 # Native child boundaries come from the Codex forwarder.
                 child_thread_id = (conv.labels or {}).get(
@@ -1903,6 +1934,10 @@ def register_events_routes(
                     codex_side_turn_id=response_id.removeprefix("codex_"),
                 )
             else:
+                # Read before publishing, which settles the status.
+                turn_active = (
+                    _session_status_cache.get(session_id, conv.live_status) in _MID_TURN_STATUSES
+                )
                 _publish_interrupted(session_id)
                 # Fence the cancelled turn (see _interrupt_fenced_sessions).
                 _interrupt_fenced_sessions.add(session_id)
@@ -1939,6 +1974,8 @@ def register_events_routes(
                 _interrupt_fenced_sessions.discard(session_id)
             elif not codex_child:
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
+                if turn_active:
+                    await _record_interrupt_override(user_id, session_id, body.data)
             if stop_codex_side_chat:
                 await asyncio.to_thread(_mark_closed, session_id)
             return {"queued": False}
@@ -2059,6 +2096,17 @@ def register_events_routes(
                         conversation_store,
                         int(time.time()) - RUNNER_LIVENESS_TTL_S,
                     )
+            # Re-read so spend flushed while the runner stopped is in the snapshot.
+            ended_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            ended_conv = ended_conv or stop_conv
+            await asyncio.to_thread(
+                record_ended,
+                session_id,
+                ended_conv.session_usage if ended_conv is not None else None,
+                reason="stop",
+                native=ended_conv is not None
+                and _native_coding_agent_for_session(ended_conv) is not None,
+            )
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
             # honestly, and the next message auto-relaunches the session on
@@ -2224,7 +2272,10 @@ def register_events_routes(
 
             async def _interrupt() -> None:
                 await _dispatch_event(
-                    request, session_id, SessionEventInput(type=_INTERRUPT_TYPE), in_flight
+                    request,
+                    session_id,
+                    SessionEventInput(type=_INTERRUPT_TYPE, data={"origin": "reset"}),
+                    in_flight,
                 )
 
             async def _wake() -> bool:
@@ -2256,6 +2307,7 @@ def register_events_routes(
                 dispatching=lambda: _dispatch_in_flight.get(session_id, 0) > 0,
                 created_by=created_by,
             )
+            await asyncio.to_thread(record_override, session_id, "reset", "owner")
             return {
                 "queued": False,
                 "epoch": str(reset_result.epoch),
@@ -2346,6 +2398,11 @@ def register_events_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             _publish_interrupted(session_id, response_id=response_id)
+            # A fenced session is the harness echoing an interrupt the route recorded.
+            if session_id not in _interrupt_fenced_sessions:
+                origin = body.data.get("origin")
+                actor = origin if origin in ("agent", "system") else ACTOR_UNKNOWN
+                await asyncio.to_thread(record_override, session_id, "interrupt", actor)
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_SUPERSEDED_TYPE:
             target_conversation_id = body.data.get("target_conversation_id")
@@ -2356,6 +2413,9 @@ def register_events_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             _publish_session_superseded(session_id, target_conversation_id.strip())
+            # /clear is the owner resetting the context; the terminal moved on.
+            await asyncio.to_thread(record_override, session_id, "reset", "owner")
+            await asyncio.to_thread(record_rotation, session_id, target_conversation_id.strip())
             return {"queued": False}
         if body.type == _EXTERNAL_BTW_SIDECHAT_TYPE:
             question = body.data.get("question")
@@ -4018,6 +4078,9 @@ def register_events_routes(
                 )
         _interrupt_fenced_sessions.discard(session_id)
         _intentional_stop_sessions.pop(session_id, None)
+        # Re-read so the final snapshot includes spend flushed while the runner stopped.
+        final_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        final_usage = (final_conv or conv).session_usage
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
@@ -4027,6 +4090,13 @@ def register_events_routes(
             project_store,
             session_id,
             reason="delete",
+        )
+        await asyncio.to_thread(
+            record_ended,
+            session_id,
+            final_usage,
+            reason="delete",
+            native=_native_coding_agent_for_session(final_conv or conv) is not None,
         )
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
