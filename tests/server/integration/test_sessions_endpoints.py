@@ -7267,6 +7267,58 @@ async def test_accumulate_session_usage_prefers_provider_cost(
     assert usage["by_model"]["harness-model"]["total_cost_usd"] == pytest.approx(0.01827875)
 
 
+async def test_accumulate_session_usage_stores_a_credit_meter_not_dollars(
+    client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copilot AIC is a credit count, not a harness dollar cost.
+
+    A declared ``credits`` meter wins over a simultaneous ``cost_usd`` and
+    over catalog pricing. The count is stored with ``cost_unit``, left out
+    of the per-model dollar bucket, and not added to the daily USD rollup.
+    The badge reads the session as unpriced.
+    """
+    from omnigent.server.routes import sessions as sessions_routes
+
+    def _catalog_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("catalog pricing must not run for a credit meter")
+
+    monkeypatch.setattr(
+        "omnigent.llms.context_window.fetch_model_pricing_with_provider",
+        _catalog_must_not_run,
+    )
+    daily: list[float] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration._record_daily_cost",
+        lambda _conv, delta, _store: daily.append(delta),
+    )
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    displayed = sessions_routes._accumulate_session_usage(
+        {
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "model": "harness-model",
+                "cost_usd": 0.019,
+                "cost_source": "credits",
+                "credits": 1.9,
+            }
+        },
+        session["id"],
+        SqlAlchemyConversationStore(db_uri),
+    )
+    usage = _read_session_usage(db_uri, session["id"])
+    assert displayed is None
+    assert usage.get("total_cost_usd") == pytest.approx(1.9)
+    assert usage.get("cost_unit") == "credits"
+    assert "total_cost_usd" not in usage["by_model"]["harness-model"]
+    assert usage["by_model"]["harness-model"]["input_tokens"] == 1000
+    assert daily == [0.0]
+
+
 async def test_accumulate_session_usage_provider_cost_prices_uncatalogued_model(
     client: httpx.AsyncClient,
     db_uri: str,

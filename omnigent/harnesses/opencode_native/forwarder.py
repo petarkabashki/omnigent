@@ -1175,6 +1175,9 @@ class OpenCodeNativeForwarder:
             )
         data: _JsonObject = {
             "cumulative_cost_usd": round(cum_cost, 6),
+            # OpenCode's `cost` is USD. Without a source the outcome stream
+            # records the total as unknown.
+            "cost_source": "harness",
             "cumulative_input_tokens": cum_in,
             "cumulative_output_tokens": cum_out,
             "cumulative_cache_read_input_tokens": cum_cache,

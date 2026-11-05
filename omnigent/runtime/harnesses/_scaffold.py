@@ -1951,9 +1951,12 @@ class HarnessApp:
                 cache_creation_input_tokens=u.get("cache_creation_input_tokens") or 0,
                 # Harness-reported model for cost pricing (ResponseObject.model is the agent name).
                 model=u.get("model"),
-                # Authoritative per-turn cost reported by the harness (e.g. Copilot
-                # AI credits); preferred over the catalog estimate. None if absent.
+                # Authoritative per-turn dollar cost; preferred over the catalog
+                # estimate. None if absent. A credit meter travels as credits
+                # plus cost_source instead of a converted dollar figure.
                 cost_usd=u.get("cost_usd"),
+                credits=u.get("credits"),
+                cost_source=u.get("cost_source"),
             )
         response = ResponseObject(
             id=ctx.response_id,

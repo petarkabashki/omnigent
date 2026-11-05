@@ -511,6 +511,57 @@ def test_relay_catalog_priced_cost_is_streamed_as_catalog(
     assert (cost["usd_total"], cost["cost_source"]) == (0.25, "catalog")
 
 
+def test_relay_credit_meter_is_not_a_dollar_total(
+    data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window
+
+    monkeypatch.setattr(context_window, "fetch_model_pricing_with_provider", lambda *a, **k: None)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _log_decision(conv.id, "d1")
+    displayed = _accumulate_session_usage(
+        _relay_response(
+            model="m",
+            cost_source="credits",
+            credits=1.9,
+            cost_usd=0.019,
+        ),
+        conv.id,
+        store,
+    )
+    usage = store.get_conversation(conv.id).session_usage
+    assert displayed is None
+    assert usage["cost_unit"] == "credits"
+    assert usage["total_cost_usd"] == pytest.approx(1.9)
+    assert "total_cost_usd" not in usage["by_model"]["m"]
+    (cost,) = _lines("cost")
+    assert (cost["usd_total"], cost["credits_total"], cost["cost_source"]) == (
+        None,
+        1.9,
+        "credits",
+    )
+
+
+def test_relay_bool_credits_are_not_a_meter(
+    data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.llms import context_window
+
+    monkeypatch.setattr(context_window, "fetch_model_pricing_with_provider", lambda *a, **k: None)
+    store = SqlAlchemyConversationStore(db_uri)
+    conv = store.create_conversation(title="routed", agent_id=_AGENT_ID)
+    _accumulate_session_usage(
+        _relay_response(model="m", cost_source="credits", credits=True),
+        conv.id,
+        store,
+    )
+    usage = store.get_conversation(conv.id).session_usage
+    assert "cost_unit" not in usage
+    assert "total_cost_usd" not in usage
+    assert _lines("cost") == []
+
+
 def test_relay_unpriced_turn_writes_no_cost_line(
     data_dir: Path, db_uri: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

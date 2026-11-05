@@ -309,8 +309,8 @@ def test_usage_accumulation_and_finalize() -> None:
 
 def test_usage_accumulates_copilot_aic_cost() -> None:
     # ``copilotUsage.totalNanoAiu`` (the authoritative AI-credit cost) is summed
-    # across the turn's usage events and converted to ``cost_usd`` in finalize:
-    # 1 AIC = 1e9 nano-AIU = $0.01, so nano-AIU / 1e11 = USD.
+    # across the turn's usage events and reported as AIC in finalize.
+    # 1 AIC = 1e9 nano-AIU. The dollar price of a credit is not a harness cost.
     acc: dict[str, int] = {}
     _accumulate_usage(
         acc,
@@ -323,8 +323,10 @@ def test_usage_accumulates_copilot_aic_cost() -> None:
     usage = _finalize_usage(acc)
     assert usage is not None
     assert usage["input_tokens"] == 13
-    # (1_832_000_000 + 68_000_000) / 1e11 = 0.019 USD (1.9 AIC).
-    assert usage["cost_usd"] == pytest.approx(0.019)
+    # (1_832_000_000 + 68_000_000) / 1e9 = 1.9 AIC.
+    assert usage["credits"] == pytest.approx(1.9)
+    assert usage["cost_source"] == "credits"
+    assert "cost_usd" not in usage
     # The private accumulator key must not leak into the usage dict.
     assert "_cost_nano_aiu" not in usage
 

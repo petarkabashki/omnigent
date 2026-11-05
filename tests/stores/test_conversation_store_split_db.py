@@ -326,6 +326,19 @@ def test_apply_session_usage_delta_drops_negative_and_non_finite_increments() ->
     assert current["by_model"]["m"]["input_tokens"] == 125
 
 
+def test_apply_session_usage_delta_keeps_a_credit_unit_marker() -> None:
+    from omnigent.stores.conversation_store import apply_session_usage_delta
+
+    current: dict[str, Any] = {"total_cost_usd": 1.0}
+    apply_session_usage_delta(
+        current,
+        {"total_cost_usd": 1.9, "cost_unit": "credits", "cost_unit_other": "credits"},
+    )
+    assert current["total_cost_usd"] == pytest.approx(2.9)
+    assert current["cost_unit"] == "credits"
+    assert "cost_unit_other" not in current
+
+
 def test_set_external_session_id(store: SqlAlchemyConversationStore) -> None:
     conv = store.create_conversation(title="ext")
     updated = store.set_external_session_id(conv.id, "ext-uuid-123")

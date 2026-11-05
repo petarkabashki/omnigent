@@ -1673,6 +1673,15 @@ def _sane_relay_token_count(value: object) -> int:
     return int(value)
 
 
+def _nonnegative_number(value: object) -> float | None:
+    """A finite, non-negative, non-bool number, or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
 def _accumulate_session_usage(
     resp_obj: dict[str, Any],
     session_id: str,
@@ -1690,16 +1699,17 @@ def _accumulate_session_usage(
     concurrent relay completions to silently drop each other's cost /
     token deltas (#9). No-op when the response carries no usage data.
 
-    Cost is computed when the model's per-token pricing is
-    available from the MLflow catalog (looked up once per call
-    from the response's ``model`` field). When the harness instead
-    reports an authoritative per-turn ``cost_usd`` (e.g. Copilot's
-    AI-credit total), that value is used directly in preference to
-    the catalog estimate. The ``total_cost_usd`` key is written
-    **only when the turn is priced** (catalog pricing available or a
-    harness-reported cost) — an unpriced session leaves it absent
-    (its presence is what distinguishes a priced ``$0.00`` from
-    "unpriced"; see :func:`_priced_cost_for_display`).
+    A dollar turn uses a harness-reported ``cost_usd`` when that value
+    is present, and otherwise the model's catalog price. A declared
+    credit meter (``cost_source`` ``"credits"`` plus a finite,
+    non-negative ``credits`` count, as Copilot reports AIC) is not
+    dollars: it is stored as that count with ``cost_unit``
+    ``"credits"``, left out of the daily USD rollup, and shown to the
+    client as unpriced. It wins over a simultaneous ``cost_usd``.
+    ``total_cost_usd`` is written only for a dollar price or a credit
+    count — an unpriced session leaves it absent (its presence is
+    what distinguishes a priced ``$0.00`` from "unpriced"; see
+    :func:`_priced_cost_for_display`).
 
     :param resp_obj: The ``response`` dict from the
         ``response.completed`` SSE event.
@@ -1709,8 +1719,8 @@ def _accumulate_session_usage(
         the ``session_usage`` column.
     :returns: The session's cumulative priced cost in USD after this
         update (for the caller to broadcast on a ``session.usage``
-        event), or ``None`` when the session is unpriced or carries no
-        usage to accumulate.
+        event), or ``None`` when the session is unpriced, metered in
+        credits, or carries no usage to accumulate.
     """
     usage_obj = resp_obj.get("usage")
     if not isinstance(usage_obj, dict):
@@ -1743,11 +1753,14 @@ def _accumulate_session_usage(
     #   2. the session's ``model_override`` (a ``/model`` switch).
     #   3. the agent spec's ``llm.model`` (the static default).
     # The response's top-level ``model`` is the AGENT NAME, not the LLM
-    # model, so it is never used here. The ``total_cost_usd`` key is
-    # created only on this priced branch, so an unpriced session never
-    # gains a (misleading $0.00) cost key.
+    # model, so it is never used here. ``total_cost_usd`` is created
+    # only for a dollar price or a credit count, so an unpriced session
+    # never gains a (misleading $0.00) cost key.
     cost_delta = 0.0
     priced = False
+    # A declared credit meter wins over cost_usd and over the catalog.
+    credit_total = _nonnegative_number(usage_obj.get("credits"))
+    credit_meter = usage_obj.get("cost_source") == "credits" and credit_total is not None
     # Prefer an authoritative harness-reported cost over the catalog estimate.
     provider_cost = usage_obj.get("cost_usd")
     usage_model = usage_obj.get("model")
@@ -1763,7 +1776,9 @@ def _accumulate_session_usage(
         )
     )
     cost_source: str | None = None
-    if llm_model:
+    if credit_meter:
+        cost_source = "credits"
+    elif llm_model:
         if (
             isinstance(provider_cost, (int, float))
             and math.isfinite(provider_cost)
@@ -1816,7 +1831,13 @@ def _accumulate_session_usage(
         "cache_read_input_tokens": cache_read_input_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
     }
-    if priced:
+    if credit_total is not None:
+        # The count shares the dollar key; ``cost_unit`` marks it. It is
+        # not copied onto ``by_model``: that bucket's cost is dollars, and
+        # a credit count would not sum with a later dollar bucket.
+        delta["total_cost_usd"] = credit_total
+        delta["cost_unit"] = "credits"
+    elif priced:
         delta["total_cost_usd"] = cost_delta
     if llm_model:
         # Per-model attribution. Tokens are attributed whenever the model is
@@ -1836,9 +1857,13 @@ def _accumulate_session_usage(
         delta["by_model"] = {llm_model: model_delta}
 
     new_current = conversation_store.increment_session_usage(session_id, delta)
-    record_cost(session_id, new_current, source=cost_source if priced else None)
-    # Per-user daily rollup (policy-gated; this is the per-turn delta).
-    _record_daily_cost(conv, cost_delta, conversation_store)
+    record_cost(
+        session_id,
+        new_current,
+        source="credits" if credit_meter else (cost_source if priced else None),
+    )
+    # Credits are not USD, so they do not move the daily dollar rollup.
+    _record_daily_cost(conv, 0.0 if credit_meter else cost_delta, conversation_store)
     return _priced_cost_for_display(new_current)
 
 

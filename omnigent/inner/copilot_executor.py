@@ -1022,7 +1022,7 @@ def _accumulate_usage(acc: dict[str, int], data: dict[str, Any]) -> None:  # typ
     Copilot emits one usage event per underlying model call, so a turn with
     tool round-trips reports usage several times; we accumulate. The
     authoritative AI-credit cost (``copilotUsage.totalNanoAiu``, in nano-AIU) is
-    summed too and converted to ``cost_usd`` in :func:`_finalize_usage`.
+    summed too and reported as AIC credits in :func:`_finalize_usage`.
     """
     mapping = {
         "inputTokens": "input_tokens",
@@ -1049,8 +1049,10 @@ def _finalize_usage(acc: dict[str, int]) -> dict[str, Any] | None:  # type: igno
     nano_aiu = usage.pop("_cost_nano_aiu", 0)
     usage["total_tokens"] = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
     if nano_aiu:
-        # 1 AIC = 1e9 nano-AIU = $0.01, so nano-AIU / 1e11 = USD.
-        usage["cost_usd"] = nano_aiu / 1e11
+        # 1 AIC = 1e9 nano-AIU. The dollar price of a credit is not a harness
+        # cost: the relay stores this count as a credit meter.
+        usage["credits"] = nano_aiu / 1e9
+        usage["cost_source"] = "credits"
     return usage
 
 

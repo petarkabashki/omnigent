@@ -997,11 +997,17 @@ class Usage(BaseModel):
         ``None`` when the executor doesn't report it; the cost path
         then falls back to the session override / spec model.
     :param cost_usd: Authoritative per-turn cost in USD reported
-        directly by the harness/provider (e.g. GitHub Copilot's
-        AI-credit total). When present, the server-side cost path uses
-        it in preference to the catalog token-price estimate; ``None``
-        when the harness doesn't report a cost (the common case, where
-        cost is computed from token counts x catalog pricing).
+        directly by the harness/provider. When present, the server-side
+        cost path uses it in preference to the catalog token-price
+        estimate; ``None`` when the harness doesn't report a dollar
+        cost (the common case, where cost is computed from token
+        counts x catalog pricing). A credit meter is not this field.
+    :param credits: Non-dollar meter for this turn, e.g. Copilot AIC.
+        Meaningful together with ``cost_source="credits"``. ``None``
+        when the turn is priced in dollars or not priced.
+    :param cost_source: What ``cost_usd`` or ``credits`` is:
+        ``"harness"``, ``"catalog"``, or ``"credits"``. ``None`` when
+        the executor did not declare one.
     """
 
     input_tokens: int = 0
@@ -1013,6 +1019,8 @@ class Usage(BaseModel):
     cache_creation_input_tokens: int = 0
     model: str | None = None
     cost_usd: float | None = None
+    credits: float | None = None
+    cost_source: str | None = None
 
 
 class ErrorDetail(BaseModel):

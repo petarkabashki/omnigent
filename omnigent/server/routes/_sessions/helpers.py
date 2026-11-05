@@ -2209,7 +2209,12 @@ def _priced_cost_for_display(usage: dict[str, Any]) -> float | None:
         ``{"input_tokens": 1200, "total_cost_usd": 0.42}`` (priced) or
         ``{"input_tokens": 1200}`` (unpriced — no cost key).
     :returns: The cumulative cost in USD when priced, else ``None``.
+        ``None`` when ``cost_unit`` is ``"credits"``: that total is a
+        credit count stored in the dollar key, and the badge would print
+        it as USD.
     """
+    if usage.get("cost_unit") == "credits":
+        return None
     if "total_cost_usd" not in usage:
         return None
     try:

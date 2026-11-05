@@ -493,7 +493,8 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
     Apply a usage *delta* to *current* in place (add semantics, nested-aware).
 
     Flat numeric keys are summed; ``"by_model"`` sub-dicts are merged by
-    model id, summing each model's sub-keys independently. Used by
+    model id, summing each model's sub-keys independently. ``cost_unit``
+    ``"credits"`` is copied as a marker, not added. Used by
     :meth:`ConversationStore.increment_session_usage` implementations to
     keep the merge logic in one place.
 
@@ -514,6 +515,10 @@ def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) ->
                     if not _is_addable_usage_increment(sub_value):
                         continue
                     bucket[sub_key] = bucket.get(sub_key, 0) + sub_value
+        elif key == "cost_unit" and value == "credits":
+            # The credit count lives in ``total_cost_usd``. This marker keeps
+            # readers from treating that number as dollars.
+            current["cost_unit"] = "credits"
         elif _is_addable_usage_increment(value):
             current[key] = current.get(key, 0) + value
 

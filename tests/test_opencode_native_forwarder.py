@@ -803,6 +803,7 @@ async def test_step_ended_posts_session_usage() -> None:
     )
     usage = _datas(server.posts, "external_session_usage")[-1]
     assert usage["cumulative_cost_usd"] == 0.012
+    assert usage["cost_source"] == "harness"
     assert usage["cumulative_input_tokens"] == 1000
     assert usage["cumulative_output_tokens"] == 50
     assert usage["cumulative_cache_read_input_tokens"] == 200
@@ -832,6 +833,7 @@ async def test_usage_updated_overrides_cumulative_totals() -> None:
     )
     usage = _datas(server.posts, "external_session_usage")[-1]
     assert usage["cumulative_cost_usd"] == 0.05
+    assert usage["cost_source"] == "harness"
     assert usage["cumulative_input_tokens"] == 900
     assert usage["cumulative_output_tokens"] == 40
     assert usage["cumulative_cache_read_input_tokens"] == 30
