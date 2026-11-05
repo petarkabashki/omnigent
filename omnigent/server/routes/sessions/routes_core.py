@@ -230,13 +230,16 @@ from omnigent.server.schemas import (
     SessionResponse,
     UpdateSessionRequest,
 )
+from omnigent.server.session_aliases import Namespace, release_role_after_lifecycle
 from omnigent.server.session_orchestration import require_orchestration_source
 from omnigent.server.shadow_routing import shadow_route_created_session
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
-    ALIAS_LABEL_KEY,
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY as _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
+)
+from omnigent.stores.conversation_store import (
     EXECUTOR_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
@@ -246,9 +249,6 @@ from omnigent.stores.conversation_store import (
     ConversationNotFoundError,
     pinned_label_key,
     runner_seen_is_fresh,
-)
-from omnigent.stores.conversation_store import (
-    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY as _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
@@ -263,9 +263,12 @@ from omnigent.util.reasoning_effort import (
     validate_effort,
 )
 from omnigent.util.session_lifecycle import (
+    CLOSED_LABEL_KEY,
+    CLOSED_LABEL_VALUE,
+    has_closed_title_marker,
     labels_with_closed_status,
 )
-from omnigent.util.uuid import uuid_to_bytes
+from omnigent.util.uuid import normalize_uuid, uuid_to_bytes
 from omnigent.version import VERSION
 
 
@@ -588,7 +591,28 @@ def register_core_routes(
                         with contextlib.suppress(Exception):
                             await asyncio.to_thread(artifact_store.delete, blob_key)
             await conversation_store.delete_conversation(session_id)
+            await asyncio.to_thread(
+                release_role_after_lifecycle,
+                conversation_store,
+                project_store,
+                session_id,
+                reason="delete",
+            )
             raise
+
+    async def _close_orphan_session(session_id: str) -> None:
+        """Close a session whose role claim failed, so it never counts as a live peer."""
+        await asyncio.to_thread(
+            conversation_store.set_labels, session_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
+        )
+        await asyncio.to_thread(conversation_store.update_conversation, session_id, archived=True)
+        await asyncio.to_thread(
+            release_role_after_lifecycle,
+            conversation_store,
+            project_store,
+            session_id,
+            reason="claim_lost",
+        )
 
     async def _schedule_managed_launch(
         request: Request,
@@ -1259,14 +1283,20 @@ def register_core_routes(
             )
         if body.host_needs is not None:
             body = await _place_session_host(request, body, user_id, orchestration_source)
+        if body.overlay_ref is not None and body.alias is None:
+            raise OmnigentError("overlay_ref requires alias", code=ErrorCode.INVALID_INPUT)
         if body.alias is not None:
             if body.parent_session_id is not None:
                 raise OmnigentError(
                     "Only top-level sessions can claim an alias",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            from omnigent.server.session_aliases import check_alias_for_new_session
+            from omnigent.server.session_aliases import (
+                check_alias_for_new_session,
+                validate_overlay_ref,
+            )
 
+            validate_overlay_ref(body.overlay_ref)
             await asyncio.to_thread(
                 check_alias_for_new_session,
                 conversation_store,
@@ -1293,10 +1323,7 @@ def register_core_routes(
             project_store=project_store,
             created_by_session_id=source.id if source is not None else None,
         )
-        # Claimed before the response, so the caller never holds an unaddressable id.
         new_labels: dict[str, str] = {}
-        if body.alias is not None:
-            new_labels[ALIAS_LABEL_KEY] = body.alias.strip()
         if executor_name is not None:
             new_labels[EXECUTOR_LABEL_KEY] = executor_name
         if inherit_project and source is not None:
@@ -1308,6 +1335,25 @@ def register_core_routes(
                 new_labels[PROJECT_LABEL_KEY] = source.labels[PROJECT_LABEL_KEY]
         if new_labels:
             await asyncio.to_thread(conversation_store.set_labels, resp.id, new_labels)
+        # Claimed once filed, and before the response and any launch, so the
+        # caller never holds an unaddressable id and a lost claim stops nothing.
+        if body.alias is not None:
+            from omnigent.server.session_aliases import claim_alias_for_new_session
+
+            try:
+                await asyncio.to_thread(
+                    claim_alias_for_new_session,
+                    conversation_store,
+                    project_store,
+                    session_id=resp.id,
+                    user_id=user_id,
+                    alias=body.alias,
+                    overlay_ref=body.overlay_ref,
+                    actor="owner" if source is None else "agent",
+                )
+            except Exception:
+                await _close_orphan_session(resp.id)
+                raise
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
         # Without this, the runner doesn't know this session exists
@@ -1820,18 +1866,6 @@ def register_core_routes(
 
     # ── Session aliases (``Role`` / ``project/Role``) ─────────────
 
-    def _alias_entry(session: Conversation, user_id: str | None) -> dict[str, Any]:
-        from omnigent.server.session_aliases import session_handle, session_project_name
-
-        return {
-            "session_id": session.id,
-            "alias": session.labels.get(ALIAS_LABEL_KEY),
-            "project": session_project_name(session, project_store, user_id),
-            "handle": session_handle(session, project_store, user_id),
-            "title": session.title,
-            "host_id": session.host_id,
-        }
-
     @router.get("/sessions/aliases")
     async def list_session_aliases(
         request: Request,
@@ -1839,7 +1873,11 @@ def register_core_routes(
         alias: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """List the caller's live aliased sessions, optionally by project path or alias."""
-        from omnigent.server.session_aliases import find_aliased_sessions, resolve_namespace
+        from omnigent.server.session_aliases import (
+            alias_entries,
+            find_aliased_sessions,
+            resolve_namespace,
+        )
 
         user_id = _require_user(request, auth_provider)
 
@@ -1857,7 +1895,39 @@ def register_core_routes(
                 alias=alias,
                 namespace=namespace,
             )
-            return {"data": [_alias_entry(session, user_id) for session in found]}
+            return {"data": alias_entries(found, project_store, user_id)}
+
+        return await asyncio.to_thread(_list)
+
+    @router.get("/sessions/aliases/roles")
+    async def list_namespace_session_roles(
+        request: Request,
+        namespace: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """List one namespace's roles; ``sys_role_list`` reads this.
+
+        ``namespace`` is a path (``/`` = the unfiled root); omitted, it is the
+        orchestration source's namespace, else the root.
+        """
+        from omnigent.server.session_aliases import list_namespace_roles, source_namespace
+
+        user_id = _require_user(request, auth_provider)
+
+        def _list() -> dict[str, Any]:
+            source = _alias_resolution_source(request, user_id)
+            resolved = source_namespace(
+                conversation_store,
+                project_store,
+                user_id=user_id,
+                source=None if namespace is not None else source,
+                view=namespace,
+            )
+            return {
+                "namespace": resolved.path or "/",
+                "data": list_namespace_roles(
+                    conversation_store, project_store, namespace=resolved, user_id=user_id
+                ),
+            }
 
         return await asyncio.to_thread(_list)
 
@@ -1865,17 +1935,21 @@ def register_core_routes(
     async def resolve_session_alias(
         request: Request,
         address: str = Query(...),
+        namespace: str | None = Query(default=None),
+        workspace: str | None = Query(default=None),
     ) -> dict[str, Any]:
-        """Resolve ``Role``, ``project/Role`` or a UUID to one owned session.
+        """Resolve ``Role``, ``/Role``, ``path/Role`` or a UUID to one owned session.
 
-        A bare ``Role`` is relative to the orchestration source's project when
-        a runner sends the source header, otherwise to unfiled sessions.
+        A bare ``Role`` is relative to the orchestration source's project when a
+        runner sends the source header, else to ``namespace`` (the project a
+        picker has in view), else to the project of ``workspace`` (the CLI's
+        working directory), else to unfiled sessions.
         """
         user_id = _require_user(request, auth_provider)
 
         def _resolve() -> dict[str, Any]:
-            source = _alias_resolution_source(request, user_id)
-            return _resolve_one_alias(address, user_id, source)
+            default = _default_alias_namespace(request, user_id, namespace, workspace)
+            return _resolve_one_alias(address, user_id, default)
 
         return await asyncio.to_thread(_resolve)
 
@@ -1895,12 +1969,14 @@ def register_core_routes(
             )
 
         def _resolve_all() -> dict[str, Any]:
-            source = _alias_resolution_source(request, user_id)
+            default = _default_alias_namespace(
+                request, user_id, payload.get("namespace"), payload.get("workspace")
+            )
             rows: list[dict[str, Any]] = []
             for address in addresses:
                 try:
                     rows.append(
-                        {"address": address, **_resolve_one_alias(address, user_id, source)}
+                        {"address": address, **_resolve_one_alias(address, user_id, default)}
                     )
                 except (OmnigentError, HTTPException) as exc:
                     detail = exc.message if isinstance(exc, OmnigentError) else exc.detail
@@ -1915,14 +1991,37 @@ def register_core_routes(
             return None
         return require_orchestration_source(request, user_id, conversation_store, permission_store)
 
+    def _default_alias_namespace(
+        request: Request,
+        user_id: str | None,
+        namespace: object,
+        workspace: object,
+    ) -> Namespace:
+        """The namespace a bare ``Role`` is relative to for this caller."""
+        from omnigent.server.session_aliases import source_namespace
+
+        return source_namespace(
+            conversation_store,
+            project_store,
+            user_id=user_id,
+            source=_alias_resolution_source(request, user_id),
+            view=namespace if isinstance(namespace, str) else None,
+            workspace=workspace if isinstance(workspace, str) else None,
+        )
+
     def _resolve_one_alias(
-        address: str, user_id: str | None, source: Conversation | None
+        address: str, user_id: str | None, default_namespace: Namespace
     ) -> dict[str, Any]:
         from omnigent.server.session_aliases import resolve_session_address
         from omnigent.server.session_orchestration import require_owned_session
 
         session_id = resolve_session_address(
-            conversation_store, project_store, address=address, user_id=user_id, source=source
+            conversation_store,
+            project_store,
+            address=address,
+            user_id=user_id,
+            source=None,
+            default_namespace=default_namespace,
         )
         if permission_store is not None and user_id:
             session = require_owned_session(
@@ -1934,9 +2033,17 @@ def register_core_routes(
                 raise _session_not_found()
         return _alias_entry(session, user_id)
 
+    def _alias_entry(session: Conversation, user_id: str | None) -> dict[str, Any]:
+        """One session's alias row, whether or not its labels are current yet."""
+        from omnigent.server.session_aliases import alias_entries
+
+        fresh = conversation_store.get_conversation(session.id) or session
+        entries = alias_entries([fresh], project_store, user_id)
+        return entries[0] if entries else {"session_id": session.id, "alias": None}
+
     @router.put("/sessions/{session_id}/alias")
     async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
-        """Set the owner-chosen alias, unique within the session's project."""
+        """Take or create the named role in the session's own namespace."""
         from omnigent.server.session_aliases import set_session_alias
 
         user_id = _require_user(request, auth_provider)
@@ -1955,22 +2062,22 @@ def register_core_routes(
             set_session_alias(
                 conversation_store, project_store, session=session, user_id=user_id, alias=alias
             )
-            updated = conversation_store.get_conversation(session.id)
-            assert updated is not None
-            return _alias_entry(updated, user_id)
+            return _alias_entry(session, user_id)
 
         return await asyncio.to_thread(_set)
 
     @router.delete("/sessions/{session_id}/alias", status_code=204)
     async def delete_session_alias(request: Request, session_id: str) -> Response:
-        """Clear a session's alias."""
+        """Release the session's role; a failed release is an error, never a silent success."""
         user_id = _require_user(request, auth_provider)
         if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
             raise OmnigentError("Agents cannot change session aliases", code=ErrorCode.FORBIDDEN)
         await _require_access_and_level(
             user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
         )
-        await asyncio.to_thread(conversation_store.delete_label, session_id, ALIAS_LABEL_KEY)
+        from omnigent.server.session_aliases import clear_session_alias
+
+        await asyncio.to_thread(clear_session_alias, conversation_store, project_store, session_id)
         return Response(status_code=204)
 
     # ── PUT /sessions/{session_id}/read-state ─────────────────────
@@ -4105,6 +4212,34 @@ def register_core_routes(
             await asyncio.to_thread(
                 conversation_store.delete_label, session_id, pinned_label_key(user_id)
             )
+        # Unarchive too: a release missed at archive time would otherwise bring the
+        # session back addressed. It never retakes the role.
+        closing = (body.labels or {}).get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE or (
+            has_closed_title_marker(body.title)
+        )
+        relabelled = (body.labels or {}).get(
+            PROJECT_LABEL_KEY, updated.labels.get(PROJECT_LABEL_KEY)
+        )
+        if (
+            body.archived is not None
+            or closing
+            or relabelled != updated.labels.get(PROJECT_LABEL_KEY)
+        ):
+            await asyncio.to_thread(
+                release_role_after_lifecycle,
+                conversation_store,
+                project_store,
+                session_id,
+                reason=(
+                    "close"
+                    if closing
+                    else "archive"
+                    if body.archived is True
+                    else "unarchive"
+                    if body.archived is False
+                    else "moved"
+                ),
+            )
         if requested_codex_collaboration_mode is not None:
             _publish_collaboration_mode(
                 session_id,
@@ -4180,6 +4315,15 @@ def register_core_routes(
                 if not filed:
                     # The session was resolved above, so the project went meanwhile.
                     raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+            # A role belongs to its namespace, so moving out of it gives the role up.
+            if normalize_uuid(target_project_id or None) != updated.project_id:
+                await asyncio.to_thread(
+                    release_role_after_lifecycle,
+                    conversation_store,
+                    project_store,
+                    session_id,
+                    reason="moved",
+                )
         level = await _get_permission_level(user_id, session_id, permission_store)
         # PATCH callers consume only the snapshot's scalar fields (clients
         # hydrate transcripts via GET /sessions/{id}/items), so skip the

@@ -23,6 +23,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 
 if TYPE_CHECKING:
     from omnigent.stores.conversation_store import ConversationStore, ProjectSessionSweep
+    from omnigent.stores.role_store import RoleStore
 
 # Deepest allowed namespace path (segments), cycle-guard bound for path walks.
 MAX_PROJECT_DEPTH: Final = 8
@@ -169,7 +170,12 @@ class ProjectStore(ABC):
 
     Manages the lifecycle of projects (CRUD). All reads and writes are scoped
     by ``user_id`` because projects are owner-private.
+
+    :cvar roles: The role store on the same database, or ``None`` when this
+        backend has no role rows and aliases stay plain labels.
     """
+
+    roles: RoleStore | None = None
 
     def __init__(self, storage_location: str) -> None:
         """

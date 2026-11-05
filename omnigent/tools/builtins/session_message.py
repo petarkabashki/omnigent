@@ -14,7 +14,8 @@ class SysSessionMessageTool(Tool):
     def description(cls) -> str:
         return (
             "Send work to another session owned by the same user, by session ID or by "
-            "alias: 'Role' (your project) or 'project/Role' (e.g. 'py-qwant/Architect'). "
+            "alias: 'Role' (your project), 'project/Role' (e.g. 'py-qwant/Architect') or '/Role' "
+            "(the owner's unfiled roles); sys_role_list shows what exists. "
             "Messages you receive start with the sender's handle; reply to it by name. "
             "The result includes message_id (msg_<hex>), which the receiver sees in the header "
             "'[Message from <handle> (session <id>, message <msg_id>)]', useful for threading "
@@ -41,7 +42,9 @@ class SysSessionMessageTool(Tool):
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Destination session ID, 'Role' or 'project/Role'.",
+                            "description": (
+                                "Destination session ID, 'Role', 'project/Role' or '/Role'."
+                            ),
                         },
                         "message": {"type": "string", "minLength": 1, "maxLength": 8000},
                     },

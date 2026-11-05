@@ -302,6 +302,7 @@ from omnigent.server.schemas import (
     ResetSessionResponse,
     SessionEventInput,
 )
+from omnigent.server.session_aliases import release_role_after_lifecycle
 from omnigent.server.session_live_state import last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
@@ -863,6 +864,10 @@ def register_events_routes(
     """Register the events, stream, and delete routes on router."""
 
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
+
+    def _mark_closed(session_id: str) -> None:
+        conversation_store.set_labels(session_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
+        release_role_after_lifecycle(conversation_store, project_store, session_id, reason="close")
 
     def _has_bound_runner_authority(
         request: Request | _RunnerEventContext | StartupInputContext, conv: Any
@@ -1493,9 +1498,7 @@ def register_events_routes(
             getattr(request.app.state, "host_registry", None),
         ):
             # The ephemeral fork died with its runner; keep the transcript read-only.
-            await asyncio.to_thread(
-                conversation_store.set_labels, conv.id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}
-            )
+            await asyncio.to_thread(_mark_closed, conv.id)
             raise OmnigentError(
                 "This side chat ended when its runner restarted and can't be continued.",
                 code=ErrorCode.CONFLICT,
@@ -1881,11 +1884,7 @@ def register_events_routes(
                             code=ErrorCode.CONFLICT,
                         )
                     if stop_codex_side_chat:
-                        await asyncio.to_thread(
-                            conversation_store.set_labels,
-                            session_id,
-                            {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
-                        )
+                        await asyncio.to_thread(_mark_closed, session_id)
                     return {"queued": False}
                 if (
                     not isinstance(response_id, str)
@@ -1941,11 +1940,7 @@ def register_events_routes(
             elif not codex_child:
                 pending_inputs.mark_interrupted(session_id, queued_pending_ids)
             if stop_codex_side_chat:
-                await asyncio.to_thread(
-                    conversation_store.set_labels,
-                    session_id,
-                    {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
-                )
+                await asyncio.to_thread(_mark_closed, session_id)
             return {"queued": False}
         if body.type == _STOP_SESSION_TYPE:
             # Fence the cancelled turn, same as interrupt.
@@ -4026,6 +4021,13 @@ def register_events_routes(
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()
+        await asyncio.to_thread(
+            release_role_after_lifecycle,
+            conversation_store,
+            project_store,
+            session_id,
+            reason="delete",
+        )
         # A relay still inside an offline runner's reconnect grace must not
         # fail the deleted turns when that grace expires.
         _cancel_runner_relays([session_id, *descendant_ids])

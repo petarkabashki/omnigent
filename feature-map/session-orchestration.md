@@ -18,6 +18,17 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   `created_by_session_id` so managers can identify their workers across restarts;
   `sys_session_list` with `include_archived` also lists archived workers, each
   marked `archived`.
+- `roles`: a row in `roles` decides who holds a name in an owner's namespace; the
+  `omnigent.alias`, `omnigent.role_id` and `omnigent.role_overlay` labels mirror it
+  and clients cannot set them. `PUT /v1/sessions/{id}/alias` takes or creates a role
+  in the session's namespace, `DELETE` releases it, and `POST /v1/sessions` with
+  `alias` (and optional `overlay_ref`) creates the session, then claims. Close,
+  archive, unarchive, delete, moving project and deleting the project all release;
+  nothing retakes. Unfiled roles print as `/Role`. A bare `Role` is relative to the
+  agent's project, the picker's `namespace`, or the CLI's `workspace`, else the root.
+  Resolve repairs labels to match the row and never creates one. Names with no row
+  fall back to the label scan; legacy label-projects have no rows. `sys_role_list`
+  lists a namespace's held and vacant roles.
 - `kill-switch`: an explicit disable refuses new peer sends and independent
   creates, even if an enable is also listed, and hides the Automations page's
   trigger templates (`/v1/info` reports `features.session_orchestration`). Restart every server replica to

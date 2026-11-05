@@ -1563,6 +1563,8 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         e.g. ``"debugging auth flow"``.
     :param labels: Initial guardrails labels to set on the session.
     :param alias: Role alias (``Role``) claimed at creation; top-level, owner-made sessions only.
+    :param overlay_ref: Role-file name the claimed role loads instead of its own
+        name, so a role can reuse another's file. Requires ``alias``.
     :param executor: Executor profile name; unset harness/model/effort fields take its values.
     :param parent_session_id: Parent session for sub-agent spawns.
         When set, the server inherits the parent's ``runner_id``
@@ -1715,6 +1717,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     labels: dict[str, str] = Field(default_factory=dict)
     alias: str | None = None
+    overlay_ref: str | None = None
     # Name from ~/.omnigent/executors.yaml; fills agent/harness/model/effort left unset.
     executor: str | None = None
     # Values for the alias's role ``${params.<name>}``; stored as

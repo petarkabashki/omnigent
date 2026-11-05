@@ -31,8 +31,9 @@ from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import SqlProject
 from omnigent.db.utils import get_or_create_engine
-from omnigent.entities import MessageData, NewConversationItem
+from omnigent.entities import MessageData, NewConversationItem, Role
 from omnigent.errors import OmnigentError
+from omnigent.server import session_aliases
 from omnigent.server.auth import (
     LEVEL_EDIT,
     LEVEL_OWNER,
@@ -43,8 +44,10 @@ from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.sessions import create_sessions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    ROLE_ID_LABEL_KEY,
     pinned_label_key,
 )
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -733,6 +736,123 @@ def test_archive_delete_sweeps_members_then_runs_side_effects(
     assert (swept.archived, swept.project_id) == (True, None)
     assert PROJECT_LABEL_KEY not in swept.labels
     assert pinned_label_key(ALICE) not in swept.labels
+
+
+def _take_role(client: TestClient, session_id: str, alias: str) -> None:
+    response = client.put(
+        f"/v1/sessions/{session_id}/alias", json={"alias": alias}, headers=_hdr(ALICE)
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_archive_delete_releases_roles_held_by_swept_members(
+    db_uri: str, archive_effects: dict[str, list[str]]
+) -> None:
+    """The sweep is set-based, so only the post-commit effects can release its members."""
+    _ensure_agent(db_uri)
+    holder, archived_holder, bystander = (_seed_owned_session(db_uri, ALICE) for _ in range(3))
+    app = _multi_user_app(db_uri)
+    client = TestClient(app)
+    project = _alice_project_with(db_uri, client, [holder, archived_holder, bystander])
+    _take_role(client, holder, "Architect")
+    _take_role(client, archived_holder, "Bench")
+    store = SqlAlchemyConversationStore(db_uri)
+    # An archive whose release never ran: the sweep skips it for the archive effects.
+    store.update_conversation_with_changes(archived_holder, archived=True)
+    roles = app.state.project_store.roles
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 200, response.text
+    for session_id, name in ((holder, "Architect"), (archived_holder, "Bench")):
+        role = roles.find(name, user_id=ALICE, project_id=project["id"])
+        assert role.holder_session_id is None
+        assert role.previous_session_id == session_id
+        event = roles.events(role.id)[-1]
+        assert (event.kind, event.reason, event.actor) == ("release", "project_delete", "system")
+        assert event.role_path == "Doomed"
+        labels = store.get_conversation(session_id).labels
+        assert not {ALIAS_LABEL_KEY, ROLE_ID_LABEL_KEY} & set(labels)
+    assert (
+        client.get(
+            "/v1/sessions/aliases/resolve",
+            params={"address": "Architect"},
+            headers=_hdr(ALICE),
+        ).status_code
+        == 404
+    )
+
+
+def test_a_failed_release_does_not_fail_the_committed_delete(
+    db_uri: str,
+    archive_effects: dict[str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later holders are still released, and the next take repairs the failed one."""
+    _ensure_agent(db_uri)
+    first, second = (_seed_owned_session(db_uri, ALICE) for _ in range(2))
+    app = _multi_user_app(db_uri)
+    client = TestClient(app)
+    project = _alice_project_with(db_uri, client, [first, second])
+    _take_role(client, first, "One")
+    _take_role(client, second, "Two")
+    roles = app.state.project_store.roles
+    real_release = roles.release
+
+    def fail_first(role: Role, **kwargs: object) -> Role | None:
+        if role.holder_session_id == first:
+            raise RuntimeError("row write failed")
+        return real_release(role, **kwargs)
+
+    monkeypatch.setattr(roles, "release", fail_first)
+    monkeypatch.setattr(session_aliases, "_RELEASE_HOOK_BACKOFF_S", 0)
+
+    response = _archive_delete(client, project)
+
+    assert response.status_code == 200, response.text
+    assert roles.find("One", user_id=ALICE, project_id=project["id"]).holder_session_id == first
+    assert roles.find("Two", user_id=ALICE, project_id=project["id"]).holder_session_id is None
+
+
+def test_plain_delete_releases_the_projects_roles(db_uri: str) -> None:
+    """Members stay filed for the caller to unfile, but their namespace is gone."""
+    _ensure_agent(db_uri)
+    holder = _seed_owned_session(db_uri, ALICE)
+    app = _multi_user_app(db_uri)
+    client = TestClient(app)
+    project = _alice_project_with(db_uri, client, [holder])
+    _take_role(client, holder, "Architect")
+
+    response = client.delete(f"/v1/projects/{project['id']}", headers=_hdr(ALICE))
+
+    assert response.status_code == 200, response.text
+    roles = app.state.project_store.roles
+    role = roles.find("Architect", user_id=ALICE, project_id=project["id"])
+    assert role.holder_session_id is None
+    assert roles.events(role.id)[-1].role_path == "Doomed"
+
+
+def test_refiling_a_holder_releases_its_role(db_uri: str) -> None:
+    _ensure_agent(db_uri)
+    holder = _seed_owned_session(db_uri, ALICE)
+    app = _multi_user_app(db_uri)
+    client = TestClient(app)
+    project = _alice_project_with(db_uri, client, [holder])
+    _take_role(client, holder, "Architect")
+    roles = app.state.project_store.roles
+
+    same = client.patch(
+        f"/v1/sessions/{holder}", json={"project_id": project["id"]}, headers=_hdr(ALICE)
+    )
+    assert same.status_code == 200, same.text
+    assert roles.held_by([holder])
+
+    moved = client.patch(f"/v1/sessions/{holder}", json={"project_id": ""}, headers=_hdr(ALICE))
+
+    assert moved.status_code == 200, moved.text
+    assert roles.held_by([holder]) == []
+    role = roles.find("Architect", user_id=ALICE, project_id=project["id"])
+    assert roles.events(role.id)[-1].reason == "moved"
 
 
 def test_archive_delete_sweeps_own_label_members_only(

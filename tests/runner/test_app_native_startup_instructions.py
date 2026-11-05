@@ -98,6 +98,15 @@ def test_native_startup_instructions_append_role_file(
     assert composed is not None
     assert composed.startswith("Be concise.\n\n## Role: Architect\n")
     assert composed.endswith("Own the server design.")
+    # The overlay label picks the file; both loaders share one resolver.
+    (roles / "Bench.md").write_text("Review the design.\n")
+    overlaid = _native_startup_raw_instructions_from_spec(
+        _spec("Be concise."),
+        init({"omnigent.alias": "reviewer-7", "omnigent.role_overlay": "Bench"}),
+    )
+    assert overlaid is not None
+    assert overlaid.startswith("Be concise.\n\n## Role: Bench\n")
+    assert overlaid.endswith("Review the design.")
     # No alias, or a spec without instructions, still behaves as before.
     assert _native_startup_raw_instructions_from_spec(_spec("Be concise."), init({})) == (
         "Be concise."

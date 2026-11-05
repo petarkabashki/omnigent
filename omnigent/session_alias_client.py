@@ -54,8 +54,14 @@ def list_projects(client: httpx.Client) -> list[dict[str, Any]]:
 
 
 def resolve_address(client: httpx.Client, address: str) -> dict[str, Any]:
-    """Resolve a session id, ``project/Role`` or (unfiled) ``Role``."""
-    return dict(_checked(client.get("/v1/sessions/aliases/resolve", params={"address": address})))
+    """Resolve a session id, ``project/Role``, ``/Role`` or a bare ``Role``.
+
+    A bare ``Role`` is relative to the project of the working directory, else the root.
+    """
+    params = {"address": address}
+    if "/" not in address:
+        params["workspace"] = os.getcwd()
+    return dict(_checked(client.get("/v1/sessions/aliases/resolve", params=params)))
 
 
 def set_alias(client: httpx.Client, session_id: str, alias: str) -> dict[str, Any]:

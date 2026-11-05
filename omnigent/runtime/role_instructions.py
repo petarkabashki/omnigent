@@ -2,8 +2,9 @@
 
 A session aliased ``Architect`` loads ``~/.omnigent/roles/Architect.md`` (or
 ``Architect/ROLE.md``) as the base and layers
-``<workspace>/.omnigent/roles/Architect.md`` on top. A role file is Markdown
-with optional YAML front matter::
+``<workspace>/.omnigent/roles/Architect.md`` on top. An ``omnigent.role_overlay``
+label names the file instead, so a role can reuse another's file while keeping
+its own alias. A role file is Markdown with optional YAML front matter::
 
     ---
     description: Owns the design
@@ -306,13 +307,15 @@ def load_role_overlay(
     *,
     session_params: Mapping[str, str] | None = None,
     home: Path | None = None,
+    session_alias: str | None = None,
 ) -> RoleOverlay | None:
     """Merge the home and workspace role files for ``alias``.
 
-    :param alias: The session's role alias (label ``omnigent.alias``).
+    :param alias: The role-file name (see :func:`load_session_role_overlay`).
     :param workspace: The session's workspace; its role layers over the home one.
     :param session_params: Session-level params; they override file params.
     :param home: Home directory override, for tests.
+    :param session_alias: What ``${alias}`` expands to when it is not the file name.
     :returns: The merged overlay, or ``None`` when no role file exists.
     """
     if not alias or not ALIAS_PATTERN.match(alias):
@@ -333,7 +336,7 @@ def load_role_overlay(
     for source, meta, _ in loaded:
         params.update(_string_params(meta.get("params"), source.path))
     params.update(session_params or {})
-    values = _placeholder_values(alias, workspace, params)
+    values = _placeholder_values(session_alias or alias, workspace, params)
 
     description: str | None = None
     sections: list[str] = []
@@ -378,6 +381,36 @@ def load_role_instructions(
     return overlay.instructions if overlay is not None else None
 
 
+def load_session_role_overlay(
+    labels: Mapping[str, str] | None,
+    workspace: str | None,
+    *,
+    home: Path | None = None,
+) -> RoleOverlay | None:
+    """Load the overlay a session's labels name; the one resolver for every loader.
+
+    ``omnigent.role_overlay`` wins over ``omnigent.alias`` when set. The session
+    keeps its own alias for addressing and ``${alias}``. Malformed names load
+    nothing, so a label can never point outside the roles directories.
+
+    :param labels: The session's labels.
+    :param workspace: The session's workspace.
+    :param home: Home directory override, for tests.
+    :returns: The merged overlay, or ``None`` when no role file exists.
+    """
+    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY
+
+    labels = labels or {}
+    alias = labels.get(ALIAS_LABEL_KEY)
+    return load_role_overlay(
+        labels.get(ROLE_OVERLAY_LABEL_KEY) or alias,
+        workspace,
+        session_params=role_params_from_labels(labels),
+        home=home,
+        session_alias=alias,
+    )
+
+
 def apply_role_overlay(spec: AgentSpec, overlay: RoleOverlay) -> AgentSpec:
     """Return a copy of ``spec`` with the role's text, params, skills and MCP servers.
 
@@ -400,11 +433,6 @@ def apply_role_overlay(spec: AgentSpec, overlay: RoleOverlay) -> AgentSpec:
 def apply_session_role(
     spec: AgentSpec, labels: Mapping[str, str] | None, workspace: str | None
 ) -> AgentSpec:
-    """Overlay the role named by the session's ``omnigent.alias`` label, if any."""
-    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
-
-    labels = labels or {}
-    overlay = load_role_overlay(
-        labels.get(ALIAS_LABEL_KEY), workspace, session_params=role_params_from_labels(labels)
-    )
+    """Overlay the role the session's labels name, if any."""
+    overlay = load_session_role_overlay(labels, workspace)
     return apply_role_overlay(spec, overlay) if overlay is not None else spec

@@ -445,6 +445,7 @@ async def test_terminal_launch_with_bridge_inject_advertises_comment_tools(
         "sys_session_list",
         "sys_session_get_history",
         "sys_session_get_info",
+        "sys_role_list",
         "sys_session_rename",
         "sys_session_message",
         "ui_open_file",

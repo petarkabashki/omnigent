@@ -118,8 +118,13 @@ PROJECT_LABEL_KEY = "omni_project"
 
 # Stable, owner-set role name ("Product", "Architect") that other sessions use
 # to address this one as ``Role`` or ``project/Role``. Unique per owner and
-# project among live top-level sessions; written only via the alias endpoint.
+# project among live top-level sessions. A mirror of the role row when one
+# exists (see ``omnigent.server.session_aliases``); never client-writable.
 ALIAS_LABEL_KEY = "omnigent.alias"
+# Mirrors of the role row the session holds, written only by take and release.
+ROLE_ID_LABEL_KEY = "omnigent.role_id"
+# Carries the row's ``overlay_ref`` when the role file is not the role's name.
+ROLE_OVERLAY_LABEL_KEY = "omnigent.role_overlay"
 
 # Name of the executor profile a session was created with, so Bench can score it.
 EXECUTOR_LABEL_KEY = "omnigent.executor"
@@ -270,6 +275,10 @@ _SANDBOX_REPO_LABEL_KEY = "omnigent.sandbox.repo"
 # ``REQUESTED_HOST_ID_LABEL_KEY`` (cross-checked by a store test).
 _SANDBOX_REQUESTED_HOST_ID_LABEL_KEY = "omnigent.sandbox.requested_host_id"
 _FORK_ONLY_DROPPED_LABEL_KEYS = IMPORT_PROVENANCE_LABEL_KEYS | {
+    # A fork is a new session: it does not hold the source's role.
+    ALIAS_LABEL_KEY,
+    ROLE_ID_LABEL_KEY,
+    ROLE_OVERLAY_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
     SIDE_CHAT_LABEL_KEY,

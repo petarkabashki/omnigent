@@ -30,6 +30,7 @@ from omnigent.tools.builtins import (
     SysCancelAsyncTool,
     SysListModelsTool,
     SysReadInboxTool,
+    SysRoleListTool,
     SysScheduledTaskCreateTool,
     SysScheduledTaskDeleteTool,
     SysScheduledTaskListTool,
@@ -461,6 +462,7 @@ class ToolManager:
         self._tools[SysSessionListTool.name()] = SysSessionListTool()
         self._tools[SysSessionGetHistoryTool.name()] = SysSessionGetHistoryTool()
         self._tools[SysSessionGetInfoTool.name()] = SysSessionGetInfoTool()
+        self._tools[SysRoleListTool.name()] = SysRoleListTool()
 
         # Session sharing: opt-in via the dedicated
         # ``agent_session_sharing`` flag, independent of spawn / declared

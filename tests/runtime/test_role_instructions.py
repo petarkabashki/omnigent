@@ -13,6 +13,7 @@ from omnigent.runtime.role_instructions import (
     apply_session_role,
     load_role_instructions,
     load_role_overlay,
+    load_session_role_overlay,
     role_params_from_labels,
     substitute_placeholders,
 )
@@ -222,3 +223,68 @@ def test_home_role_named_skill_ignores_untrusted_workspace_skills(
     names = {skill.name for skill in overlay.skills}
     # The repo's skill loads only once the workspace is trusted; home skills always do.
     assert names == ({"review", "notes"} if trusted else {"notes"})
+
+
+def test_session_overlay_label_wins_and_the_alias_stays_the_sessions_own(tmp_path: Path) -> None:
+    home, workspace = tmp_path / "home", tmp_path / "ws"
+    _write_role(home, "Bench.md", "You are ${alias}.")
+    _write_role(home, "reviewer-7.md", "never loaded")
+    labels = {"omnigent.alias": "reviewer-7", "omnigent.role_overlay": "Bench"}
+
+    overlay = load_session_role_overlay(labels, str(workspace), home=home)
+
+    assert overlay is not None and overlay.instructions is not None
+    assert overlay.instructions.startswith("## Role: Bench\n")
+    assert overlay.instructions.endswith("You are reviewer-7.")
+
+
+def test_session_overlay_falls_back_to_the_alias(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_role(home, "Bench.md", "bench text")
+
+    overlay = load_session_role_overlay({"omnigent.alias": "Bench"}, None, home=home)
+
+    assert overlay is not None and overlay.alias == "Bench"
+    assert load_session_role_overlay({}, None, home=home) is None
+    assert load_session_role_overlay(None, None, home=home) is None
+
+
+@pytest.mark.parametrize("overlay", ["../etc", "a/b", "9bad"])
+def test_a_malformed_overlay_label_loads_nothing_not_the_alias(
+    tmp_path: Path, overlay: str
+) -> None:
+    home = tmp_path / "home"
+    _write_role(home, "Bench.md", "bench text")
+    (home / ".omnigent" / "etc.md").write_text("never")
+    labels = {"omnigent.alias": "Bench", "omnigent.role_overlay": overlay}
+
+    assert load_session_role_overlay(labels, None, home=home) is None
+
+
+def test_session_params_reach_the_overlay(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_role(home, "Bench.md", "Review ${params.repo}.")
+    labels = {
+        "omnigent.alias": "reviewer-7",
+        "omnigent.role_overlay": "Bench",
+        "omnigent.role_param.repo": "demo",
+    }
+
+    overlay = load_session_role_overlay(labels, None, home=home)
+
+    assert overlay is not None and overlay.instructions is not None
+    assert overlay.instructions.endswith("Review demo.")
+
+
+def test_apply_session_role_uses_the_overlay_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_role(tmp_path, "Bench.md", "bench text")
+    spec = AgentSpec(spec_version=1, name="a", instructions="base", executor=ExecutorSpec())
+
+    applied = apply_session_role(
+        spec, {"omnigent.alias": "reviewer-7", "omnigent.role_overlay": "Bench"}, None
+    )
+
+    assert applied.instructions is not None and applied.instructions.endswith("bench text")

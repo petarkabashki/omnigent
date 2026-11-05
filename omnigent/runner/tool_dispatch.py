@@ -320,6 +320,7 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_session_close",
         "sys_session_get_info",
         "sys_session_share",
+        "sys_role_list",
     }
 )
 
@@ -562,6 +563,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
         SysAgentListTool,
     )
     from omnigent.tools.builtins.list_comments import ListCommentsTool
+    from omnigent.tools.builtins.role_list import SysRoleListTool
     from omnigent.tools.builtins.spawn import (
         SysSessionGetHistoryTool,
         SysSessionGetInfoTool,
@@ -604,6 +606,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionListTool,
             SysSessionGetHistoryTool,
             SysSessionGetInfoTool,
+            SysRoleListTool,
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
@@ -5318,7 +5321,33 @@ async def _execute_session_query_tool(
         return await _session_get_info_via_rest(args, conversation_id, server_client)
     if tool_name == "sys_session_share":
         return await _session_share_via_rest(args, conversation_id, server_client, agent_spec)
+    if tool_name == "sys_role_list":
+        return await _role_list_via_rest(args, conversation_id, server_client)
     return await _session_close_via_rest(args, conversation_id, server_client)
+
+
+async def _role_list_via_rest(
+    args: _JsonObject, conversation_id: str, server_client: httpx.AsyncClient
+) -> str:
+    """List a namespace's roles; the caller's own session anchors a bare request."""
+    namespace = args.get("namespace")
+    if namespace is not None and not isinstance(namespace, str):
+        return json.dumps({"error": "sys_role_list: namespace must be a string"})
+    try:
+        resp = await server_client.get(
+            "/v1/sessions/aliases/roles",
+            params={"namespace": namespace} if namespace is not None else None,
+            headers={ORCHESTRATION_SOURCE_HEADER: conversation_id},
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"sys_role_list failed: {exc}"})
+    if resp.status_code != 200:
+        return json.dumps(
+            {"error": f"sys_role_list returned {resp.status_code}", "detail": resp.text[:200]}
+        )
+    payload = resp.json()
+    return json.dumps({"namespace": payload.get("namespace"), "roles": payload.get("data", [])})
 
 
 async def _runner_online_or_none(
@@ -5457,7 +5486,7 @@ async def _session_get_info_via_rest(
             "created_by_session_id": (_string_mapping(snap.get("labels")) or {}).get(
                 CREATED_BY_SESSION_LABEL_KEY
             ),
-            # Owner-set role name; peers address it as 'Role' or 'project/Role'.
+            # Role name; peers address it as 'Role', 'project/Role' or '/Role'.
             "alias": (_string_mapping(snap.get("labels")) or {}).get(ALIAS_LABEL_KEY),
             "sub_agent_name": snap.get("sub_agent_name"),
             "reasoning_effort": snap.get("reasoning_effort"),

@@ -16823,14 +16823,33 @@ async def test_relay_keeps_high_descriptor_connections_alive(
 
 
 def test_clear_replacement_identity_moves_alias_title_and_project() -> None:
-    """The replacement inherits title/project; the superseded session releases its alias."""
-    from omnigent.harnesses.claude_native.bridge import clear_replacement_identity
+    """The replacement inherits title and project. The alias is claimed later."""
+    from omnigent.harnesses.claude_native.bridge import (
+        clear_alias_paths,
+        clear_replacement_identity,
+        labels_for_clear_replacement,
+    )
 
-    old = {"title": "Architect", "project_id": "proj_1", "labels": {"omnigent.alias": "Architect"}}
-    extra, released = clear_replacement_identity(old)
+    old = {
+        "title": "Architect",
+        "project_id": "proj_1",
+        "labels": {
+            "omnigent.alias": "Architect",
+            "omnigent.role_id": "role_1",
+            "omnigent.role_overlay": "Architect",
+            "omnigent.executor": "claude",
+            "team": "core",
+        },
+    }
+    extra, alias = clear_replacement_identity(old)
     assert extra == {"title": "Architect", "project_id": "proj_1"}
-    assert released == {"omnigent.alias": ""}
+    assert alias == "Architect"
+    assert labels_for_clear_replacement(old["labels"]) == {"team": "core"}
+    assert clear_alias_paths("conv_old", "conv_new") == (
+        "/v1/sessions/conv_old/alias",
+        "/v1/sessions/conv_new/alias",
+    )
 
-    extra, released = clear_replacement_identity({"title": None, "labels": {}})
+    extra, alias = clear_replacement_identity({"title": None, "labels": {}})
     assert extra == {}
-    assert released == {}
+    assert alias is None

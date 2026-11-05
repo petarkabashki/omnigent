@@ -1,21 +1,45 @@
-"""Owner-set role aliases that address top-level sessions as ``Role`` or ``path/Role``."""
+"""Role aliases that address top-level sessions as ``Role``, ``/Role`` or ``path/Role``.
 
+A row in the role store decides who holds a name; the ``omnigent.alias``,
+``omnigent.role_id`` and ``omnigent.role_overlay`` labels mirror it for readers
+on the runner. The two can live on different databases, so writes are ordered to
+fail safe and resolve repairs labels: a take writes the row first, a release
+writes the labels first, and on any drift the row wins.
+
+A name with no row falls back to the older label scan, which writes nothing.
+Legacy label-projects have no rows at all, so their aliases stay plain labels.
+"""
+
+import logging
+import time
+from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Any
 
-from omnigent.entities import Conversation
+from omnigent.entities import Conversation, Role
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.session_alias_client import ALIAS_PATTERN
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    ROLE_ID_LABEL_KEY,
+    ROLE_OVERLAY_LABEL_KEY,
     ConversationStore,
 )
 from omnigent.stores.project_store import ProjectStore, lookup_project_path
+from omnigent.stores.role_store import RoleStore
 from omnigent.util.session_lifecycle import is_session_closed
 from omnigent.util.uuid import uuid_to_bytes
 
+_logger = logging.getLogger(__name__)
+
 _PAGE_SIZE = 200
 _MAX_PAGES = 50
+_MIRROR_LABEL_KEYS = (ALIAS_LABEL_KEY, ROLE_ID_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY)
+_RELEASE_CAS_ATTEMPTS = 3
+_RELEASE_HOOK_ATTEMPTS = 3
+_RELEASE_HOOK_BACKOFF_S = 0.05
 
 
 def validate_alias(alias: object) -> str:
@@ -24,6 +48,19 @@ def validate_alias(alias: object) -> str:
     if not ALIAS_PATTERN.match(value):
         raise OmnigentError(
             "Alias must start with a letter and use 1–32 letters, digits, '-' or '_'",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return value
+
+
+def validate_overlay_ref(overlay_ref: object) -> str | None:
+    """Return a trimmed role-file name, or raise ``INVALID_INPUT``; ``None`` passes through."""
+    if overlay_ref is None:
+        return None
+    value = overlay_ref.strip() if isinstance(overlay_ref, str) else ""
+    if not ALIAS_PATTERN.match(value):
+        raise OmnigentError(
+            "Role overlay must start with a letter and use 1–32 letters, digits, '-' or '_'",
             code=ErrorCode.INVALID_INPUT,
         )
     return value
@@ -164,15 +201,19 @@ def resolve_namespace(
     )
 
 
+def role_handle(path: str, name: str) -> str:
+    """``<path>/Role``; the unfiled root always shows a leading ``/``."""
+    return f"{path}/{name}"
+
+
 def session_handle(
     session: Conversation, projects: ProjectStore | None, user_id: str | None
 ) -> str | None:
-    """``<path>/Role`` (or bare ``Role`` when unfiled) for an aliased session, else ``None``."""
+    """``<path>/Role`` (``/Role`` when unfiled) for an aliased session, else ``None``."""
     alias = session.labels.get(ALIAS_LABEL_KEY)
     if not alias:
         return None
-    project = session_project_name(session, projects, user_id)
-    return f"{project}/{alias}" if project else alias
+    return role_handle(session_project_name(session, projects, user_id), alias)
 
 
 def find_aliased_sessions(
@@ -217,6 +258,219 @@ def find_aliased_sessions(
     return found
 
 
+def _role_store(projects: ProjectStore | None) -> RoleStore | None:
+    roles = getattr(projects, "roles", None)
+    return roles if isinstance(roles, RoleStore) else None
+
+
+def _has_roles(namespace: Namespace) -> bool:
+    """Whether a namespace can hold rows: the root or exactly one first-class project."""
+    return not namespace.path or len(namespace.project_ids) == 1
+
+
+def _role_project_id(namespace: Namespace) -> str | None:
+    return next(iter(namespace.project_ids)) if namespace.path else None
+
+
+def _namespace_role(
+    roles: RoleStore | None, namespace: Namespace, name: str, user_id: str | None
+) -> Role | None:
+    if roles is None or not _has_roles(namespace):
+        return None
+    return roles.find(name, user_id=user_id, project_id=_role_project_id(namespace))
+
+
+def _is_live(session: Conversation) -> bool:
+    return not session.archived and not is_session_closed(session.labels, session.title)
+
+
+def _live_holder(conversations: ConversationStore, role: Role) -> Conversation | None:
+    """The role's holder, unless it is closed, archived or deleted."""
+    if role.holder_session_id is None:
+        return None
+    session = conversations.get_conversation(role.holder_session_id)
+    return session if session is not None and _is_live(session) else None
+
+
+def _namespace_text(path: str) -> str:
+    return path or "/"
+
+
+def _where(path: str) -> str:
+    return f"project {path!r}" if path else "unfiled sessions"
+
+
+def _mirror_labels(role: Role) -> dict[str, str]:
+    labels = {ALIAS_LABEL_KEY: role.name, ROLE_ID_LABEL_KEY: role.id}
+    if role.overlay_ref:
+        labels[ROLE_OVERLAY_LABEL_KEY] = role.overlay_ref
+    return labels
+
+
+def _write_mirror(conversations: ConversationStore, session: Conversation, role: Role) -> None:
+    conversations.set_labels(session.id, _mirror_labels(role))
+    if not role.overlay_ref and ROLE_OVERLAY_LABEL_KEY in session.labels:
+        conversations.delete_label(session.id, ROLE_OVERLAY_LABEL_KEY)
+
+
+def _clear_mirror(conversations: ConversationStore, session_id: str) -> None:
+    for key in _MIRROR_LABEL_KEYS:
+        conversations.delete_label(session_id, key)
+
+
+def _role_path(projects: ProjectStore | None, role: Role) -> str:
+    if role.project_id is None or projects is None:
+        return ""
+    return projects.get_path(role.project_id, user_id=role.user_id) or ""
+
+
+def _held_error(name: str, path: str, holder_id: str | None) -> OmnigentError:
+    return OmnigentError(
+        f"Role {name!r} in {_where(path)} is held by session {holder_id}",
+        code=ErrorCode.CONFLICT,
+    )
+
+
+def _require_in_namespace(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    session: Conversation,
+    namespace: Namespace,
+    user_id: str | None,
+) -> None:
+    """File an unfiled session into ``namespace``; refuse one filed elsewhere."""
+    own = namespace_for_session(session, projects, user_id)
+    if own.path == namespace.path:
+        return
+    if own.path:
+        target = _namespace_text(namespace.path)
+        raise OmnigentError(
+            f"Session {session.id} is filed in {own.path}; file it in {target} first "
+            f"(PATCH /v1/sessions/{session.id} with that project's id)",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    conversations.set_conversation_project(session.id, _role_project_id(namespace))
+
+
+def take_role(
+    conversations: ConversationStore,
+    projects: ProjectStore,
+    roles: RoleStore,
+    *,
+    session: Conversation,
+    namespace: Namespace,
+    user_id: str | None,
+    name: str,
+    overlay_ref: str | None = None,
+    actor: str = "owner",
+) -> Role:
+    """Make ``session`` hold ``name`` in ``namespace``, creating the row if needed.
+
+    Decided here because the holder's state can live on another database; the
+    store's generation CAS makes the decision safe. The row is written first, so
+    a failure before the labels land is repaired by the next resolve.
+
+    :param conversations: Store holding the session labels.
+    :param projects: Project store, for paths.
+    :param roles: Role store.
+    :param session: The live top-level session taking the role.
+    :param namespace: The role's namespace.
+    :param user_id: The owner.
+    :param name: Validated role name, in any case.
+    :param overlay_ref: Validated role-file name, or ``None`` to keep the row's.
+    :param actor: ``owner`` or ``agent``, recorded on the event.
+    :returns: The role as written.
+    :raises OmnigentError: ``INVALID_INPUT`` for a child, a closed or archived
+        session or one filed elsewhere; ``CONFLICT`` when a live session holds
+        the name, the session holds another role, or the race was lost.
+    """
+    if session.parent_conversation_id is not None:
+        raise OmnigentError(
+            "Only top-level sessions can have an alias", code=ErrorCode.INVALID_INPUT
+        )
+    if not _is_live(session):
+        raise OmnigentError(
+            f"Session {session.id} is closed or archived", code=ErrorCode.INVALID_INPUT
+        )
+    _require_in_namespace(conversations, projects, session, namespace, user_id)
+    path = namespace.path
+    role = _namespace_role(roles, namespace, name, user_id)
+    held = roles.held_by([session.id])
+    if held and (role is None or held[0].id != role.id):
+        raise OmnigentError(
+            f"Session {session.id} already holds role {held[0].name!r}; release it first",
+            code=ErrorCode.CONFLICT,
+        )
+    if role is None:
+        role = _create_role_row(
+            conversations, roles, session, namespace, user_id, name, overlay_ref, actor
+        )
+    if role.holder_session_id == session.id:
+        _write_mirror(conversations, session, role)
+        return role
+    stale_holder = role.holder_session_id
+    if stale_holder is not None and _live_holder(conversations, role) is not None:
+        raise _held_error(role.name, path, stale_holder)
+    taken = roles.take(
+        role,
+        session.id,
+        kind="take" if stale_holder is None else "stale_repair",
+        actor=actor,
+        reason=None if stale_holder is None else "holder_not_live",
+        role_path=path,
+        overlay_ref=overlay_ref if overlay_ref is not None else role.overlay_ref,
+    )
+    if taken is None:
+        current = roles.get(role.id, user_id=user_id)
+        raise _held_error(role.name, path, current.holder_session_id if current else None)
+    _write_mirror(conversations, session, taken)
+    if stale_holder is not None:
+        _clear_mirror(conversations, stale_holder)
+    return taken
+
+
+def _create_role_row(
+    conversations: ConversationStore,
+    roles: RoleStore,
+    session: Conversation,
+    namespace: Namespace,
+    user_id: str | None,
+    name: str,
+    overlay_ref: str | None,
+    actor: str,
+) -> Role:
+    """Create a name's row, vacant or adopting ``session`` as its label holder.
+
+    The label scan only reads: another session's label blocks the take rather
+    than being adopted from under it.
+    """
+    holders = find_aliased_sessions(
+        conversations, user_id=user_id, project=namespace.path, alias=name, namespace=namespace
+    )
+    if len(holders) > 1:
+        raise ambiguous_alias_error(name, namespace.path, holders)
+    if holders and holders[0].id != session.id:
+        raise _held_error(name, namespace.path, holders[0].id)
+    try:
+        return roles.create(
+            name,
+            user_id=user_id,
+            project_id=_role_project_id(namespace),
+            overlay_ref=overlay_ref,
+            holder_session_id=session.id if holders else None,
+            actor=actor,
+            reason="label" if holders else None,
+            role_path=namespace.path,
+        )
+    except OmnigentError as exc:
+        if exc.code != ErrorCode.ALREADY_EXISTS:
+            raise
+        raced = _namespace_role(roles, namespace, name, user_id)
+        if raced is None:
+            raise
+        return raced
+
+
 def set_session_alias(
     conversations: ConversationStore,
     projects: ProjectStore | None,
@@ -225,16 +479,42 @@ def set_session_alias(
     user_id: str | None,
     alias: object,
 ) -> str:
-    """Give a top-level session a role alias unique within its owner's project."""
+    """Take or create a role in the session's own namespace; returns the role name."""
     value = validate_alias(alias)
     if session.parent_conversation_id is not None:
         raise OmnigentError(
             "Only top-level sessions can have an alias", code=ErrorCode.INVALID_INPUT
         )
     namespace = namespace_for_session(session, projects, user_id)
-    _require_alias_free(conversations, user_id, namespace, value, holder_id=session.id)
-    conversations.set_labels(session.id, {ALIAS_LABEL_KEY: value})
-    return value
+    roles = _role_store(projects)
+    if roles is None or projects is None or not _has_roles(namespace):
+        _require_alias_free(conversations, user_id, namespace, value, holder_id=session.id)
+        conversations.set_labels(session.id, {ALIAS_LABEL_KEY: value})
+        return value
+    return take_role(
+        conversations,
+        projects,
+        roles,
+        session=session,
+        namespace=namespace,
+        user_id=user_id,
+        name=value,
+    ).name
+
+
+def clear_session_alias(
+    conversations: ConversationStore, projects: ProjectStore | None, session_id: str
+) -> None:
+    """Release the session's role, or drop a label alias that has no row.
+
+    Unlike the lifecycle hooks this raises on failure, so the caller sees an
+    error while the row still holds the role and can retry.
+    """
+    released = release_session_role(
+        conversations, projects, session_id, actor="owner", reason="alias_cleared"
+    )
+    if released is None:
+        _clear_mirror(conversations, session_id)
 
 
 def check_alias_for_new_session(
@@ -248,6 +528,7 @@ def check_alias_for_new_session(
 ) -> str:
     """Validate an alias requested at creation, before anything is created.
 
+    Fails fast only: the claim after creation is what decides a race.
     ``inherit_from`` overrides ``project_id`` when the new session will join that
     session's project.
     """
@@ -260,8 +541,61 @@ def check_alias_for_new_session(
             if project_id and projects
             else None
         ) or Namespace("", "")
-    _require_alias_free(conversations, user_id, namespace, value, holder_id=None)
+    role = _namespace_role(_role_store(projects), namespace, value, user_id)
+    if role is None:
+        _require_alias_free(conversations, user_id, namespace, value, holder_id=None)
+    elif _live_holder(conversations, role) is not None:
+        raise _alias_taken_error(value, namespace.path)
     return value
+
+
+def claim_alias_for_new_session(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    session_id: str,
+    user_id: str | None,
+    alias: object,
+    overlay_ref: object = None,
+    actor: str = "owner",
+) -> None:
+    """Claim a role for a session just created and filed: create, then claim.
+
+    There is no pre-claim, so a holder that does not exist yet is never mistaken
+    for a stale one. The caller closes the session when this raises.
+
+    :raises OmnigentError: ``ALREADY_EXISTS`` when the claim was lost.
+    """
+    value = validate_alias(alias)
+    overlay = validate_overlay_ref(overlay_ref)
+    session = conversations.get_conversation(session_id)
+    if session is None:
+        raise OmnigentError("Session not found", code=ErrorCode.NOT_FOUND)
+    namespace = namespace_for_session(session, projects, user_id)
+    roles = _role_store(projects)
+    if roles is None or projects is None or not _has_roles(namespace):
+        _require_alias_free(conversations, user_id, namespace, value, holder_id=session.id)
+        labels = {ALIAS_LABEL_KEY: value}
+        if overlay is not None and overlay.casefold() != value.casefold():
+            labels[ROLE_OVERLAY_LABEL_KEY] = overlay
+        conversations.set_labels(session.id, labels)
+        return
+    try:
+        take_role(
+            conversations,
+            projects,
+            roles,
+            session=session,
+            namespace=namespace,
+            user_id=user_id,
+            name=value,
+            overlay_ref=overlay,
+            actor=actor,
+        )
+    except OmnigentError as exc:
+        if exc.code != ErrorCode.CONFLICT:
+            raise
+        raise _alias_taken_error(value, namespace.path) from exc
 
 
 def ambiguous_alias_error(
@@ -276,6 +610,12 @@ def ambiguous_alias_error(
     )
 
 
+def _alias_taken_error(alias: str, path: str) -> OmnigentError:
+    return OmnigentError(
+        f"Alias {alias!r} is already used in {_where(path)}", code=ErrorCode.ALREADY_EXISTS
+    )
+
+
 def _require_alias_free(
     conversations: ConversationStore,
     user_id: str | None,
@@ -287,11 +627,233 @@ def _require_alias_free(
     holders = find_aliased_sessions(
         conversations, user_id=user_id, project=namespace.path, alias=alias, namespace=namespace
     )
+    if len(holders) > 1:
+        raise ambiguous_alias_error(alias, namespace.path, holders)
     if any(holder.id != holder_id for holder in holders):
-        where = f"project {namespace.path!r}" if namespace.path else "unfiled sessions"
-        raise OmnigentError(
-            f"Alias {alias!r} is already used in {where}", code=ErrorCode.ALREADY_EXISTS
+        raise _alias_taken_error(alias, namespace.path)
+
+
+def release_session_role(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    session_id: str,
+    *,
+    actor: str = "system",
+    reason: str | None = None,
+    role_path: str | None = None,
+) -> Role | None:
+    """Release what ``session_id`` holds; does nothing when it holds no row.
+
+    Labels go first, so a crash leaves the row held and reconcile restores the
+    label: an error here means the role is still held and the call must be
+    retried, never that it was silently dropped.
+
+    :param conversations: Store holding the session labels.
+    :param projects: Project store, for paths.
+    :param session_id: The holder.
+    :param actor: Recorded on the event.
+    :param reason: Recorded on the event, e.g. ``"archive"``.
+    :param role_path: Path to snapshot when the project is already gone.
+    :returns: The vacated role, or ``None`` when the session held none.
+    :raises OmnigentError: ``CONFLICT`` when the row keeps moving under the write.
+    """
+    roles = _role_store(projects)
+    if roles is None:
+        return None
+    for _ in range(_RELEASE_CAS_ATTEMPTS):
+        held = roles.held_by([session_id])
+        if not held:
+            return None
+        role = held[0]
+        _clear_mirror(conversations, session_id)
+        released = roles.release(
+            role,
+            actor=actor,
+            reason=reason,
+            role_path=_role_path(projects, role) if role_path is None else role_path,
         )
+        if released is not None:
+            return released
+    raise OmnigentError(
+        f"Could not release the role of session {session_id}; try again",
+        code=ErrorCode.CONFLICT,
+    )
+
+
+def release_role_after_lifecycle(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    session_id: str,
+    *,
+    reason: str,
+    role_path: str | None = None,
+    sleep_seconds: float | None = None,
+) -> None:
+    """Release after a committed close, archive, unarchive, delete or move.
+
+    Retries, then logs instead of raising: the lifecycle change already landed,
+    and the next take treats a missed release as a stale holder.
+    """
+    for attempt in range(1, _RELEASE_HOOK_ATTEMPTS + 1):
+        try:
+            release_session_role(
+                conversations, projects, session_id, reason=reason, role_path=role_path
+            )
+            return
+        except Exception:
+            if attempt == _RELEASE_HOOK_ATTEMPTS:
+                _logger.exception("Releasing the role of session %s failed", session_id)
+                return
+            time.sleep(
+                (_RELEASE_HOOK_BACKOFF_S if sleep_seconds is None else sleep_seconds) * attempt
+            )
+
+
+def release_project_roles(
+    conversations: ConversationStore,
+    projects: ProjectStore,
+    project_id: str,
+    *,
+    session_ids: Iterable[str],
+    user_id: str | None,
+    role_path: str,
+) -> None:
+    """Release a deleted project's roles and those of its swept members, post-commit.
+
+    A project sweep archives set-based in the store, past the per-session hooks.
+
+    :param conversations: Store holding the session labels.
+    :param projects: Project store.
+    :param project_id: The project that was deleted.
+    :param session_ids: Sessions swept by the delete.
+    :param user_id: The owner.
+    :param role_path: The project's path, read before the delete.
+    """
+    roles = _role_store(projects)
+    if roles is None:
+        return
+    in_project = roles.list_namespace(user_id=user_id, project_id=project_id)
+    holders = {role.holder_session_id for role in in_project} | {
+        role.holder_session_id for role in roles.held_by(session_ids)
+    }
+    for holder in sorted(holder for holder in holders if holder is not None):
+        release_role_after_lifecycle(
+            conversations, projects, holder, reason="project_delete", role_path=role_path
+        )
+
+
+def _reconcile_labels(
+    conversations: ConversationStore,
+    role: Role,
+    holder: Conversation | None,
+    labelled: list[Conversation],
+) -> None:
+    """Make the mirror match the row; touches labels only, never the row.
+
+    A failure leaves the drift for the next resolve rather than failing this one.
+    """
+    try:
+        for session in labelled:
+            if holder is None or session.id != holder.id:
+                _clear_mirror(conversations, session.id)
+        if holder is not None and any(
+            holder.labels.get(key) != value for key, value in _mirror_labels(role).items()
+        ):
+            _write_mirror(conversations, holder, role)
+    except Exception:
+        _logger.exception("Repairing the labels of role %s failed", role.id)
+
+
+def _unresolved_error(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    namespace: Namespace,
+    role: str,
+    user_id: str | None,
+) -> OmnigentError:
+    """Name the role's neighbours, so the caller can correct the address."""
+    here = find_aliased_sessions(
+        conversations, user_id=user_id, project=namespace.path, namespace=namespace
+    )
+    names = sorted({session.labels[ALIAS_LABEL_KEY] for session in here}, key=str.casefold)
+    elsewhere = sorted(
+        {
+            session_project_name(session, projects, user_id) or "/"
+            for session in find_aliased_sessions(
+                conversations, user_id=user_id, project=None, alias=role
+            )
+        }
+        - {_namespace_text(namespace.path)}
+    )
+    parts = [
+        f"No role {role!r} in namespace {_namespace_text(namespace.path)!r}.",
+        f"Roles here: {', '.join(names) or 'none'}.",
+    ]
+    if elsewhere:
+        parts.append(f"Other namespaces with {role}: {', '.join(elsewhere)}.")
+    parts.append(f"Use '<path>/{role}' or sys_role_list.")
+    return OmnigentError(" ".join(parts), code=ErrorCode.NOT_FOUND)
+
+
+def workspace_namespace(
+    projects: ProjectStore | None, workspace: str, user_id: str | None
+) -> Namespace:
+    """The namespace of the project whose ``config.workspace`` covers ``workspace``.
+
+    The deepest match wins, so a subdirectory of a project's checkout counts.
+
+    :returns: That project's namespace, or the root when none matches.
+    :raises OmnigentError: ``CONFLICT`` when two projects claim the same directory.
+    """
+    if projects is None or not workspace.strip():
+        return Namespace("", "")
+    target = PurePosixPath(workspace.strip())
+    matches: list[tuple[int, str]] = []
+    for project in projects.list(user_id=user_id):
+        configured = project.config.get("workspace")
+        if not isinstance(configured, str) or not configured.strip():
+            continue
+        root = PurePosixPath(configured.strip())
+        if target == root or root in target.parents:
+            matches.append((len(root.parts), project.id))
+    if not matches:
+        return Namespace("", "")
+    deepest = max(depth for depth, _ in matches)
+    ids = [project_id for depth, project_id in matches if depth == deepest]
+    if len(ids) > 1:
+        raise OmnigentError(
+            f"Workspace {workspace!r} matches several projects: {', '.join(ids)}",
+            code=ErrorCode.CONFLICT,
+        )
+    return namespace_for_project(ids[0], projects, user_id) or Namespace("", "")
+
+
+def source_namespace(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    user_id: str | None,
+    source: Conversation | None = None,
+    view: str | None = None,
+    workspace: str | None = None,
+) -> Namespace:
+    """The namespace a bare ``Role`` is relative to, for each kind of caller.
+
+    :param conversations: Store used to resolve ``view``.
+    :param projects: Project store.
+    :param user_id: The owner.
+    :param source: An agent's own session: its project.
+    :param view: The project path a web picker has in view (``/`` is the root).
+    :param workspace: The CLI's working directory: the project of that workspace.
+    :returns: The first that applies, else the owner's unfiled root.
+    """
+    if source is not None:
+        return namespace_for_session(source, projects, user_id)
+    if view is not None:
+        return resolve_namespace(conversations, projects, view.strip().strip("/"), user_id)
+    if workspace is not None:
+        return workspace_namespace(projects, workspace, user_id)
+    return Namespace("", "")
 
 
 def resolve_session_address(
@@ -301,8 +863,23 @@ def resolve_session_address(
     address: object,
     user_id: str | None,
     source: Conversation | None,
+    default_namespace: Namespace | None = None,
 ) -> str:
-    """Resolve a UUID, ``Role`` (the source's namespace) or ``<path>/Role`` to a session id."""
+    """Resolve a UUID, ``Role``, ``/Role`` or ``<path>/Role`` to a session id.
+
+    The row decides and the labels are repaired to match it; a name with no row
+    falls back to the label scan. Neither path ever creates a row.
+
+    :param conversations: Store holding the session labels.
+    :param projects: Project store.
+    :param address: The address text.
+    :param user_id: The owner.
+    :param source: An agent's session, which a bare ``Role`` is relative to.
+    :param default_namespace: Overrides ``source`` for a bare ``Role``.
+    :returns: The holding session's id.
+    :raises OmnigentError: ``NOT_FOUND`` for an unknown or vacant role;
+        ``CONFLICT`` when several sessions carry the label of a rowless name.
+    """
     text = address.strip() if isinstance(address, str) else ""
     if not text:
         raise OmnigentError("Provide a session id or alias", code=ErrorCode.INVALID_INPUT)
@@ -313,7 +890,7 @@ def resolve_session_address(
     project_name, _, role = text.rpartition("/")
     role = validate_alias(role)
     if not project_name and "/" not in text:
-        namespace = namespace_for_session(source, projects, user_id)
+        namespace = default_namespace or namespace_for_session(source, projects, user_id)
     else:
         namespace = resolve_namespace(conversations, projects, project_name, user_id)
     project_name = namespace.path
@@ -324,9 +901,102 @@ def resolve_session_address(
         alias=role,
         namespace=namespace if projects is not None else None,
     )
+    row = _namespace_role(_role_store(projects), namespace, role, user_id)
+    if row is not None:
+        holder = _live_holder(conversations, row)
+        _reconcile_labels(conversations, row, holder, matches)
+        if holder is None:
+            raise OmnigentError(
+                f"Role {row.name!r} in namespace {_namespace_text(project_name)!r} is vacant. "
+                "Use sys_role_list to see the roles here.",
+                code=ErrorCode.NOT_FOUND,
+            )
+        return holder.id
     if not matches:
-        where = f"project {project_name!r}" if project_name else "unfiled sessions"
-        raise OmnigentError(f"No live session named {role!r} in {where}", code=ErrorCode.NOT_FOUND)
+        raise _unresolved_error(conversations, projects, namespace, role, user_id)
     if len(matches) > 1:
         raise ambiguous_alias_error(role, project_name, matches)
     return matches[0].id
+
+
+def alias_entries(
+    sessions: Iterable[Conversation], projects: ProjectStore | None, user_id: str | None
+) -> list[dict[str, Any]]:
+    """Listing rows for aliased sessions, without labels the row no longer backs."""
+    found = list(sessions)
+    roles = _role_store(projects)
+    held = (
+        {role.holder_session_id: role for role in roles.held_by(s.id for s in found)}
+        if roles is not None
+        else {}
+    )
+    entries: list[dict[str, Any]] = []
+    for session in found:
+        role = held.get(session.id)
+        mirrored = session.labels.get(ROLE_ID_LABEL_KEY)
+        if mirrored is not None and (role is None or role.id != mirrored):
+            continue
+        path = session_project_name(session, projects, user_id)
+        entries.append(
+            {
+                "session_id": session.id,
+                "alias": session.labels.get(ALIAS_LABEL_KEY),
+                "project": path,
+                "path": path,
+                "handle": session_handle(session, projects, user_id),
+                "role_id": role.id if role is not None else None,
+                "permanent": role.permanent if role is not None else False,
+                "title": session.title,
+                "host_id": session.host_id,
+            }
+        )
+    return entries
+
+
+def list_namespace_roles(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    namespace: Namespace,
+    user_id: str | None,
+) -> list[dict[str, Any]]:
+    """Roles of one namespace, held and vacant, plus aliases that have no row yet."""
+    path = namespace.path
+    roles = _role_store(projects)
+    rows = (
+        roles.list_namespace(user_id=user_id, project_id=_role_project_id(namespace))
+        if roles is not None and _has_roles(namespace)
+        else []
+    )
+    entries: list[dict[str, Any]] = []
+    for role in rows:
+        holder = _live_holder(conversations, role)
+        entries.append(
+            {
+                "role_id": role.id,
+                "name": role.name,
+                "handle": role_handle(path, role.name),
+                "path": path,
+                "permanent": role.permanent,
+                "state": "held" if holder is not None else "vacant",
+                "holder_session_id": holder.id if holder is not None else None,
+            }
+        )
+    named = {role.name_key for role in rows}
+    for session in find_aliased_sessions(
+        conversations, user_id=user_id, project=path, namespace=namespace
+    ):
+        alias = session.labels[ALIAS_LABEL_KEY]
+        if alias.casefold() not in named:
+            entries.append(
+                {
+                    "role_id": None,
+                    "name": alias,
+                    "handle": role_handle(path, alias),
+                    "path": path,
+                    "permanent": False,
+                    "state": "held",
+                    "holder_session_id": session.id,
+                }
+            )
+    return sorted(entries, key=lambda entry: entry["name"].casefold())

@@ -30,6 +30,7 @@ from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 from omnigent.server.routes._session_create_validation import resolve_project_session_create
 from omnigent.server.schemas import SessionCreateRequest
+from omnigent.server.session_aliases import release_role_after_lifecycle
 from omnigent.session_import import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
@@ -442,6 +443,13 @@ def create_imports_router(
         title = (native_title or "").strip() or title_from_items(items)
         if replace_conversation_id is not None:
             await conversation_store.delete_conversation(replace_conversation_id)
+            await asyncio.to_thread(
+                release_role_after_lifecycle,
+                conversation_store,
+                project_store,
+                replace_conversation_id,
+                reason="delete",
+            )
         try:
             conversation = await asyncio.to_thread(
                 conversation_store.create_conversation,
