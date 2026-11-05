@@ -81,3 +81,45 @@ def send_message(client: httpx.Client, session_id: str, message: str) -> dict[st
         "data": {"role": "user", "content": [{"type": "input_text", "text": message}]},
     }
     return dict(_checked(client.post(f"/v1/sessions/{session_id}/events", json=payload)) or {})
+
+
+def reset_session(
+    client: httpx.Client,
+    session_id: str,
+    *,
+    stop_running: bool = False,
+    drop_pending: bool = False,
+) -> dict[str, Any]:
+    """Reset a session's model context in place via ``POST /v1/sessions/{id}/reset``.
+
+    The body stays empty unless a flag is set, so a refusal uses the server's
+    default words (a running turn, or queued input). ``stop_running`` and
+    ``drop_pending`` are the retries those words name.
+
+    The reset can wait out a harness stop, so this call allows longer than the
+    client's default timeout.
+
+    :param client: Authenticated client for the Omnigent server.
+    :param session_id: Session to reset, already resolved from an alias.
+    :param stop_running: Interrupt a running turn before resetting.
+    :param drop_pending: Discard queued input instead of refusing.
+    :returns: The server's reset result (``session_id``, ``epoch``, ``boundary_item_id``).
+    :raises OmnigentError: The server's message, unchanged, including a client timeout.
+    """
+    payload: dict[str, Any] = {}
+    if stop_running:
+        payload["stop_running"] = True
+    if drop_pending:
+        payload["pending"] = "drop"
+    try:
+        response = client.post(
+            f"/v1/sessions/{session_id}/reset",
+            json=payload,
+            timeout=90.0,
+        )
+    except httpx.TimeoutException as exc:
+        raise OmnigentError(
+            "The server did not finish the reset in time.",
+            code=ErrorCode.RUNNER_UNAVAILABLE,
+        ) from exc
+    return dict(_checked(response) or {})

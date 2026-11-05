@@ -1,5 +1,6 @@
 """Alias resolution reports duplicates as ambiguous instead of picking one."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -16,7 +17,7 @@ from omnigent.server.session_aliases import (
     resolve_session_address,
     session_handle,
 )
-from omnigent.session_alias_client import resolve_address
+from omnigent.session_alias_client import reset_session, resolve_address
 from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, PROJECT_LABEL_KEY
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
@@ -226,3 +227,48 @@ def test_cli_sends_its_working_directory_only_for_a_bare_role(
 
     assert seen["address"] == address
     assert seen.get("workspace") == (str(tmp_path.resolve()) if sends_workspace else None)
+
+
+def test_reset_posts_an_empty_body_and_keeps_the_server_refusal() -> None:
+    """A default reset sends no flags, and a 409 is the server's sentence."""
+    seen: dict[str, object] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode()
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "session_busy",
+                    "message": "The session is running; retry with stop_running=true",
+                }
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond), base_url="http://server")
+    with pytest.raises(OmnigentError, match="retry with stop_running=true") as caught:
+        reset_session(client, SESSION_A)
+
+    assert caught.value.message == "The session is running; retry with stop_running=true"
+    assert seen["path"] == f"/v1/sessions/{SESSION_A}/reset"
+    assert seen["body"] == "{}"
+
+
+def test_reset_sends_the_retries_the_server_names() -> None:
+    seen: dict[str, object] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.content.decode()
+        return httpx.Response(
+            200,
+            json={"session_id": SESSION_A, "epoch": 2, "boundary_item_id": "item_1"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(respond), base_url="http://server")
+    assert reset_session(client, SESSION_A, stop_running=True, drop_pending=True) == {
+        "session_id": SESSION_A,
+        "epoch": 2,
+        "boundary_item_id": "item_1",
+    }
+    assert json.loads(str(seen["body"])) == {"stop_running": True, "pending": "drop"}

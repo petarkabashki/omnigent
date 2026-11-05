@@ -7800,6 +7800,54 @@ def session_send(address: str, message: str, server: str | None) -> None:
     click.echo(f"Queued for {entry.get('handle') or entry.get('session_id')}")
 
 
+@session.command("reset")
+@click.argument("address")
+@click.option(
+    "--stop",
+    is_flag=True,
+    default=False,
+    help="Stop a running turn first. The server asks for this when the session is running.",
+)
+@click.option(
+    "--drop-pending",
+    is_flag=True,
+    default=False,
+    help="Discard queued input. The server asks for this when input is still queued.",
+)
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def session_reset(address: str, stop: bool, drop_pending: bool, server: str | None) -> None:
+    """Reset a session's model context in place, keeping its id and items.
+
+    ADDRESS is a session id, ``project/Role``, ``/Role``, or a bare ``Role``.
+    A refusal is printed in the server's own words.
+
+    \b
+    Examples:
+      omnigent session reset omnigent/Architect
+      omnigent session reset conv_abc123 --stop
+    """
+    from omnigent.errors import OmnigentError
+    from omnigent.session_alias_client import reset_session, resolve_address
+
+    with _session_api_client(server) as client:
+        entry = _alias_cli_call(lambda: resolve_address(client, address))
+        try:
+            result = reset_session(
+                client,
+                str(entry["session_id"]),
+                stop_running=stop,
+                drop_pending=drop_pending,
+            )
+        except OmnigentError as exc:
+            # The server's sentence is the whole output. Click's "Error:"
+            # prefix would hide that these are the API's words.
+            click.echo(str(exc))
+            raise SystemExit(1) from exc
+    handle = entry.get("handle") or result.get("session_id") or address
+    session_id = result.get("session_id") or entry.get("session_id")
+    click.echo(f"Reset {handle} in place. Session {session_id} is at epoch {result.get('epoch')}.")
+
+
 @session.command("open")
 @click.argument("address")
 @click.option("--server", default=None, help=_SERVER_OPTION_HELP)
