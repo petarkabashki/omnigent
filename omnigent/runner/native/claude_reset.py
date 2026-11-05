@@ -10,6 +10,7 @@ session's role overlay to ``--append-system-prompt``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,8 @@ from omnigent.harnesses.claude_native.bridge import (
     read_launch_epoch,
 )
 from omnigent.harnesses.claude_native.forwarder import reset_transcript_forward_state
+
+_logger = logging.getLogger(__name__)
 
 
 def claude_launch_bridge_id(session_id: str, labelled_bridge_id: str | None) -> str:
@@ -64,36 +67,48 @@ RESET_PREPARE_LOCK_WAIT_S = 10.0
 
 
 class ClaudeResetBusyError(Exception):
-    """A launch held the session's Claude ensure lock past the reset's wait."""
+    """A launch held the session's ensure lock past the reset's wait."""
 
 
 @dataclass
 class _EnsureHold:
+    bridge_dir: Path
     lock: asyncio.Lock
     expiry: asyncio.TimerHandle | None = None
+    expired: bool = False
 
 
 @dataclass(frozen=True)
 class ClaudeNativeReset:
-    """The runner's two reset phases for a claude-native session.
+    """The runner's two reset phases for a native terminal session.
 
-    ``prepare`` takes the session's Claude ensure lock and keeps it until
-    ``commit``, so no launch in between resumes the old Claude session.
+    Claude and codex-native share these phases. ``prepare`` takes the session's
+    ensure lock and keeps it until ``commit``, so no launch in between resumes
+    the old vendor session. ``prepare`` resolves the bridge directory once, so
+    ``commit`` has no lookup left to fail after the boundary is written.
 
-    :param stop_pane: Closes the Claude pane and its transcript forwarder, so
-        no late hook re-records the old Claude session id.
+    :param stop_pane: Closes the session's pane and its transcript forwarder, so
+        no late hook re-records the old Claude session id. Takes the session id
+        and its bridge directory.
     :param bridge_dir_for_session: Resolves the session's bridge directory.
     :param relaunch: Starts a fresh Claude pane for the session.
     :param ensure_lock_for_session: Returns the lock every Claude launch takes.
     :param hold_s: Seconds after which an uncommitted ``prepare`` lets launches
         run again.
+    :param wipe: Removes the bridge's local resume and forward-cursor state.
+    :param runtime_label: Vendor name for the busy refusal, e.g. ``"Codex"``.
+    :param wipe_in_prepare: Also wipe in ``prepare``. Off when ``commit`` and the
+        launch's own catch-up cover it, so an aborted reset keeps the state.
     """
 
-    stop_pane: Callable[[str], Awaitable[None]]
+    stop_pane: Callable[[str, Path], Awaitable[None]]
     bridge_dir_for_session: Callable[[str], Awaitable[Path]]
     relaunch: Callable[[str], Awaitable[None]]
     ensure_lock_for_session: Callable[[str], asyncio.Lock]
     hold_s: float = RESET_ENSURE_HOLD_S
+    wipe: Callable[[Path], None] = wipe_claude_resume_state
+    runtime_label: str = "Claude"
+    wipe_in_prepare: bool = True
     _holds: dict[str, _EnsureHold] = field(default_factory=dict)
 
     async def prepare(self, session_id: str) -> None:
@@ -109,15 +124,17 @@ class ClaudeNativeReset:
                 await lock.acquire()
         except TimeoutError as exc:
             raise ClaudeResetBusyError(
-                "Claude is still starting. Try the reset again in a moment."
+                f"{self.runtime_label} is still starting. Try the reset again in a moment."
             ) from exc
         try:
-            await self.stop_pane(session_id)
-            await self._wipe(session_id)
+            bridge_dir = await self.bridge_dir_for_session(session_id)
+            await self.stop_pane(session_id, bridge_dir)
+            if self.wipe_in_prepare:
+                await self._wipe(bridge_dir)
         except BaseException:
             lock.release()
             raise
-        hold = _EnsureHold(lock)
+        hold = _EnsureHold(bridge_dir, lock)
         hold.expiry = asyncio.get_running_loop().call_later(
             self.hold_s, self._expire, session_id, hold
         )
@@ -126,7 +143,7 @@ class ClaudeNativeReset:
     async def commit(self, session_id: str) -> None:
         """Relaunch after the server cleared the session's Claude session id."""
         hold = self._holds.pop(session_id, None)
-        if hold is None:
+        if hold is None or hold.expired:
             lock = self.ensure_lock_for_session(session_id)
             await lock.acquire()
         else:
@@ -134,26 +151,47 @@ class ClaudeNativeReset:
                 hold.expiry.cancel()
             lock = hold.lock
         try:
-            # A pane launched after an expired hold still resumes the old chat,
-            # and a hook that outlived the pane may have rewritten the hint.
-            await self.stop_pane(session_id)
-            await self._wipe(session_id)
+            bridge_dir = hold.bridge_dir if hold is not None else None
+            if bridge_dir is None:
+                bridge_dir = await self._bridge_dir_for_unprepared_commit(session_id)
+            if bridge_dir is not None:
+                # A pane launched after an expired hold still resumes the old chat,
+                # and a hook that outlived the pane may have rewritten the hint.
+                await self.stop_pane(session_id, bridge_dir)
+                await self._wipe(bridge_dir)
         finally:
             lock.release()
         await self.relaunch(session_id)
 
+    async def _bridge_dir_for_unprepared_commit(self, session_id: str) -> Path | None:
+        """Resolve the directory for a ``commit`` this runner saw no ``prepare`` for.
+
+        The boundary is already written, so a failed lookup must still end in a
+        relaunch; the launch's own checks drop the stale state then.
+        """
+        try:
+            return await self.bridge_dir_for_session(session_id)
+        except ClaudeResetBusyError:
+            _logger.warning(
+                "Relaunching %s without a stop or wipe: its bridge directory is unknown",
+                session_id,
+                extra={"session_id": session_id},
+            )
+            return None
+
     def _release(self, session_id: str) -> None:
         hold = self._holds.pop(session_id, None)
-        if hold is None:
+        if hold is None or hold.expired:
             return
         if hold.expiry is not None:
             hold.expiry.cancel()
         hold.lock.release()
 
     def _expire(self, session_id: str, hold: _EnsureHold) -> None:
+        # Stays recorded: a late ``commit`` still acts on the directory it resolved.
         if self._holds.get(session_id) is hold:
-            self._release(session_id)
+            hold.expired = True
+            hold.lock.release()
 
-    async def _wipe(self, session_id: str) -> None:
-        bridge_dir = await self.bridge_dir_for_session(session_id)
-        await asyncio.to_thread(wipe_claude_resume_state, bridge_dir)
+    async def _wipe(self, bridge_dir: Path) -> None:
+        await asyncio.to_thread(self.wipe, bridge_dir)

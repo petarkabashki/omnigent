@@ -583,6 +583,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
         model_override="gpt-5.4-mini",
         reasoning_effort="high",
         external_session_id=thread_id,
+        context_epoch=2,
     ).model_dump(mode="json")
     session_init = (
         RunnerSessionInitEnvelope.model_validate(
@@ -1037,6 +1038,7 @@ async def test_auto_create_codex_terminal_uses_persisted_resume_launch_config(
     assert codex_native_bridge.read_bridge_startup_timeout(bridge_dir) is None
     assert "bridge state is preloaded" in caplog.text
     assert "no bridge-state wait extension is needed" in caplog.text
+    assert claude_native_bridge.read_launch_epoch(bridge_dir) == 2
 
 
 @pytest.mark.asyncio

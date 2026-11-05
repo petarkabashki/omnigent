@@ -75,20 +75,30 @@ def test_preparing_a_bridge_dir_forgets_the_previous_launch_stamp(
 
 
 def _recording_reset(
-    tmp_path: Path, calls: list[str], *, hold_s: float = 30.0
+    tmp_path: Path,
+    calls: list[str],
+    *,
+    hold_s: float = 30.0,
+    lookups_that_work: int = 100,
 ) -> tuple[ClaudeNativeReset, asyncio.Lock]:
     """Build a reset whose steps record their order and the launch lock's state."""
     ensure_lock = asyncio.Lock()
     state_file = tmp_path / "state.json"
 
-    async def stop_pane(session_id: str) -> None:
+    async def stop_pane(session_id: str, _bridge_dir: Path) -> None:
         calls.append(f"stop {session_id} locked={ensure_lock.locked()}")
         # A hook racing the stop re-records the old Claude id.
         state_file.write_text(json.dumps({"claude_session_id": "old"}))
 
     async def bridge_dir_for_session(session_id: str) -> Path:
-        calls.append(f"wipe {session_id} hint={state_file.exists()}")
+        calls.append(f"lookup {session_id}")
+        if calls.count(f"lookup {session_id}") > lookups_that_work:
+            raise ClaudeResetBusyError("Couldn't look up this session's backend.")
         return tmp_path
+
+    def wipe(bridge_dir: Path) -> None:
+        calls.append(f"wipe {bridge_dir.name} hint={state_file.exists()}")
+        wipe_claude_resume_state(bridge_dir)
 
     async def relaunch(session_id: str) -> None:
         calls.append(
@@ -101,6 +111,7 @@ def _recording_reset(
         relaunch=relaunch,
         ensure_lock_for_session=lambda _session_id: ensure_lock,
         hold_s=hold_s,
+        wipe=wipe,
     )
     return reset, ensure_lock
 
@@ -115,11 +126,13 @@ async def test_prepare_holds_launches_off_until_commit_relaunches(tmp_path: Path
     (tmp_path / "state.json").write_text(json.dumps({"claude_session_id": "late"}))
     await reset.commit("conv_a")
 
+    wipe = f"wipe {tmp_path.name} hint=True"
     assert calls == [
+        "lookup conv_a",
         "stop conv_a locked=True",
-        "wipe conv_a hint=True",
+        wipe,
         "stop conv_a locked=True",
-        "wipe conv_a hint=True",
+        wipe,
         "relaunch conv_a hint=False locked=False",
     ]
 
@@ -200,6 +213,20 @@ def test_prepare_fits_inside_the_servers_forward_budget() -> None:
     )
 
 
+def test_codex_prepare_fits_inside_the_servers_forward_budget() -> None:
+    app_server_close_s = 6.0
+    reap_listing_and_grace_s = 6.5
+    # Lock wait, forwarder cancel, backend stop, and the two bridge label reads.
+    assert (
+        claude_reset.RESET_PREPARE_LOCK_WAIT_S
+        + orchestration._AUTO_FORWARDER_CANCEL_TIMEOUT_S
+        + app_server_close_s
+        + reap_listing_and_grace_s
+        + 2 * orchestration._SESSION_LABEL_LOOKUP_TIMEOUT_SECONDS
+        < RESET_FORWARD_TIMEOUT_S
+    )
+
+
 async def test_commit_without_prepare_stops_a_live_pane_before_relaunch(tmp_path: Path) -> None:
     calls: list[str] = []
     reset, ensure_lock = _recording_reset(tmp_path, calls)
@@ -207,8 +234,76 @@ async def test_commit_without_prepare_stops_a_live_pane_before_relaunch(tmp_path
     await reset.commit("conv_a")
 
     assert calls == [
+        "lookup conv_a",
         "stop conv_a locked=True",
-        "wipe conv_a hint=True",
+        f"wipe {tmp_path.name} hint=True",
         "relaunch conv_a hint=False locked=False",
     ]
+    assert not ensure_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_in_prepare_stops_nothing(tmp_path: Path) -> None:
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls, lookups_that_work=0)
+
+    with pytest.raises(ClaudeResetBusyError):
+        await reset.prepare("conv_a")
+
+    assert calls == ["lookup conv_a"]
+    assert not ensure_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_commit_reuses_prepares_bridge_dir_so_a_lookup_cannot_cost_the_pane(
+    tmp_path: Path,
+) -> None:
+    """The boundary is written by ``commit``: a raise there is a 200 with no pane."""
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls, lookups_that_work=1)
+
+    await reset.prepare("conv_a")
+    await reset.commit("conv_a")
+
+    assert calls.count("lookup conv_a") == 1
+    assert calls[-3:] == [
+        "stop conv_a locked=True",
+        f"wipe {tmp_path.name} hint=True",
+        "relaunch conv_a hint=False locked=False",
+    ]
+    assert not ensure_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_commit_after_an_expired_hold_still_acts_on_prepares_bridge_dir(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls, hold_s=0.01, lookups_that_work=1)
+
+    await reset.prepare("conv_a")
+    await asyncio.wait_for(ensure_lock.acquire(), timeout=1.0)
+    ensure_lock.release()
+    await reset.commit("conv_a")
+
+    assert calls.count("lookup conv_a") == 1
+    assert calls[-3:] == [
+        "stop conv_a locked=True",
+        f"wipe {tmp_path.name} hint=True",
+        "relaunch conv_a hint=False locked=False",
+    ]
+    assert not ensure_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_commit_with_no_prepare_and_a_failed_lookup_still_relaunches(
+    tmp_path: Path,
+) -> None:
+    """A restarted runner has no resolved directory; the launch's own checks cover it."""
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls, lookups_that_work=0)
+
+    await reset.commit("conv_a")
+
+    assert calls == ["lookup conv_a", "relaunch conv_a hint=False locked=False"]
     assert not ensure_lock.locked()

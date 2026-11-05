@@ -1666,6 +1666,35 @@ async def test_create_terminal_native_bootstrap_exempt_from_gate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("terminal", "expected_timeout"),
+    [("codex", 120.0), ("claude", 10.0)],
+)
+async def test_create_terminal_gives_a_codex_ensure_time_to_finish_a_launch(
+    client: httpx.AsyncClient, terminal: str, expected_timeout: float
+) -> None:
+    """A timeout here reads as an unreachable runner while its relaunch still runs."""
+
+    class _TimeoutRecordingRunnerClient(_FakeRunnerClient):
+        timeouts: list[float] = []
+
+        async def post(self, path: str, **kwargs: Any) -> httpx.Response:
+            self.timeouts.append(kwargs["timeout"])
+            return await super().post(path, **kwargs)
+
+    fake_runner = _TimeoutRecordingRunnerClient(payload={"id": f"terminal_{terminal}_main"})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.post(
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/terminals",
+        json={"terminal": terminal, "session_key": "main", "ensure_native_terminal": True},
+    )
+
+    assert resp.status_code == 200
+    assert fake_runner.timeouts == [expected_timeout]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "body",
     [
         # Marker with an arbitrary terminal name: the bootstrap shape

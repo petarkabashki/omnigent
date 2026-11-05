@@ -602,3 +602,70 @@ def test_rollout_records_use_terminal_launch_permission_args(
     turn_context = next(r for r in records if r["type"] == "turn_context")["payload"]
     assert turn_context["approval_policy"] == "never"
     assert turn_context["sandbox_policy"] == {"type": "danger-full-access"}
+
+
+def _text_message(role: str, text: str, response_id: str) -> dict[str, Any]:
+    kind = "input_text" if role == "user" else "output_text"
+    return {
+        "type": "message",
+        "role": role,
+        "content": [{"type": kind, "text": text}],
+        "response_id": response_id,
+    }
+
+
+def _rollout_texts(items: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+    records = codex_native._codex_rollout_records_from_session_items(
+        items,
+        session_id="conv_test",
+        external_session_id="019f-thread",
+        cwd=Path("/tmp/test"),
+        model_provider="openai",
+        cli_version="0.140.0",
+    )
+    texts = [
+        block["text"]
+        for record in records
+        if record["type"] == "response_item"
+        for block in record["payload"].get("content", [])
+    ]
+    return texts, records
+
+
+def test_rollout_drops_everything_before_the_last_context_reset() -> None:
+    compaction = {
+        "type": "compaction",
+        "summary": "s",
+        "compacted_messages": [_text_message("user", "COMPACTED", "r0")],
+        "response_id": "compact_0",
+    }
+    items = [
+        compaction,
+        _text_message("user", "PRE", "r1"),
+        _text_message("assistant", "PRE-REPLY", "r1"),
+        {"type": "context_reset", "response_id": "reset_1"},
+        _text_message("user", "MID", "r2"),
+        {"type": "context_reset", "response_id": "reset_2"},
+        _text_message("user", "POST", "r3"),
+    ]
+
+    texts, records = _rollout_texts(items)
+
+    assert texts == ["POST"]
+    assert [r["type"] for r in records].count("session_meta") == 1
+    assert records[0]["type"] == "session_meta"
+    assert "compacted" not in [r["type"] for r in records]
+
+
+def test_rollout_after_a_single_context_reset_keeps_only_later_items() -> None:
+    items = [
+        _text_message("user", "PRE", "r1"),
+        _text_message("assistant", "PRE-REPLY", "r1"),
+        {"type": "context_reset", "response_id": "reset_1"},
+        _text_message("user", "POST", "r2"),
+    ]
+
+    texts, records = _rollout_texts(items)
+
+    assert texts == ["POST"]
+    assert records[0]["type"] == "session_meta"

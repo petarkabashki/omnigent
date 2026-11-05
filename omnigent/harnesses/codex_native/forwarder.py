@@ -22,7 +22,11 @@ import httpx
 from omnigent.codex_approval_modes import codex_permission_preset_from_thread_settings
 from omnigent.debug_logging import debug_event
 from omnigent.entities.session_resources import terminal_resource_id
-from omnigent.harnesses.claude_native.bridge import url_component
+from omnigent.harnesses.claude_native.bridge import (
+    read_launch_epoch,
+    record_launch_epoch,
+    url_component,
+)
 from omnigent.harnesses.codex_egress import (
     CERTIFICATE_REMEDIATION,
     certificate_failure_message,
@@ -43,7 +47,9 @@ from omnigent.harnesses.codex_native.bridge import (
     CodexNativeBridgeState,
     DeveloperInstructionsReadState,
     clear_active_turn_id_if_matches,
+    clear_bridge_state,
     clear_certificate_failure,
+    clear_child_usage_baselines,
     codex_config_revision,
     codex_home_for_bridge_dir,
     pending_mcp_servers,
@@ -1907,6 +1913,7 @@ class _SessionUsageCoalescer:
         session_id: str,
         model: str | None = None,
         baseline: _UsageTotals | None = None,
+        context_epoch: int | None = None,
     ) -> None:
         """
         Initialize the usage coalescer.
@@ -1921,8 +1928,12 @@ class _SessionUsageCoalescer:
         :param baseline: ``(input, cached input, output)`` token totals a forked
             child thread inherited, subtracted from its cumulative counts so the
             child posts only its own usage. ``None`` posts Codex's totals as-is.
+        :param context_epoch: The launch's context epoch, stamped on every post so
+            the server drops a late report from before a reset. ``None`` leaves
+            posts unstamped.
         :returns: None.
         """
+        self._context_epoch = context_epoch
         self._client = client
         self._session_id = session_id
         self._pending: dict[str, int] = {}
@@ -1987,6 +1998,8 @@ class _SessionUsageCoalescer:
         payload: _JsonObject = dict(data)
         if self._model:
             payload["model"] = self._model
+        if self._context_epoch is not None:
+            payload["context_epoch"] = self._context_epoch
         response = await _post_session_event(
             self._client,
             self._session_id,
@@ -2317,6 +2330,65 @@ async def _sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def reset_codex_forward_state(bridge_dir: Path) -> None:
+    """
+    Drop the forwarder's recovery cursor so a fresh launch re-ingests nothing.
+
+    Removes the bridge state (thread, active turn and pending shell command the
+    next subscribe would replay from) and the child-thread usage baselines.
+
+    :param bridge_dir: Native Codex bridge directory.
+    :returns: None.
+    """
+    clear_bridge_state(bridge_dir)
+    clear_child_usage_baselines(bridge_dir)
+
+
+def _launch_usage_coalescer(
+    client: httpx.AsyncClient, session_id: str, bridge_dir: Path
+) -> _SessionUsageCoalescer:
+    """
+    Build a usage coalescer stamped with this launch's context epoch.
+
+    :param client: Omnigent server client.
+    :param session_id: Omnigent session the usage belongs to.
+    :param bridge_dir: Bridge directory the launch stamped.
+    :returns: The stamped coalescer.
+    """
+    return _SessionUsageCoalescer(client, session_id, context_epoch=read_launch_epoch(bridge_dir))
+
+
+async def patch_codex_external_session_id(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    thread_id: str,
+    context_epoch: int | None,
+) -> httpx.Response:
+    """
+    Record a Codex thread id on the session, stamped with the launch's context epoch.
+
+    The server refuses (409) a thread id from before a context reset.
+
+    :param client: Omnigent server client.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :param thread_id: Codex thread id to record.
+    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
+    :returns: The server response.
+    """
+    url = f"/v1/sessions/{url_component(session_id)}"
+    fields: dict[str, str | int] = {"external_session_id": thread_id}
+    if context_epoch is not None:
+        fields["context_epoch"] = context_epoch
+    response = await client.patch(url, json=fields, params={"include_usage": "false"})
+    if response.status_code == 422 and context_epoch is not None:
+        # An older server rejects the unknown field; losing the id is worse.
+        response = await client.patch(
+            url, json={"external_session_id": thread_id}, params={"include_usage": "false"}
+        )
+    return response
+
+
 async def supervise_forwarder(
     *,
     base_url: str,
@@ -2355,6 +2427,8 @@ async def supervise_forwarder(
     """
     # Bind bridge dir so failed durable-event posts can be dead-lettered (#1120).
     _dead_letter_dir.set(bridge_dir)
+    launch_epoch = read_launch_epoch(bridge_dir)
+    _dead_letter_epochs.set({} if launch_epoch is None else {session_id: launch_epoch})
     # Resume backfill and live notifications can post concurrently. Serialize
     # durable items per AP session so an older retry cannot land after a newer item.
     _conversation_item_locks.set({})
@@ -2382,7 +2456,7 @@ async def supervise_forwarder(
             session_id=session_id,
             thread_id=thread_id,
             delta_coalescer=_OutputTextDeltaCoalescer(ap_client, session_id),
-            usage_coalescer=_SessionUsageCoalescer(ap_client, session_id),
+            usage_coalescer=_launch_usage_coalescer(ap_client, session_id, bridge_dir),
             elicitation_tracker=_CodexElicitationTaskTracker(),
         )
         forwarder_state = _CodexForwarderState(
@@ -2675,8 +2749,10 @@ async def _maybe_rotate_session_on_thread_started(
     )
     target.session_id = new_session_id
     target.thread_id = new_thread_id
+    if (dead_letter_epochs := _dead_letter_epochs.get()) is not None:
+        dead_letter_epochs[new_session_id] = 0
     target.delta_coalescer = _OutputTextDeltaCoalescer(ap_client, new_session_id)
-    target.usage_coalescer = _SessionUsageCoalescer(ap_client, new_session_id)
+    target.usage_coalescer = _launch_usage_coalescer(ap_client, new_session_id, bridge_dir)
     target.elicitation_tracker = _CodexElicitationTaskTracker()
     await old_delta_coalescer.close()
     await old_usage_coalescer.close()
@@ -2738,14 +2814,13 @@ async def _create_thread_replacement_session(
     state = read_bridge_state(bridge_dir)
     if CODEX_NATIVE_BRIDGE_ID_LABEL_KEY not in labels:
         labels[CODEX_NATIVE_BRIDGE_ID_LABEL_KEY] = old_session_id
+    create_body: _JsonObject = {"agent_id": agent_id, "labels": labels}
+    # A runner relaunch of the replacement takes its cwd from the session workspace.
+    workspace = old.get("workspace")
+    if isinstance(workspace, str) and workspace:
+        create_body["workspace"] = workspace
 
-    create_resp = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent_id,
-            "labels": labels,
-        },
-    )
+    create_resp = await client.post("/v1/sessions", json=create_body)
     create_resp.raise_for_status()
     created = create_resp.json()
     new_session_id = created.get("id")
@@ -2775,6 +2850,8 @@ async def _create_thread_replacement_session(
     )
     transfer_resp.raise_for_status()
 
+    # The shared stamp names the old session's epoch; a new session starts at 0.
+    record_launch_epoch(bridge_dir, 0)
     write_bridge_state(
         bridge_dir,
         CodexNativeBridgeState(
@@ -7377,6 +7454,7 @@ async def _post_external_item(
                 payload=data,
                 reason="delivery interrupted before acknowledgement",
                 delivered_ambiguous=True,
+                context_epoch=_dead_letter_epoch(session_id),
             )
         raise
     if response is None:
@@ -8137,6 +8215,11 @@ _forward_health = _ForwardHealth()
 
 # Bridge dir for dead-lettering undeliverable durable events; set per-forwarder (#1120).
 _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir", default=None)
+# This forwarder's context epoch per session, pinned at start: a reset moves the
+# bridge's shared stamp while an abandoned forwarder may still be dead-lettering.
+_dead_letter_epochs: ContextVar[dict[str, int] | None] = ContextVar(
+    "_codex_dead_letter_epochs", default=None
+)
 
 
 class _ReentrantAsyncLock:
@@ -8253,6 +8336,38 @@ def _note_forward_failure(event_type: str, result: _PostResult, session_id: str)
         _forward_health.degraded_logged = True
 
 
+def _dead_letter_epoch(session_id: str) -> int | None:
+    """
+    Return the context epoch a dead letter for *session_id* belongs to.
+
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :returns: The epoch this forwarder launched under, or ``None`` for a session it
+        did not launch, such as a sub-agent child.
+    """
+    epochs = _dead_letter_epochs.get()
+    return None if epochs is None else epochs.get(session_id)
+
+
+async def _current_context_epoch(client: httpx.AsyncClient, session_id: str) -> int | None:
+    """
+    Read a session's context epoch for dead-letter replay.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
+    :returns: The current epoch, ``0`` from a server that predates resets, or ``None``
+        when the server could not say.
+    """
+    try:
+        response = await client.get(
+            f"/v1/sessions/{url_component(session_id)}", timeout=_REPLAY_POST_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        epoch = response.json().get("context_epoch", 0)
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    return epoch if isinstance(epoch, int) else 0
+
+
 async def _replay_dead_letters_before_resume(
     ap_client: httpx.AsyncClient,
     bridge_dir: Path,
@@ -8267,12 +8382,17 @@ async def _replay_dead_letters_before_resume(
     :func:`replay_dead_letters` drain, supplying a re-POST that routes each
     record to its recorded session via :func:`_post_session_event_inner` (the
     inner so a re-failure does not double dead-letter through the wrapper).
+    A record from before its session's latest context reset is dropped instead:
+    conversation items carry no epoch, so the server would accept it past the
+    boundary. A record whose session's epoch is unknown waits for a later resume.
     Never raises: a replay failure must not block resume.
 
     :param ap_client: HTTP client for Omnigent event posts.
     :param bridge_dir: Native Codex bridge directory holding the dead-letter files.
     :returns: None.
     """
+
+    current_epochs: dict[str, int | None] = {}
 
     async def _repost(record: dict[str, object]) -> RepostResult:
         session_id = record["session_id"]
@@ -8281,6 +8401,19 @@ async def _replay_dead_letters_before_resume(
         assert isinstance(session_id, str)
         assert isinstance(event_type, str)
         assert isinstance(payload, dict)
+        if session_id not in current_epochs:
+            current_epochs[session_id] = await _current_context_epoch(ap_client, session_id)
+        current_epoch = current_epochs[session_id]
+        if current_epoch is None:
+            http_status = record.get("http_status")
+            return RepostResult(
+                delivered=False,
+                delivered_ambiguous=record["delivered_ambiguous"] is True,
+                http_status=http_status if isinstance(http_status, int) else None,
+            )
+        record_epoch = record.get("context_epoch", 0)
+        if not isinstance(record_epoch, int) or record_epoch < current_epoch:
+            return RepostResult(delivered=False, discarded=True)
         result = await _post_session_event_inner(
             ap_client,
             session_id,
@@ -8406,6 +8539,7 @@ async def _post_session_event(
                 delivered_ambiguous=result.delivered_ambiguous,
                 http_status=http_status,
                 transport_error=result.transport_error,
+                context_epoch=_dead_letter_epoch(session_id),
             )
     return response
 

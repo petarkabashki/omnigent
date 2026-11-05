@@ -55,11 +55,12 @@ _reset_in_flight: dict[str, _InFlightReset] = {}
 _BUSY_STATUSES = ("running", "waiting")
 _STOP_WAIT_S = 10.0
 _STOP_POLL_S = 0.2
-#: Forward budget for reset controls; ``commit`` releases the harness process.
-RESET_FORWARD_TIMEOUT_S = 30.0
+#: Forward budget for reset controls; ``commit`` releases the harness process, and
+#: a codex ``prepare`` stops the app-server and reaps what survives it.
+RESET_FORWARD_TIMEOUT_S = 50.0
 
 #: Native harnesses whose runner relaunches the terminal on a fresh vendor session.
-IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native"})
+IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native", "codex-native"})
 #: Labels that make a native launch resume or rebuild the pre-reset transcript.
 _NATIVE_RESUME_LABEL_KEYS = (FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY, FORK_CARRY_HISTORY_LABEL_KEY)
 

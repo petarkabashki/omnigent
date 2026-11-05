@@ -39,7 +39,10 @@ from omnigent.harness_availability import (
     HARNESS_VERSION_TOO_LOW,
     HarnessUnavailableReason,
 )
-from omnigent.harnesses.claude_native.bridge import url_component
+from omnigent.harnesses.claude_native.bridge import (
+    read_launch_epoch,
+    url_component,
+)
 from omnigent.harnesses.claude_native.main import (
     _attach_with_reconnect,
     attach_local_terminal,
@@ -73,6 +76,7 @@ from omnigent.harnesses.codex_native.bridge import (
 from omnigent.harnesses.codex_native.forwarder import (
     _replay_dead_letters_before_resume,
     codex_rollout_last_turn_model,
+    patch_codex_external_session_id,
     supervise_forwarder,
 )
 from omnigent.harnesses.codex_native.state import read_launch_state, write_launch_state
@@ -389,7 +393,8 @@ class PreparedCodexTerminal:
         ``"main"``.
     :param bridge_dir: Native Codex bridge directory.
     :param thread_id: Codex app-server thread id. ``None`` until the
-        first attached TUI creates a fresh thread.
+        first attached TUI creates a fresh thread, or on a reattach to a
+        terminal a context reset relaunched before its thread was recorded.
     :param app_server_url: App-server transport the TUI, forwarder, and
         initial-turn connect over, e.g. ``"ws://127.0.0.1:9876"``. ``None``
         for runner-owned terminal attaches where the CLI never connects to
@@ -1051,27 +1056,170 @@ async def _prepare_codex_terminal_via_daemon(
     )
 
 
+# The server answers these when it can't reach the runner, which may still be
+# alive: its tunnel can drop mid-ensure and a slow launch can outlast the proxy.
+_RUNNER_UNREACHABLE_STATUS_CODES = frozenset({502, 503})
+# Past the server's own ensure budget, so a slow launch reaches this CLI as an answer.
+_CODEX_ENSURE_TIMEOUT_S = 130.0
+# How long a CLI opening a reset session waits for the bound runner's terminal.
+_RESET_JOIN_TIMEOUT_S = 150.0
+_RESET_JOIN_RETRY_INTERVAL_S = 2.0
+# Past the runner's reconnect backoff (10s cap, +50% jitter), so a tunnel drop
+# on a live runner never reads as a runner that left.
+_RUNNER_RECONNECT_GRACE_S = 20.0
+
+
+class _CodexRunnerUnreachableError(click.ClickException):
+    """The server could not reach the runner to ensure the Codex terminal."""
+
+
 async def _ensure_codex_terminal_on_runner(
     client: httpx.AsyncClient,
     session_id: str,
+    *,
+    timeout_s: float = _CODEX_ENSURE_TIMEOUT_S,
 ) -> None:
     """
     Ask the bound runner to ensure the Codex app-server and terminal exist.
 
     :param client: HTTP client pointed at the Omnigent server.
     :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param timeout_s: Seconds to wait for the runner's answer, e.g. ``130.0``.
     :returns: None.
-    :raises click.ClickException: If the runner rejects the ensure request.
+    :raises click.ClickException: If the runner rejects the ensure request or
+        does not answer in time.
     """
-    resp = await client.post(
-        f"/v1/sessions/{url_component(session_id)}/resources/terminals",
-        json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
-        timeout=60.0,
-    )
-    if resp.status_code >= 400:
-        raise click.ClickException(
-            f"Codex terminal ensure failed ({resp.status_code}): {error_text(resp)}"
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{url_component(session_id)}/resources/terminals",
+            json={"terminal": "codex", "session_key": "main", "ensure_native_terminal": True},
+            timeout=timeout_s,
         )
+    except httpx.ReadTimeout as exc:
+        raise _CodexRunnerUnreachableError(
+            f"The runner did not finish starting Codex within {timeout_s:.0f}s. "
+            "It may still be starting; check the runner, then run this command again."
+        ) from exc
+    if resp.status_code >= 400:
+        error_type = (
+            _CodexRunnerUnreachableError
+            if resp.status_code in _RUNNER_UNREACHABLE_STATUS_CODES
+            else click.ClickException
+        )
+        raise error_type(f"Codex terminal ensure failed ({resp.status_code}): {error_text(resp)}")
+
+
+def _reattached_codex_terminal(
+    session_id: str,
+    terminal: LaunchedCodexTerminal,
+    bridge_id: str,
+    *,
+    thread_id: str | None,
+) -> PreparedCodexTerminal:
+    """
+    Describe a running terminal this CLI attaches to without launching anything.
+
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param terminal: The running Codex terminal.
+    :param bridge_id: The session's bridge id, e.g. ``"conv_abc123"``.
+    :param thread_id: The session's Codex thread id, if it has one yet.
+    :returns: Prepared details with no app-server or event client of its own.
+    """
+    bridge_dir = bridge_dir_for_bridge_id(bridge_id)
+    # The running terminal's real transport lives in its bridge state (``ws://``
+    # for terminals launched by current code). Reattach starts no app-server,
+    # forwarder or initial turn, so this is informational; fall back to the
+    # legacy unix path.
+    state = read_bridge_state(bridge_dir)
+    return PreparedCodexTerminal(
+        session_id=session_id,
+        terminal_id=terminal.terminal_id,
+        tmux_socket=terminal.tmux_socket,
+        tmux_target=terminal.tmux_target,
+        bridge_dir=bridge_dir,
+        thread_id=thread_id,
+        app_server_url=(
+            state.socket_path if state is not None else str(socket_path_for_bridge_dir(bridge_dir))
+        ),
+        app_server=None,
+        event_client=None,
+        reattached=True,
+    )
+
+
+async def _session_runner_is_unregistered(client: httpx.AsyncClient, session_id: str) -> bool:
+    """
+    Return whether the server positively says the session has no live runner.
+
+    The session is read again because a failed ensure may have rebound it. A
+    failed lookup says nothing about the runner, so it answers ``False``.
+
+    :param client: HTTP client pointed at the Omnigent server.
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :returns: ``True`` only for an unbound session or a runner reported offline.
+    """
+    try:
+        session = await _fetch_codex_session(client, session_id)
+        runner_id = session.get("runner_id")
+        if not isinstance(runner_id, str) or not runner_id:
+            return True
+        status = await client.get(f"/v1/runners/{url_component(runner_id)}/status")
+        return status.status_code == 200 and status.json().get("online") is False
+    except (click.ClickException, httpx.TransportError, ValueError):
+        return False
+
+
+async def _join_runner_terminal_after_reset(
+    client: httpx.AsyncClient,
+    session_id: str,
+    bridge_id: str,
+) -> PreparedCodexTerminal | None:
+    """
+    Attach to the terminal the session's bound runner owns after a reset.
+
+    The ensure takes the runner's lock, so it waits for a relaunch in flight
+    rather than racing it. A failed ensure proves nothing about the runner, so
+    this retries until the runner has stayed unregistered past its reconnect
+    backoff, or the budget runs out.
+
+    :param client: HTTP client pointed at the Omnigent server.
+    :param session_id: Session id, e.g. ``"conv_abc123"``.
+    :param bridge_id: The session's bridge id, e.g. ``"conv_abc123"``.
+    :returns: The runner's terminal, or ``None`` when that runner is gone and
+        this CLI may launch the session itself.
+    :raises click.ClickException: If the runner may be alive when the budget
+        runs out; a launch here would destroy its pane.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RESET_JOIN_TIMEOUT_S
+    unregistered_since: float | None = None
+    while True:
+        try:
+            await _ensure_codex_terminal_on_runner(
+                client,
+                session_id,
+                timeout_s=min(_CODEX_ENSURE_TIMEOUT_S, deadline - loop.time()),
+            )
+            break
+        except _CodexRunnerUnreachableError:
+            pass
+        if not await _session_runner_is_unregistered(client, session_id):
+            unregistered_since = None
+        elif unregistered_since is None:
+            unregistered_since = loop.time()
+        elif loop.time() - unregistered_since >= _RUNNER_RECONNECT_GRACE_S:
+            return None
+        if loop.time() + _RESET_JOIN_RETRY_INTERVAL_S >= deadline:
+            raise click.ClickException(
+                f"Timed out waiting for the runner to bring up Codex for {session_id!r}. "
+                "The runner may still be alive, so nothing was launched here. "
+                "Check the runner, then run this command again."
+            )
+        await asyncio.sleep(_RESET_JOIN_RETRY_INTERVAL_S)
+    terminal = await _wait_for_codex_terminal_ready(
+        client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S
+    )
+    return _reattached_codex_terminal(session_id, terminal, bridge_id, thread_id=None)
 
 
 async def _wait_for_codex_terminal_ready(
@@ -1140,12 +1288,15 @@ async def _prepare_codex_terminal(
     async with open_server_client(base_url, headers=headers, timeout=timeout) as client:
         bridge_id: str
         thread_id: str | None = None
+        context_epoch: object = None
         if session_id is None:
             if session_bundle is None:
                 raise click.ClickException("Creating a Codex session requires a session bundle.")
             _update_startup_progress(startup_progress, "Creating Codex session...")
             bridge_id = secrets.token_urlsafe(24)
             session_id = await _create_codex_session(client, session_bundle, bridge_id=bridge_id)
+            # A reset can only refuse this launch's late reports if they carry an epoch.
+            context_epoch = 0
         else:
             _update_startup_progress(startup_progress, "Loading Codex session...")
             payload = await _fetch_codex_session(client, session_id)
@@ -1158,42 +1309,37 @@ async def _prepare_codex_terminal(
                     f"Conversation {session_id!r} is not a codex-native session."
                 )
             bridge_id = str(labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY) or session_id)
+            context_epoch = payload.get("context_epoch")
             existing_terminal = await _find_running_codex_terminal(client, session_id)
             external_session_id = payload.get("external_session_id")
             thread_id = external_session_id if isinstance(external_session_id, str) else None
-            if existing_terminal is not None and thread_id is not None:
-                reattach_bridge_dir = bridge_dir_for_bridge_id(bridge_id)
-                reattach_unix_socket = socket_path_for_bridge_dir(reattach_bridge_dir)
-                # The running terminal's real transport lives in its bridge
-                # state (``ws://`` for terminals launched by current code).
-                # Reattach starts no app-server/forwarder/initial-turn, so
-                # app_server_url is unused here, but populate it accurately
-                # from bridge state and fall back to the legacy unix path.
-                reattach_state = read_bridge_state(reattach_bridge_dir)
-                reattach_transport = (
-                    reattach_state.socket_path
-                    if reattach_state is not None
-                    else str(reattach_unix_socket)
-                )
+            # A reset clears the thread id until the relaunch records a new one.
+            was_reset = isinstance(context_epoch, int) and context_epoch > 0
+            if existing_terminal is not None and (thread_id is not None or was_reset):
                 _update_startup_progress(startup_progress, "Codex terminal ready.")
-                return PreparedCodexTerminal(
-                    session_id=session_id,
-                    terminal_id=existing_terminal.terminal_id,
-                    tmux_socket=existing_terminal.tmux_socket,
-                    tmux_target=existing_terminal.tmux_target,
-                    bridge_dir=reattach_bridge_dir,
-                    thread_id=thread_id,
-                    app_server_url=reattach_transport,
-                    app_server=None,
-                    event_client=None,
-                    reattached=True,
+                return _reattached_codex_terminal(
+                    session_id, existing_terminal, bridge_id, thread_id=thread_id
                 )
-            if thread_id is None:
+            if thread_id is None and not was_reset:
                 raise click.ClickException(
                     f"Conversation {session_id!r} is missing its Codex thread id."
                 )
+            bound_runner = payload.get("runner_id")
+            if thread_id is None and isinstance(bound_runner, str) and bound_runner:
+                # The runner relaunches a reset session in this same bridge dir,
+                # so a launch here would clear its state and share its terminal id.
+                _update_startup_progress(startup_progress, "Waiting for the runner's Codex...")
+                joined = await _join_runner_terminal_after_reset(client, session_id, bridge_id)
+                if joined is not None:
+                    _update_startup_progress(startup_progress, "Codex terminal ready.")
+                    return joined
 
         bridge_dir = prepare_bridge_dir(bridge_id)
+        if isinstance(context_epoch, int):
+            from omnigent.runner.native.codex_reset import stamp_codex_launch_epoch
+
+            # Replaces a runner launch's stamp, which a reset may have outdated.
+            stamp_codex_launch_epoch(bridge_dir, context_epoch, thread_id=thread_id)
         socket_path = socket_path_for_bridge_dir(bridge_dir)
         codex_home = codex_home_for_bridge_dir(bridge_dir)
         clear_bridge_state(bridge_dir)
@@ -1350,7 +1496,7 @@ async def _attach_with_forwarder(
     """
     forwarder: asyncio.Task[None] | None = None
     try:
-        if prepared.thread_id is None:
+        if prepared.thread_id is None and not prepared.reattached:
             attach_task = asyncio.create_task(
                 _attach_terminal_resource(
                     base_url=base_url,
@@ -1388,7 +1534,7 @@ async def _attach_with_forwarder(
                         await attach_task
                 raise
         else:
-            if prepared.app_server is not None:
+            if prepared.app_server is not None and prepared.thread_id is not None:
                 forwarder = _start_codex_forwarder(
                     base_url=base_url,
                     headers=headers,
@@ -1498,7 +1644,12 @@ async def _initialize_fresh_terminal_thread(
         headers=headers,
         timeout=httpx.Timeout(30.0),
     ) as client:
-        await _patch_external_session_id(client, prepared.session_id, thread_id)
+        await _patch_external_session_id(
+            client,
+            prepared.session_id,
+            thread_id,
+            context_epoch=read_launch_epoch(prepared.bridge_dir),
+        )
     write_bridge_state(
         prepared.bridge_dir,
         CodexNativeBridgeState(
@@ -2284,6 +2435,13 @@ def _codex_rollout_records_from_session_items(
             remaining_function_outputs[item_call_id] -= 1
             if remaining_function_outputs[item_call_id] <= 0:
                 del remaining_function_outputs[item_call_id]
+        # A context reset starts a new epoch: nothing before it is model context.
+        if item.get("type") == "context_reset":
+            records = [r for r in records if r.get("type") == "session_meta"]
+            seen_turn_ids.clear()
+            open_function_calls.clear()
+            emitted_call_ids.clear()
+            continue
         # Compaction items carry the post-compaction context. Emit a
         # Compacted rollout record and discard all prior records — the
         # replacement_history replaces them.
@@ -2928,6 +3086,8 @@ async def _patch_external_session_id(
     client: httpx.AsyncClient,
     session_id: str,
     thread_id: str,
+    *,
+    context_epoch: int | None,
 ) -> None:
     """
     Persist the native Codex thread id on the Omnigent session.
@@ -2935,11 +3095,11 @@ async def _patch_external_session_id(
     :param client: HTTP client pointed at AP.
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
     :param thread_id: Codex thread id.
+    :param context_epoch: The launch's context epoch, or ``None`` when unstamped.
     :returns: None.
     """
-    resp = await client.patch(
-        f"/v1/sessions/{url_component(session_id)}",
-        json={"external_session_id": thread_id},
+    resp = await patch_codex_external_session_id(
+        client, session_id=session_id, thread_id=thread_id, context_epoch=context_epoch
     )
     if resp.status_code >= 400:
         raise click.ClickException(

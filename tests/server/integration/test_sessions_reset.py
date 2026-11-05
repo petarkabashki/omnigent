@@ -171,3 +171,24 @@ async def test_external_session_id_from_before_a_reset_is_refused(
     )
     assert current.status_code == 200, current.text
     assert current.json()["external_session_id"] == "sid-new"
+
+
+async def test_codex_thread_id_patch_from_before_a_reset_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    from omnigent.harnesses.codex_native.forwarder import patch_codex_external_session_id
+
+    sid, [reset], _ = await _reset_twice(client, 200, {})
+    assert reset.status_code == 200, reset.text
+
+    stale = await patch_codex_external_session_id(
+        client, session_id=sid, thread_id="thread-old", context_epoch=0
+    )
+    assert stale.status_code == 409, stale.text
+    assert (await client.get(f"/v1/sessions/{sid}")).json()["external_session_id"] is None
+
+    current = await patch_codex_external_session_id(
+        client, session_id=sid, thread_id="thread-new", context_epoch=1
+    )
+    assert current.status_code == 200, current.text
+    assert (await client.get(f"/v1/sessions/{sid}")).json()["external_session_id"] == "thread-new"

@@ -229,9 +229,14 @@ async def test_failed_commit_keeps_the_persisted_boundary() -> None:
     [
         (_Harness(status="running"), {}, ErrorCode.SESSION_BUSY),
         (_Harness(server_pending=True), {}, ErrorCode.PENDING_INPUTS),
-        (_Harness(native_harness="codex-native"), {}, ErrorCode.RESET_UNSUPPORTED),
+        (_Harness(native_harness="pi-native"), {}, ErrorCode.RESET_UNSUPPORTED),
         (
             _Harness(native_harness="claude-native"),
+            {"summary": {"text": "carried"}},
+            ErrorCode.INVALID_INPUT,
+        ),
+        (
+            _Harness(native_harness="codex-native"),
             {"summary": {"text": "carried"}},
             ErrorCode.INVALID_INPUT,
         ),
@@ -281,13 +286,16 @@ async def test_other_native_harnesses_keep_the_planned_refusal() -> None:
     assert "native support is planned" in str(caught.value)
 
 
-async def test_claude_native_reset_clears_resume_state_before_the_relaunch() -> None:
-    harness = _Harness(native_harness="claude-native")
+@pytest.mark.parametrize("native_harness", ["claude-native", "codex-native"])
+async def test_claude_native_reset_clears_resume_state_before_the_relaunch(
+    native_harness: str,
+) -> None:
+    harness = _Harness(native_harness=native_harness)
 
     result = await harness.run()
 
     assert result.epoch == 1
-    # The runner's commit relaunches Claude, so it must find no id to --resume.
+    # The runner's commit relaunches the vendor, so it must find no id to resume.
     assert harness.store.log == [
         "forward prepare",
         "clear external_session_id",
@@ -296,18 +304,21 @@ async def test_claude_native_reset_clears_resume_state_before_the_relaunch() -> 
         "forward commit",
     ]
     # Both phases name the harness, so a runner without the spec cached still
-    # takes the claude-native path.
+    # takes the native path.
     assert harness.forwarded == [
-        {**_PREPARE, "harness": "claude-native"},
-        {**_COMMIT, "harness": "claude-native"},
+        {**_PREPARE, "harness": native_harness},
+        {**_COMMIT, "harness": native_harness},
     ]
     assert harness.published[0]["type"] == "session.reset"
 
 
-async def test_claude_native_reset_without_a_bound_runner_still_clears_resume_state() -> None:
+@pytest.mark.parametrize("native_harness", ["claude-native", "codex-native"])
+async def test_claude_native_reset_without_a_bound_runner_still_clears_resume_state(
+    native_harness: str,
+) -> None:
     # The epoch the boundary raises makes the next launch skip the stale local hint.
     harness = _Harness(
-        native_harness="claude-native", runner_id=None, host_id="host_1", runner_results=[None]
+        native_harness=native_harness, runner_id=None, host_id="host_1", runner_results=[None]
     )
 
     result = await harness.run()
@@ -321,8 +332,11 @@ async def test_claude_native_reset_without_a_bound_runner_still_clears_resume_st
     ]
 
 
-async def test_claude_native_reset_clears_an_id_recorded_during_prepare() -> None:
-    harness = _Harness(native_harness="claude-native")
+@pytest.mark.parametrize("native_harness", ["claude-native", "codex-native"])
+async def test_claude_native_reset_clears_an_id_recorded_during_prepare(
+    native_harness: str,
+) -> None:
+    harness = _Harness(native_harness=native_harness)
     harness.store.external_session_id = None
     harness.id_landing_during_prepare = "sid-from-the-stopped-pane"
 
@@ -331,6 +345,7 @@ async def test_claude_native_reset_clears_an_id_recorded_during_prepare() -> Non
     assert harness.store.external_session_id is None
 
 
+@pytest.mark.parametrize("native_harness", ["claude-native", "codex-native"])
 @pytest.mark.parametrize(
     ("bound", "expected_log"),
     [
@@ -343,10 +358,10 @@ async def test_claude_native_reset_clears_an_id_recorded_during_prepare() -> Non
     ],
 )
 async def test_claude_native_reset_conflict_persists_no_boundary(
-    bound: bool, expected_log: list[str]
+    native_harness: str, bound: bool, expected_log: list[str]
 ) -> None:
     harness = _Harness(
-        native_harness="claude-native",
+        native_harness=native_harness,
         runner_id="runner_1" if bound else None,
         host_id=None if bound else "host_1",
         runner_results=[_Forwarded(200), _Forwarded(200)] if bound else [None],

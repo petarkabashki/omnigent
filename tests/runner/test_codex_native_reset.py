@@ -1,0 +1,285 @@
+"""Codex-native reset in place: forwarder cursor wipe, phase order, launch hold."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+
+from omnigent.harnesses.claude_native.bridge import read_launch_epoch, record_launch_epoch
+from omnigent.harnesses.codex_native.bridge import (
+    CodexNativeBridgeState,
+    bridge_dir_for_bridge_id,
+    read_bridge_state,
+    read_child_usage_baselines,
+    record_child_usage_baseline,
+    write_bridge_state,
+)
+from omnigent.harnesses.codex_native.forwarder import (
+    _replay_dead_letters_before_resume,
+    reset_codex_forward_state,
+)
+from omnigent.native._native_post_delivery import append_dead_letter
+from omnigent.runner import turn_routing
+from omnigent.runner.native import claude_reset, orchestration
+from omnigent.runner.native.claude_reset import ClaudeNativeReset, ClaudeResetBusyError
+from omnigent.runner.native.codex_reset import stamp_codex_launch_epoch, wipe_codex_resume_state
+
+
+def _write_cursor(bridge_dir: Path) -> None:
+    """Leave the state a forwarder mid-turn with a pending shell command would resume from."""
+    write_bridge_state(
+        bridge_dir,
+        CodexNativeBridgeState(
+            session_id="conv_a",
+            socket_path="ws://127.0.0.1:1",
+            thread_id="thread_old",
+            codex_home=str(bridge_dir / "codex-home"),
+            active_turn_id="turn_old",
+            pending_shell_command_id="shell_old",
+        ),
+    )
+    record_child_usage_baseline(bridge_dir, "thread_child", (5000, 4000, 100))
+
+
+def test_forwarder_reset_drops_the_replay_cursor_and_child_baselines(tmp_path: Path) -> None:
+    _write_cursor(tmp_path)
+    assert read_bridge_state(tmp_path) is not None
+
+    reset_codex_forward_state(tmp_path)
+    # A second reset on an already-clean bridge is a no-op.
+    reset_codex_forward_state(tmp_path)
+
+    assert read_bridge_state(tmp_path) is None
+    assert read_child_usage_baselines(tmp_path) == {}
+
+
+def test_wipe_also_drops_a_pending_routed_prompt_and_keeps_unrelated_files(
+    tmp_path: Path,
+) -> None:
+    _write_cursor(tmp_path)
+    turn_routing.write_pending_replay(
+        tmp_path, session_id="conv_a", prompt="before the boundary", blocked_turn_id="turn_old"
+    )
+    unrelated = tmp_path / "bridge.json"
+    unrelated.write_text("{}")
+
+    wipe_codex_resume_state(tmp_path)
+
+    assert read_bridge_state(tmp_path) is None
+    assert turn_routing.read_pending_replay(tmp_path) is None
+    assert unrelated.exists()
+
+
+@pytest.mark.parametrize(
+    ("stamped_epoch", "thread_id", "wiped"),
+    [
+        pytest.param(1, None, True, id="reset_no_runner_ran"),
+        pytest.param(None, None, True, id="never_stamped"),
+        pytest.param(2, None, False, id="already_on_this_epoch"),
+        pytest.param(1, "thread_new", False, id="resuming_a_thread_from_this_epoch"),
+    ],
+)
+def test_a_launch_catches_up_on_a_reset_no_runner_ran(
+    tmp_path: Path, stamped_epoch: int | None, thread_id: str | None, wiped: bool
+) -> None:
+    _write_cursor(tmp_path)
+    if stamped_epoch is not None:
+        record_launch_epoch(tmp_path, stamped_epoch)
+
+    stamp_codex_launch_epoch(tmp_path, 2, thread_id=thread_id)
+
+    assert read_launch_epoch(tmp_path) == 2
+    assert (read_bridge_state(tmp_path) is None) is wiped
+    assert (read_child_usage_baselines(tmp_path) == {}) is wiped
+
+
+@pytest.mark.asyncio
+async def test_a_runner_launch_catches_up_on_a_reset_no_runner_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("omnigent.harnesses.codex_native.bridge._BRIDGE_ROOT", tmp_path)
+    bridge_dir = bridge_dir_for_bridge_id("conv_a")
+    bridge_dir.mkdir()
+    _write_cursor(bridge_dir)
+    record_launch_epoch(bridge_dir, 1)
+
+    class _StampDone(Exception):
+        pass
+
+    async def launch_config(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            external_session_id=None, workspace=tmp_path, bridge_id="conv_a", context_epoch=2
+        )
+
+    def stop_after_the_stamp(_bridge_dir: Path) -> Path:
+        raise _StampDone
+
+    monkeypatch.setattr(orchestration, "_codex_native_launch_config", launch_config)
+    monkeypatch.setattr(
+        "omnigent.harnesses.codex_native.bridge.socket_path_for_bridge_dir", stop_after_the_stamp
+    )
+
+    with pytest.raises(_StampDone):
+        await orchestration._auto_create_codex_terminal(
+            "conv_a", MagicMock(), lambda _session_id, _event: None
+        )
+
+    assert read_launch_epoch(bridge_dir) == 2
+    assert read_bridge_state(bridge_dir) is None
+    assert read_child_usage_baselines(bridge_dir) == {}
+
+
+def _dead_letter(
+    bridge_dir: Path, session_id: str, source_id: str, *, epoch: int | None = None
+) -> None:
+    append_dead_letter(
+        bridge_dir,
+        session_id=session_id,
+        event_type="external_conversation_item",
+        payload={"item_type": "message", "source_id": source_id},
+        reason="transient HTTP failure after retries",
+        http_status=503,
+        context_epoch=epoch,
+    )
+
+
+async def _replay_against_epochs(
+    bridge_dir: Path, epochs: dict[str, int]
+) -> list[tuple[str, str]]:
+    """Replay the bridge's letters; returns each ``(session id, source id)`` posted."""
+    reposted: list[tuple[str, str]] = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        session_id = request.url.path.split("/")[3]
+        if request.method == "GET":
+            return httpx.Response(200, json={"context_epoch": epochs[session_id]})
+        reposted.append((session_id, json.loads(request.content)["data"]["source_id"]))
+        return httpx.Response(202, json={"queued": False})
+
+    async with httpx.AsyncClient(
+        base_url="http://test", transport=httpx.MockTransport(server)
+    ) as client:
+        await _replay_dead_letters_before_resume(client, bridge_dir)
+    return reposted
+
+
+@pytest.mark.asyncio
+async def test_a_dead_letter_from_before_a_reset_does_not_replay_after_the_boundary(
+    tmp_path: Path,
+) -> None:
+    _dead_letter(tmp_path, "conv_a", "item_rotated_out")
+    (tmp_path / "dead_letter.jsonl").replace(tmp_path / "dead_letter.jsonl.1")
+    _dead_letter(tmp_path, "conv_a", "item_old")
+
+    wipe_codex_resume_state(tmp_path)
+
+    assert await _replay_against_epochs(tmp_path, {"conv_a": 1}) == []
+    assert all(not path.read_text() for path in tmp_path.glob("dead_letter*"))
+
+
+@pytest.mark.asyncio
+async def test_resetting_a_rotated_session_keeps_the_letters_of_the_session_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """Replay routes each letter to its own session, so only the reset one's are stale."""
+    _dead_letter(tmp_path, "conv_original", "item_still_deliverable", epoch=3)
+    _dead_letter(tmp_path, "conv_rotated", "item_before_the_reset", epoch=0)
+
+    wipe_codex_resume_state(tmp_path)
+
+    assert await _replay_against_epochs(tmp_path, {"conv_original": 3, "conv_rotated": 1}) == [
+        ("conv_original", "item_still_deliverable")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_reset_keeps_letters_proven_undelivered(tmp_path: Path) -> None:
+    """``prepare`` runs before the boundary, and the server may never write one."""
+    _dead_letter(tmp_path, "conv_a", "item_undelivered", epoch=2)
+    reset, _ = _codex_reset(tmp_path, [])
+
+    await reset.prepare("conv_a")
+    reset._release("conv_a")
+
+    assert await _replay_against_epochs(tmp_path, {"conv_a": 2}) == [
+        ("conv_a", "item_undelivered")
+    ]
+
+
+def _codex_reset(
+    tmp_path: Path, calls: list[str], *, hold_s: float = 30.0
+) -> tuple[ClaudeNativeReset, asyncio.Lock]:
+    """Build the shared reset phases configured as codex, recording step order."""
+    ensure_lock = asyncio.Lock()
+
+    async def stop_pane(session_id: str, _bridge_dir: Path) -> None:
+        calls.append(f"stop {session_id} locked={ensure_lock.locked()}")
+        # A forwarder racing the stop re-records the old thread.
+        _write_cursor(tmp_path)
+
+    async def bridge_dir_for_session(session_id: str) -> Path:
+        calls.append(f"lookup {session_id}")
+        return tmp_path
+
+    def wipe(bridge_dir: Path) -> None:
+        calls.append(f"wipe cursor={read_bridge_state(bridge_dir) is not None}")
+        wipe_codex_resume_state(bridge_dir)
+
+    async def relaunch(session_id: str) -> None:
+        calls.append(
+            f"relaunch {session_id} cursor={read_bridge_state(tmp_path) is not None} "
+            f"locked={ensure_lock.locked()}"
+        )
+
+    reset = ClaudeNativeReset(
+        stop_pane=stop_pane,
+        bridge_dir_for_session=bridge_dir_for_session,
+        relaunch=relaunch,
+        ensure_lock_for_session=lambda _session_id: ensure_lock,
+        hold_s=hold_s,
+        wipe=wipe,
+        runtime_label="Codex",
+        wipe_in_prepare=False,
+    )
+    return reset, ensure_lock
+
+
+@pytest.mark.asyncio
+async def test_prepare_holds_launches_off_until_commit_relaunches_without_the_cursor(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    reset, ensure_lock = _codex_reset(tmp_path, calls)
+
+    await reset.prepare("conv_a")
+    assert ensure_lock.locked()
+    await reset.commit("conv_a")
+
+    assert calls == [
+        "lookup conv_a",
+        "stop conv_a locked=True",
+        "stop conv_a locked=True",
+        "wipe cursor=True",
+        "relaunch conv_a cursor=False locked=False",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_refusal_names_codex_when_a_launch_outlasts_its_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(claude_reset, "RESET_PREPARE_LOCK_WAIT_S", 0.05)
+    calls: list[str] = []
+    reset, ensure_lock = _codex_reset(tmp_path, calls)
+    await ensure_lock.acquire()
+
+    with pytest.raises(ClaudeResetBusyError, match=r"^Codex is still starting"):
+        await reset.prepare("conv_a")
+
+    assert calls == []

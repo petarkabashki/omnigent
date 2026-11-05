@@ -271,6 +271,32 @@ async def teardown_codex_native_app_server(session_id: str) -> None:
         await app_server.close()
 
 
+async def stop_codex_native_bridge_backends(bridge_dir: Path) -> None:
+    """
+    Stop every Codex backend still running against a bridge directory.
+
+    A native ``/clear`` rotates onto a new session in the same directory, while the
+    launching session stays the registry key for the app-server and forwarder. The
+    reap catches a backend no registry entry holds.
+
+    :param bridge_dir: The bridge directory shared by the rotated sessions.
+    :returns: None.
+    """
+    from omnigent.harnesses.codex_native.process_registry import (
+        reap_codex_native_processes_for_state_dir,
+    )
+
+    launching_sessions = [
+        session_id
+        for session_id, launch_dir in _AUTO_CODEX_BRIDGE_DIRS.items()
+        if launch_dir == bridge_dir
+    ]
+    for session_id in launching_sessions:
+        await teardown_codex_native_app_server(session_id)
+        await _cancel_auto_forwarder_task(session_id)
+    await asyncio.to_thread(reap_codex_native_processes_for_state_dir, bridge_dir)
+
+
 async def teardown_all_codex_native_app_servers() -> None:
     """
     Tear down every host-spawned codex-native app-server on this runner.
@@ -690,6 +716,7 @@ class _CodexNativeLaunchConfig:
     turn_routing: bool = False
     reasoning_effort: str | None = None
     bridge_id: str | None = None
+    context_epoch: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1566,6 +1593,7 @@ async def _codex_native_launch_config(
         "labels",
         "harness_override",
         "cost_control_mode_override",
+        "context_epoch",
     }
     # Older envelopes can omit fields that default to None during parsing.
     # Only explicit values, including nulls, replace the legacy config read.
@@ -1666,6 +1694,12 @@ async def _codex_native_launch_config(
         _bid = labels.get(CODEX_NATIVE_BRIDGE_ID_LABEL_KEY)
         if isinstance(_bid, str) and _bid:
             bridge_id = _bid
+    _snapshot_epoch = snapshot.get("context_epoch")
+    if _snapshot_epoch:
+        # A crash can leave fork labels behind a reset; a fork starts at epoch 0.
+        fork_source_id = None
+        fork_source_external_id = None
+        fork_carry_history = False
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(
@@ -1689,6 +1723,7 @@ async def _codex_native_launch_config(
         turn_routing=routing_class.turn_routing,
         reasoning_effort=reasoning_effort,
         bridge_id=bridge_id,
+        context_epoch=_snapshot_epoch if isinstance(_snapshot_epoch, int) else None,
     )
 
 
@@ -5447,6 +5482,7 @@ async def _auto_create_codex_terminal(
     # old process: the first launch loads the resume/fork module graph too.
     import omnigent.harnesses.codex_native.main as _codex_native_main  # noqa: F401
     import omnigent.harnesses.codex_native.process_registry as _process_registry  # noqa: F401
+    import omnigent.runner.native.codex_reset as _codex_reset
     from omnigent.harnesses.codex_native.app_server import (
         CodexAppServerClient,
         CodexAppServerResponseError,
@@ -5481,6 +5517,14 @@ async def _auto_create_codex_terminal(
     original_external_session_id = launch_config.external_session_id
     workspace = str(launch_config.workspace)
     bridge_dir = prepare_bridge_dir(launch_config.bridge_id or session_id)
+    if launch_config.context_epoch is not None:
+        # Late reports from this launch are stamped so a reset can refuse them.
+        await asyncio.to_thread(
+            _codex_reset.stamp_codex_launch_epoch,
+            bridge_dir,
+            launch_config.context_epoch,
+            thread_id=launch_config.external_session_id,
+        )
     socket_path = socket_path_for_bridge_dir(bridge_dir)
     codex_home = codex_home_for_bridge_dir(bridge_dir)
     app_server = _AUTO_CODEX_APP_SERVERS.get(session_id)
@@ -6871,6 +6915,8 @@ async def _codex_discover_thread_and_forward(
         # leaves chat streaming working — only fork-history carry-over
         # degrades.
         from omnigent.cli_auth import open_server_client
+        from omnigent.harnesses.claude_native.bridge import read_launch_epoch
+        from omnigent.harnesses.codex_native.forwarder import patch_codex_external_session_id
 
         try:
             async with open_server_client(
@@ -6879,12 +6925,21 @@ async def _codex_discover_thread_and_forward(
                 auth=_RunnerDatabricksAuth(auth_factory),
                 timeout=httpx.Timeout(10.0),
             ) as _ext_client:
-                _ext_resp = await _ext_client.patch(
-                    f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-                    json={"external_session_id": thread_id},
-                    params={"include_usage": "false"},
+                _ext_resp = await patch_codex_external_session_id(
+                    _ext_client,
+                    session_id=session_id,
+                    thread_id=thread_id,
+                    context_epoch=await asyncio.to_thread(read_launch_epoch, bridge_dir),
                 )
-            if _ext_resp.status_code >= 400:
+            if _ext_resp.status_code == 409:
+                _logger.info(
+                    "AP refused codex external_session_id PATCH from before a context reset; "
+                    "session=%s thread=%s",
+                    session_id,
+                    thread_id,
+                    extra={"session_id": session_id},
+                )
+            elif _ext_resp.status_code >= 400:
                 _logger.warning(
                     "AP rejected codex external_session_id PATCH (%s); session=%s thread=%s — "
                     "a fork of this session will resume fresh",
@@ -11792,6 +11847,24 @@ async def _session_labels_for_runner_spawn(
         ``"conv_abc123"``.
     :returns: String label mapping. Empty on lookup failure.
     """
+    labels = await _read_session_labels(server_client=server_client, session_id=session_id)
+    return {} if labels is None else labels
+
+
+async def _read_session_labels(
+    *,
+    server_client: httpx.AsyncClient,
+    session_id: str,
+) -> dict[str, str] | None:
+    """
+    Fetch session labels, telling a failed lookup from a session without any.
+
+    :param server_client: Omnigent server client used to fetch the session
+        labels endpoint.
+    :param session_id: Omnigent session/conversation id, e.g.
+        ``"conv_abc123"``.
+    :returns: String label mapping, or ``None`` on lookup failure.
+    """
     from omnigent.inner.databricks_executor import DatabricksAuthError
 
     path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/labels"
@@ -11807,7 +11880,7 @@ async def _session_labels_for_runner_spawn(
             type(exc).__name__,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     except (httpx.HTTPError, DatabricksAuthError) as exc:
         # DatabricksAuthError: the host credential service couldn't sign the
         # request. Like any other lookup failure, that must not fail the turn.
@@ -11817,7 +11890,7 @@ async def _session_labels_for_runner_spawn(
             type(exc).__name__,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     if resp.status_code != 200:
         _logger.warning(
             "Failed to resolve session labels; session=%s status=%s",
@@ -11825,7 +11898,7 @@ async def _session_labels_for_runner_spawn(
             resp.status_code,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     try:
         labels = resp.json().get("labels")
     except ValueError:
@@ -11840,7 +11913,7 @@ async def _session_labels_for_runner_spawn(
             resp.status_code,
             extra={"session_id": session_id},
         )
-        return {}
+        return None
     if not isinstance(labels, dict):
         return {}
     return {str(key): str(value) for key, value in labels.items()}
