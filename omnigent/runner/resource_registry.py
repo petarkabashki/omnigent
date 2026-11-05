@@ -211,6 +211,27 @@ class TerminalExitEvent:
     lifecycle_context: dict[str, str] = field(default_factory=dict)
 
 
+def _stamp_claude_launch_id(session_id: str, instance: TerminalInstance) -> None:
+    """Write this process's launch id where the Claude usage forwarder reads it."""
+    try:
+        from omnigent.harnesses.claude_native.bridge import (
+            bridge_dir_for_conversation_id,
+            bridge_dir_from_launch_args,
+            record_launch_id,
+        )
+
+        bridge_dir = bridge_dir_from_launch_args(instance.args)
+        if bridge_dir is None:
+            bridge_dir = bridge_dir_for_conversation_id(session_id)
+        record_launch_id(bridge_dir, instance.lifecycle_trace.launch_id)
+    except Exception:
+        _logger.debug(
+            "Claude launch id stamp failed",
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
 def _terminal_lifecycle_context(
     instance: TerminalInstance | None, resource_role: str | None
 ) -> dict[str, str]:
@@ -1420,6 +1441,8 @@ class SessionResourceRegistry:
         """Project and observe an already-launched terminal instance."""
         if self._terminal_registry is None:
             raise RuntimeError("Terminal registry not configured")
+        if resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
+            await asyncio.to_thread(_stamp_claude_launch_id, session_id, instance)
         if not getattr(instance, "running", False) or not await instance.is_alive():
             from omnigent.terminals.registry import TerminalExitedDuringLaunch
 

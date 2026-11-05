@@ -266,6 +266,9 @@ _MCP_SOCKET_SUFFIX = ".sock"
 _STATE_FILE = "state.json"
 #: Holds the session's context epoch at the last runner launch.
 _LAUNCH_EPOCH_FILE = "launch_epoch"
+#: Runner-minted id of the Claude process launched into this bridge dir.
+_LAUNCH_ID_FILE = "launch_id"
+_LAUNCH_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
 _HOOKS_FILE = "hooks.jsonl"
 OBSERVER_HOOK_STDERR_FILE = "observer_hook.stderr"
 _RECENT_LOCAL_COMMAND_LINE_LIMIT = 200
@@ -1913,6 +1916,7 @@ def prepare_bridge_dir(
             _SERVER_FILE,
             _STATE_FILE,
             _LAUNCH_EPOCH_FILE,
+            _LAUNCH_ID_FILE,
             _HOOKS_FILE,
             OBSERVER_HOOK_STDERR_FILE,
             _TOOL_RELAY_FILE,
@@ -3231,6 +3235,36 @@ def read_launch_epoch(bridge_dir: Path) -> int | None:
         return int((bridge_dir / _LAUNCH_EPOCH_FILE).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
+
+
+def record_launch_id(bridge_dir: Path, launch_id: str) -> None:
+    """
+    Stamp the bridge dir with the runner's id for this Claude process.
+
+    A relaunch overwrites the previous id. The usage forwarder reads it back
+    and sends it with the cost report. An id that is not 32 hex characters is
+    ignored, and a missing bridge directory is left uncreated.
+
+    :param bridge_dir: Bridge directory path.
+    :param launch_id: Terminal launch id, e.g. ``"ab" * 16``.
+    """
+    if not _LAUNCH_ID_RE.fullmatch(launch_id) or not bridge_dir.is_dir():
+        return
+    (bridge_dir / _LAUNCH_ID_FILE).write_text(launch_id + "\n", encoding="utf-8")
+
+
+def read_launch_id(bridge_dir: Path) -> str | None:
+    """
+    Return the launch id stamped for this bridge dir.
+
+    :param bridge_dir: Bridge directory path.
+    :returns: The 32-hex launch id, or ``None`` when none is stamped.
+    """
+    try:
+        raw = (bridge_dir / _LAUNCH_ID_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw if _LAUNCH_ID_RE.fullmatch(raw) else None
 
 
 def clear_claude_status_snapshot(bridge_dir: Path) -> None:

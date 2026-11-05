@@ -710,6 +710,226 @@ def test_two_resets_in_a_row_keep_every_conversations_spend(db_uri: str) -> None
     assert usage["policy_cost_usd"] == pytest.approx(15.0)
 
 
+def _launch_id(n: int) -> str:
+    return f"{n:032x}"
+
+
+def test_cost_keeps_growing_after_a_relaunch_restarts_the_reported_total(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relaunched Claude restarts S near 0; that spend still counts, once."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="relaunch", agent_id=_AGENT_ID).id
+    daily = _spy_daily_cost(monkeypatch)
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 10.0,
+            "policy_cost_usd": 10.0,
+            "launch_id": _launch_id(1),
+            "model": "m1",
+        },
+        store,
+    )
+
+    for reported in (0.5, 2.0):
+        _persist_native_cumulative_usage(
+            conv_id,
+            {
+                "cumulative_cost_usd": reported,
+                "policy_cost_usd": reported,
+                "launch_id": _launch_id(2),
+                "model": "m2",
+            },
+            store,
+        )
+
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(12.0)
+    assert usage["policy_cost_usd"] == pytest.approx(12.0)
+    assert usage["by_model"]["m1"]["total_cost_usd"] == pytest.approx(10.0)
+    assert usage["by_model"]["m2"]["total_cost_usd"] == pytest.approx(2.0)
+    assert sum(daily) == pytest.approx(12.0)
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 0.25,
+            "policy_cost_usd": 0.25,
+            "launch_id": _launch_id(3),
+            "model": "m2",
+        },
+        store,
+    )
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.0,
+            "policy_cost_usd": 1.0,
+            "launch_id": _launch_id(3),
+            "model": "m2",
+        },
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(13.0)
+    assert usage["policy_cost_usd"] == pytest.approx(13.0)
+    assert sum(daily) == pytest.approx(13.0)
+
+
+def test_a_row_with_no_launch_id_rebases_once_when_the_report_is_lower(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running sessions have no stored launch id. The next low report catches up once."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="legacy", agent_id=_AGENT_ID).id
+    daily = _spy_daily_cost(monkeypatch)
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 10.0, "policy_cost_usd": 10.0}, store
+    )
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 2.0,
+            "policy_cost_usd": 2.0,
+            "launch_id": _launch_id(1),
+        },
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(12.0)
+    assert usage["policy_cost_usd"] == pytest.approx(12.0)
+    assert sum(daily) == pytest.approx(12.0)
+
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.5,
+            "policy_cost_usd": 1.5,
+            "launch_id": _launch_id(2),
+        },
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(12.0)
+    assert usage["policy_cost_usd"] == pytest.approx(12.0)
+
+
+def test_rotating_launch_ids_cannot_raise_the_total_without_a_bound(
+    db_uri: str,
+) -> None:
+    """A new id on every report does not add that report's total each time."""
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="rotate", agent_id=_AGENT_ID).id
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 10.0,
+            "policy_cost_usd": 10.0,
+            "launch_id": _launch_id(1),
+        },
+        store,
+    )
+    for i in range(2, 32):
+        reported = 10.0 - i * 0.01
+        _persist_native_cumulative_usage(
+            conv_id,
+            {
+                "cumulative_cost_usd": reported,
+                "policy_cost_usd": reported,
+                "launch_id": _launch_id(i),
+            },
+            store,
+        )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(10.0)
+    assert usage["policy_cost_usd"] == pytest.approx(10.0)
+
+    for reported in (4.0, 1.0, 0.4, 0.1):
+        _persist_native_cumulative_usage(
+            conv_id,
+            {
+                "cumulative_cost_usd": reported,
+                "policy_cost_usd": reported,
+                "launch_id": _launch_id(100 + int(reported * 10)),
+            },
+            store,
+        )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] < 20.0
+    assert usage["policy_cost_usd"] == pytest.approx(usage["total_cost_usd"])
+
+
+def test_forged_low_report_on_the_same_launch_lowers_nothing(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="forged-launch", agent_id=_AGENT_ID).id
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 10.0,
+            "policy_cost_usd": 12.0,
+            "launch_id": _launch_id(1),
+        },
+        store,
+    )
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.0,
+            "policy_cost_usd": 1.0,
+            "launch_id": _launch_id(1),
+        },
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(10.0)
+    assert usage["policy_cost_usd"] == pytest.approx(12.0)
+
+
+def test_low_report_without_a_launch_id_does_not_rebase(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="no-id", agent_id=_AGENT_ID).id
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 10.0, "policy_cost_usd": 10.0}, store
+    )
+    _persist_native_cumulative_usage(
+        conv_id, {"cumulative_cost_usd": 0.5, "policy_cost_usd": 0.5}, store
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(10.0)
+    assert usage["policy_cost_usd"] == pytest.approx(10.0)
+
+
+def test_reset_then_a_new_launch_keeps_both_conversations_spend(db_uri: str) -> None:
+    store = SqlAlchemyConversationStore(db_uri)
+    conv_id = store.create_conversation(title="reset-relaunch", agent_id=_AGENT_ID).id
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 10.0,
+            "policy_cost_usd": 10.0,
+            "launch_id": _launch_id(1),
+            "context_epoch": 0,
+        },
+        store,
+    )
+    store.append_context_reset(conv_id, response_id="reset_1")
+    _persist_native_cumulative_usage(
+        conv_id,
+        {
+            "cumulative_cost_usd": 1.0,
+            "policy_cost_usd": 1.0,
+            "launch_id": _launch_id(2),
+            "context_epoch": 1,
+        },
+        store,
+    )
+    usage = _usage(store, conv_id)
+    assert usage["total_cost_usd"] == pytest.approx(11.0)
+    assert usage["policy_cost_usd"] == pytest.approx(11.0)
+
+
 def test_forged_low_report_after_a_reset_lowers_nothing(db_uri: str) -> None:
     store = SqlAlchemyConversationStore(db_uri)
     conv_id = _reset_session_after_spending(store, spent=10.0, policy=10.0)

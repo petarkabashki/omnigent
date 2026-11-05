@@ -43,6 +43,7 @@ from omnigent.harnesses.claude_native.bridge import (
     read_hook_events_from_offset,
     read_hook_events_since_with_position,
     read_launch_epoch,
+    read_launch_id,
     read_message_deltas_from_offset,
     read_pane_signals,
     read_seen_claude_session_ids,
@@ -904,6 +905,9 @@ class _ForwardDedupeState:
     # Launch context epoch the cost baselines above belong to. S restarts on a
     # reset, so a new epoch clears them.
     cost_epoch: int | None = None
+    # Launch id the cost baselines belong to. A new Claude process restarts S
+    # near zero, so a changed id clears them and the lower total is posted.
+    cost_launch_id: str | None = None
     # Last permission mode POSTed as ``external_permission_mode_change`` —
     # mirrors the launch mode and any in-pane shift+tab switch, neither of
     # which the web UI can observe on its own.
@@ -3231,6 +3235,13 @@ async def _forward_session_cost(
             dedupe.posted_cost = None
             dedupe.posted_policy_cost = None
         dedupe.cost_epoch = launch_epoch
+    launch_id = await asyncio.to_thread(read_launch_id, bridge_dir)
+    if launch_id != dedupe.cost_launch_id:
+        # The first poll can post S before the runner stamps the id. Clear the
+        # baseline so that same S is posted again once the id is known.
+        dedupe.posted_cost = None
+        dedupe.posted_policy_cost = None
+        dedupe.cost_launch_id = launch_id
     status_state = None
     if not await asyncio.to_thread(status_snapshot_predates_reset, bridge_dir):
         status_state = await asyncio.to_thread(read_claude_context_state, bridge_dir)
@@ -3282,6 +3293,8 @@ async def _forward_session_cost(
         model = status_state.get("model")
         if isinstance(model, str) and model:
             payload["model"] = model
+    if launch_id is not None:
+        payload["launch_id"] = launch_id
     try:
         await _post_external_session_usage(
             client,

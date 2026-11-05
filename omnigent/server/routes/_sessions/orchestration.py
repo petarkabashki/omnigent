@@ -420,6 +420,7 @@ from omnigent.stores.conversation_store import (
     SIDE_CHAT_SOURCE_LABEL_KEY,
     ConversationNotFoundError,
     NameAlreadyExistsError,
+    capture_context_reset_base,
     pinned_label_key,
     runner_seen_is_fresh,
 )
@@ -1879,6 +1880,99 @@ def _coerce_context_epoch(data: dict[str, Any]) -> int | None:
     return epoch
 
 
+# Vendor launch id stamped by the runner for one Claude process. A client can
+# put any string on the usage event, so only this shape is consulted.
+_USAGE_LAUNCH_ID = re.compile(r"[0-9a-f]{32}\Z")
+_USAGE_LAUNCH_ID_KEY = "usage_launch_id"
+_USAGE_LAUNCH_COST_KEY = "usage_launch_cost"
+_USAGE_LAUNCH_POLICY_KEY = "usage_launch_policy"
+# A later launch rebases only when its reported total is below this fraction of
+# the previous launch's high water. Each accepted rebase adds less than half
+# that high water, so rotating client-supplied ids cannot raise the stored
+# total without a bound.
+_RELAUNCH_DROP_RATIO = 0.5
+
+
+def _reported_launch_id(data: Mapping[str, Any]) -> str | None:
+    """Return a runner-shaped launch id from a usage report, or none."""
+    raw = data.get("launch_id")
+    if isinstance(raw, str) and _USAGE_LAUNCH_ID.fullmatch(raw):
+        return raw
+    return None
+
+
+def _epoch_high_water(current: Mapping[str, Any]) -> float:
+    """Stored display total minus the reset base: this epoch's own high water."""
+    raw_base = current.get(CONTEXT_RESET_BASE_KEY)
+    base_cost = (
+        float(raw_base.get("total_cost_usd", 0.0) or 0.0) if isinstance(raw_base, dict) else 0.0
+    )
+    return float(current.get("total_cost_usd", 0.0) or 0.0) - base_cost
+
+
+def _relaunch_rebase(
+    current: Mapping[str, Any], reported_cost: float, launch_id: str | None
+) -> bool:
+    """
+    Whether this report starts a vendor total that the stored figure must add.
+
+    A row with no launch id yet rebases once, when the report names a launch
+    and its total is below the stored one. A later id rebases only when the
+    new total is below half the previous launch's high water. Anything else,
+    including a lower total on the same id, stays on the monotonic clamp.
+    """
+    if launch_id is None:
+        return False
+    stored_id = current.get(_USAGE_LAUNCH_ID_KEY)
+    if not isinstance(stored_id, str) or not stored_id:
+        return reported_cost < _epoch_high_water(current)
+    if launch_id == stored_id:
+        return False
+    last = current.get(_USAGE_LAUNCH_COST_KEY)
+    if isinstance(last, bool) or not isinstance(last, (int, float)):
+        return False
+    return reported_cost < float(last) * _RELAUNCH_DROP_RATIO
+
+
+def _remember_usage_launch(
+    current: dict[str, Any],
+    *,
+    launch_id: str | None,
+    reported_cost: float | None,
+    reported_policy: float | None,
+    rebased: bool,
+) -> None:
+    """Record the launch a report belonged to, keeping each launch's high water."""
+    if launch_id is None or reported_cost is None:
+        return
+    stored_id = current.get(_USAGE_LAUNCH_ID_KEY)
+    stored_id = stored_id if isinstance(stored_id, str) and stored_id else None
+    if stored_id is not None and launch_id != stored_id and not rebased:
+        return
+    if rebased or stored_id != launch_id:
+        current[_USAGE_LAUNCH_ID_KEY] = launch_id
+        current[_USAGE_LAUNCH_COST_KEY] = reported_cost
+        if reported_policy is not None:
+            current[_USAGE_LAUNCH_POLICY_KEY] = reported_policy
+        return
+    previous = current.get(_USAGE_LAUNCH_COST_KEY)
+    if not isinstance(previous, bool) and isinstance(previous, (int, float)):
+        if reported_cost > float(previous):
+            current[_USAGE_LAUNCH_COST_KEY] = reported_cost
+    else:
+        current[_USAGE_LAUNCH_COST_KEY] = reported_cost
+    if reported_policy is None:
+        return
+    previous_policy = current.get(_USAGE_LAUNCH_POLICY_KEY)
+    if (
+        not isinstance(previous_policy, bool)
+        and isinstance(previous_policy, (int, float))
+        and reported_policy <= float(previous_policy)
+    ):
+        return
+    current[_USAGE_LAUNCH_POLICY_KEY] = reported_policy
+
+
 def _persist_native_cumulative_usage(
     session_id: str,
     data: dict[str, Any],
@@ -1931,6 +2025,18 @@ def _persist_native_cumulative_usage(
     A context reset starts a new vendor conversation whose totals restart near
     zero, so every persisted value is ``base + reported``, with the bases
     captured when the reset advanced the epoch. Sessions never reset have none.
+
+    A Claude relaunch restarts those vendor totals without advancing the epoch.
+    The report carries ``launch_id``, the id the runner stamped for that
+    process. The first time a stored row has no launch id and the reported
+    total is below the stored one, the stored total moves into the same base.
+    A later id does too only when its reported total is below half the previous
+    launch's high water, so a client that changes the id on every report cannot
+    raise the stored total without a bound. A lower report on the same id, or
+    with no id, changes nothing. Harnesses that do not send ``launch_id`` keep
+    the monotonic clamp. The daily rollup records the increase on the UTC day
+    the report arrives; spend from an earlier launch is not written back onto
+    the day it happened.
 
     The ``total_cost_usd`` key is written only on the priced branches
     below (exact billing, or token-priced when the model is in the
@@ -2047,6 +2153,22 @@ def _persist_native_cumulative_usage(
         # Old cumulative token totals, captured before the overwrites below so
         # per-model attribution can add only this report's growth (new - old).
         old_tokens = {key: int(current.get(key, 0) or 0) for key in _MODEL_TOKEN_KEYS}
+        # A relaunch's vendor total restarts near zero. Move the stored totals
+        # into the reset base before this report is added, so the new total is
+        # the old total plus the new launch. The decision uses the pre-write
+        # figures; a rejected id leaves the remembered launch untouched.
+        launch_id = _reported_launch_id(data)
+        reported_cost = float(cost) if cost is not None else None
+        rebased = reported_cost is not None and _relaunch_rebase(current, reported_cost, launch_id)
+        if rebased:
+            capture_context_reset_base(current, session_epoch)
+            raw_base = current.get(CONTEXT_RESET_BASE_KEY)
+            base = raw_base if isinstance(raw_base, dict) else {}
+            base_cost = float(base.get("total_cost_usd", 0.0) or 0.0)
+            base_policy_cost = float(base.get("policy_cost_usd", 0.0) or 0.0)
+            base_input = int(base.get("input_tokens", 0) or 0)
+            base_cached = int(base.get("cache_read_input_tokens", 0) or 0)
+            base_output = int(base.get("output_tokens", 0) or 0)
         if cin is not None:
             # The reported input total is INCLUSIVE of cached tokens (codex's
             # ``inputTokens`` counts cache reads). Split the cached portion into
@@ -2139,6 +2261,13 @@ def _persist_native_cumulative_usage(
             current["policy_cost_usd"] = max(
                 old_policy_cost, base_policy_cost + float(policy_cost)
             )
+        _remember_usage_launch(
+            current,
+            launch_id=launch_id,
+            reported_cost=reported_cost,
+            reported_policy=float(policy_cost) if policy_cost is not None else None,
+            rebased=rebased,
+        )
         return True
 
     current = conversation_store.update_session_usage(session_id, apply_report)

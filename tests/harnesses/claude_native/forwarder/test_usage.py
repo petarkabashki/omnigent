@@ -573,6 +573,64 @@ async def test_forward_session_cost_posts_status_when_no_subagents(
 
 
 @pytest.mark.asyncio
+async def test_forward_session_cost_reposts_a_lower_total_when_the_launch_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A new Claude process restarts S. The same number must be posted with its launch id."""
+    from omnigent.harnesses.claude_native.bridge import record_launch_id
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    parent = tmp_path / "sess.jsonl"
+    parent.write_text("parent", encoding="utf-8")
+    status_box = {"value": 0.25}
+    monkeypatch.setattr(
+        forwarder,
+        "read_claude_context_state",
+        lambda _bridge: {"total_cost_usd": status_box["value"]},
+    )
+    dedupe = forwarder._ForwardDedupeState()
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("type") == "external_session_usage":
+            posted.append(body["data"])
+        return httpx.Response(200, json={})
+
+    first = "a" * 32
+    second = "b" * 32
+    record_launch_id(bridge_dir, first)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        kwargs = {
+            "client": client,
+            "session_id": "conv_parent",
+            "bridge_dir": bridge_dir,
+            "parent_transcript_path": parent,
+            "subagent_state": forwarder.SubagentForwardState(subagents={}),
+            "dedupe": dedupe,
+            "cost_cache": {},
+        }
+        await forwarder._forward_session_cost(**kwargs)
+        assert posted == [
+            {
+                "cumulative_cost_usd": pytest.approx(0.25),
+                "policy_cost_usd": pytest.approx(0.25),
+                "launch_id": first,
+            }
+        ]
+        status_box["value"] = 0.05
+        record_launch_id(bridge_dir, second)
+        await forwarder._forward_session_cost(**kwargs)
+    assert posted[-1] == {
+        "cumulative_cost_usd": pytest.approx(0.05),
+        "policy_cost_usd": pytest.approx(0.05),
+        "launch_id": second,
+    }
+
+
+@pytest.mark.asyncio
 async def test_forward_session_cost_backs_off_after_rate_limit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
