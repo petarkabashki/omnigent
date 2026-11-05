@@ -10358,6 +10358,36 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
       ...overrides,
     });
 
+    it("refetches instead of prepending a new child onto a list that already has rows", () => {
+      // A reconnect replays a page of children newest-first. Prepending each
+      // one would reverse that page and hide anyone between it and the cursor.
+      client.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"), [
+        {
+          id: "conv_older",
+          title: "researcher:older",
+          task_summary: null,
+          tool: "researcher",
+          session_name: "older",
+          labels: {},
+          current_task_status: "completed",
+          last_task_error: null,
+          busy: false,
+          last_message_preview: "done",
+          pending_elicitations_count: 0,
+        },
+      ]);
+      const spy = vi.spyOn(client, "invalidateQueries");
+      handleSessionEvent({
+        type: "session_child_session_updated",
+        conversationId: "conv_parent",
+        childSessionId: "conv_child1",
+        child: child(),
+      });
+      const cached = client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"));
+      expect(cached?.map((row) => row.id)).toEqual(["conv_older"]);
+      expect(spy).toHaveBeenCalledWith({ queryKey: childSessionsQueryKey("conv_parent") });
+    });
+
     it("upserts a new child into the cached list", () => {
       client.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"), []);
       handleSessionEvent({
@@ -10549,19 +10579,16 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
       expect(row?.last_task_error).toBeNull();
     });
 
-    it("initializes a cold child-sessions cache from a full delta", () => {
-      // Snapshot-on-connect / spawn deltas carry full rows, so a cold
-      // cache is seeded (lets child status update without a mounted hook).
+    it("leaves a cold child-sessions cache empty so the hook's first fetch owns paging", () => {
       handleSessionEvent({
         type: "session_child_session_updated",
         conversationId: "conv_parent",
         childSessionId: "conv_child1",
         child: child(),
       });
-      const cached = client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"));
-      expect(cached).toHaveLength(1);
-      expect(cached?.[0].id).toBe("conv_child1");
-      expect(cached?.[0].busy).toBe(true);
+      expect(
+        client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent")),
+      ).toBeUndefined();
     });
 
     it("refetches the parent's child list when a child goes idle without a preview", () => {

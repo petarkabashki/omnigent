@@ -95,7 +95,15 @@ vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   // Keep the real module (childSessionsQueryKey, MAX_TREE_DEPTH,
   // cachedTreeContains) — only the hook is replaced.
   ...(await importOriginal<typeof UseChildSessionsModule>()),
-  useChildSessions: vi.fn(() => ({ children: [], isLoading: false, error: null })),
+  useChildSessions: vi.fn(() => ({
+    children: [],
+    isLoading: false,
+    error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
+  })),
 }));
 
 vi.mock("@/hooks/useSession", async (importOriginal) => {
@@ -695,6 +703,10 @@ beforeEach(() => {
     children: [],
     isLoading: false,
     error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
   });
   useSessionMock.mockReset();
   useSessionMock.mockReturnValue({ session: null, isLoading: false, error: null });
@@ -2328,6 +2340,10 @@ describe("Subagents tab", () => {
     ],
     isLoading: false,
     error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
   };
 
   it("shows the Agents tab with a count of 1 when there are no child agents", () => {
@@ -2362,13 +2378,28 @@ describe("Subagents tab", () => {
     renderShell("/c/conv_abc");
 
     // Agents is no longer the default tab — click to open it.
-    const subagentsTab = screen.getByRole("tab", { name: /Agents/i });
+    const subagentsTab = screen.getByRole("tab", {
+      name: /Agents/i,
+    });
     expect(subagentsTab).toBeInTheDocument();
     fireEvent.mouseDown(subagentsTab);
     expect(screen.getByTestId("subagents-panel")).toHaveAttribute(
       "data-conversation-id",
       "conv_abc",
     );
+  });
+
+  it("marks the Agents badge partial when older children are not loaded", () => {
+    useEnvironmentMock.mockReturnValue({
+      data: { available: true, root: null },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+    mockConversations([{ id: "conv_abc", permission_level: null }]);
+    useChildSessionsMock.mockReturnValue({ ...oneChild, hasMore: true });
+
+    renderShell("/c/conv_abc");
+
+    expect(screen.getByRole("tab", { name: "Agents 2+" })).toBeInTheDocument();
   });
 
   it("renders the Subagents tab in terminal-first sessions too", () => {
@@ -2391,7 +2422,11 @@ describe("Subagents tab", () => {
     renderShell("/c/conv_native");
 
     // No Terminals tab — terminal renders inline in main.
-    expect(screen.queryByRole("tab", { name: /Shells/i })).toBeNull();
+    expect(
+      screen.queryByRole("tab", {
+        name: /Shells/i,
+      }),
+    ).toBeNull();
     // Subagents tab is present.
     const subagentsTab = screen.getByRole("tab", { name: /Agents/i });
     expect(subagentsTab).toBeInTheDocument();
@@ -2435,6 +2470,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
 
     renderShell("/c/conv_abc");
@@ -2481,6 +2520,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
 
     renderShell("/c/conv_abc");
@@ -2519,6 +2562,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -2558,6 +2605,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     rerender(makeTree());
 
@@ -2582,7 +2633,15 @@ describe("Subagents tab", () => {
       isLoading: false,
     } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
     mockConversations([{ id: "conv_abc", permission_level: null }]);
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const makeTree = () => sessionShellTree(qc, "/c/conv_abc");
@@ -2615,6 +2674,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     rerender(makeTree());
 
@@ -2652,6 +2715,10 @@ describe("Subagents tab", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     useSessionMock.mockReturnValue({
       session: {
@@ -4271,6 +4338,10 @@ describe("Mobile session menu", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     renderShell("/c/conv_native");
     openSessionMenu();
@@ -4374,6 +4445,10 @@ describe("Mobile session menu", () => {
       ],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
 
     renderShell("/c/conv_abc");

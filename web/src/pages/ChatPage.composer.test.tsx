@@ -131,7 +131,15 @@ vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: (conversationId: string | null) => {
     childSessionsArgsSpy(conversationId);
-    return { children: composerChildSessions.children, isLoading: false, error: null };
+    return {
+      children: composerChildSessions.children,
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    };
   },
 }));
 // HostBadge now renders in the composer's status-line tray and reads the

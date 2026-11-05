@@ -84,7 +84,8 @@ interface SubagentsPanelProps {
 type ViewMode = "list" | "graph";
 
 export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanelProps) {
-  const { children, isLoading, error } = useChildSessions(rootSessionId);
+  const { children, isLoading, error, hasMore, loadMore, isLoadingMore, loadMoreError } =
+    useChildSessions(rootSessionId);
   const [addOpen, setAddOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [collapsedRows, setCollapsedRows] = useState<Record<string, boolean>>({});
@@ -157,6 +158,15 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
             onToggleCollapsed={toggleCollapsedRow}
           />
         ))}
+        {hasMore && (
+          <MoreChildrenNotice
+            shown={children.length}
+            depth={1}
+            loading={isLoadingMore}
+            error={loadMoreError}
+            onLoadMore={loadMore}
+          />
+        )}
       </ul>
       {/* Mounted only while open so a closed rail issues no /v1/agents
           fetch and carries none of the dialog's query dependencies. */}
@@ -164,6 +174,48 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
         <AddAgentDialog parentSessionId={rootSessionId} open={addOpen} onOpenChange={setAddOpen} />
       )}
     </div>
+  );
+}
+
+/**
+ * Says the list is cut short and offers the rest: the server holds older
+ * sub-agents than the ones loaded so far.
+ */
+function MoreChildrenNotice({
+  shown,
+  depth,
+  loading,
+  error,
+  onLoadMore,
+}: {
+  shown: number;
+  depth: number;
+  loading: boolean;
+  error: string | null;
+  onLoadMore: () => Promise<void>;
+}) {
+  return (
+    <li
+      data-testid="subagent-more-notice"
+      style={{ paddingLeft: rowPaddingLeft(depth) }}
+      className="flex items-center gap-2 py-1 pr-1 text-sm text-muted-foreground"
+    >
+      <span>Showing {shown} — older agents not shown.</span>
+      {error && (
+        <span role="alert" data-testid="subagent-load-more-error" className="text-destructive">
+          {error}
+        </span>
+      )}
+      <Button
+        variant="ghost"
+        size="xs"
+        disabled={loading}
+        data-testid="subagent-load-more"
+        onClick={() => void onLoadMore()}
+      >
+        {loading ? "Loading…" : "Load more"}
+      </Button>
+    </li>
   );
 }
 
@@ -515,7 +567,13 @@ function SubagentRow({
   // This child's own sub-agents, rendered as the next tree level.
   // Disabled (null id) at the depth cap so the fan-out of fetches is
   // bounded; ``useChildSessions`` skips the query entirely for null.
-  const { children: grandchildren } = useChildSessions(depth < MAX_TREE_DEPTH ? child.id : null);
+  const {
+    children: grandchildren,
+    hasMore: hasMoreGrandchildren,
+    loadMore: loadMoreGrandchildren,
+    isLoadingMore: isLoadingMoreGrandchildren,
+    loadMoreError: loadMoreGrandchildrenError,
+  } = useChildSessions(depth < MAX_TREE_DEPTH ? child.id : null);
   const hasGrandchildren = grandchildren.length > 0;
   const ToggleIcon = collapsed ? ChevronRightIcon : ChevronDownIcon;
   return (
@@ -655,6 +713,24 @@ function SubagentRow({
             onToggleCollapsed={onToggleCollapsed}
           />
         ))}
+      {!collapsed && depth + 1 === MAX_TREE_DEPTH && hasGrandchildren && (
+        <li
+          data-testid="subagent-depth-notice"
+          style={{ paddingLeft: rowPaddingLeft(depth + 1) }}
+          className="py-1 pr-1 text-sm text-muted-foreground"
+        >
+          Agents nested more than {MAX_TREE_DEPTH} levels deep are not shown.
+        </li>
+      )}
+      {!collapsed && hasMoreGrandchildren && (
+        <MoreChildrenNotice
+          shown={grandchildren.length}
+          depth={depth + 1}
+          loading={isLoadingMoreGrandchildren}
+          error={loadMoreGrandchildrenError}
+          onLoadMore={loadMoreGrandchildren}
+        />
+      )}
     </>
   );
 }

@@ -1740,3 +1740,30 @@ async def test_resolve_agent_validates_the_whole_matching_page() -> None:
     async with client:
         with pytest.raises(OmnigentError, match="malformed agent row"):
             await namespace.resolve_agent("good")
+
+
+@pytest.mark.asyncio
+async def test_child_sessions_tree_follows_cursor_past_first_page() -> None:
+    """A level with more children than one page is listed to the end.
+
+    Failure means the REPL tree and ``subtree_busy`` silently stop at the
+    first page and miss a busy child beyond it.
+    """
+    pages = {
+        None: {"data": [_child("a"), _child("b")], "has_more": True, "last_id": "b"},
+        "b": {"data": [_child("c", busy=True)], "has_more": False, "last_id": "c"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/root/child_sessions")
+        return httpx.Response(200, json=pages[request.url.params.get("after")])
+
+    ns, client = _make_namespace(handler)
+    try:
+        nodes = await ns.child_sessions_tree("root", max_depth=1, limit=2)
+        busy = await ns.subtree_busy("root", max_depth=1, limit=2)
+    finally:
+        await client.aclose()
+
+    assert [n["id"] for n in nodes] == ["a", "b", "c"]
+    assert busy is True

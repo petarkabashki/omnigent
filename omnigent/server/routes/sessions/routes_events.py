@@ -251,7 +251,7 @@ from omnigent.server.routes._sessions.helpers import (
 from omnigent.server.routes._sessions.orchestration import (
     _best_effort_stop,
     _cancel_runner_relays,
-    _child_session_summaries_from_conversations,
+    _child_snapshot_events,
     _codex_side_chat_fork_lost,
     _codex_side_chat_thread_id,
     _dispatch_in_flight,
@@ -342,6 +342,7 @@ from omnigent.tools.client_specified import parse_client_side_tool_specs
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
+    has_closed_title_marker,
     is_session_closed,
 )
 
@@ -3794,28 +3795,7 @@ def register_events_routes(
             """
             events: list[dict[str, Any]] = []
             try:
-                page = await asyncio.to_thread(
-                    conversation_store.list_conversations,
-                    limit=100,
-                    kind="sub_agent",
-                    parent_conversation_id=session_id,
-                    order="desc",
-                    sort_by="created_at",
-                )
-                summaries = await _child_session_summaries_from_conversations(
-                    page.data,
-                    session_id,
-                    conversation_store,
-                )
-                for summary in summaries:
-                    events.append(
-                        {
-                            "type": "session.child_session.updated",
-                            "conversation_id": session_id,
-                            "child_session_id": summary.id,
-                            "child": summary.model_dump(mode="json"),
-                        }
-                    )
+                events.extend(await _child_snapshot_events(conversation_store, session_id))
             except Exception:
                 _logger.debug("snapshot: child sessions failed for %s", session_id, exc_info=True)
             if runner_client is not None:

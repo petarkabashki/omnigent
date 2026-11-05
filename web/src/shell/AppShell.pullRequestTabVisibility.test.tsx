@@ -51,7 +51,15 @@ vi.mock("@/hooks/usePullRequests", async (importOriginal) => ({
 }));
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   ...(await importOriginal<typeof UseChildSessionsModule>()),
-  useChildSessions: vi.fn(() => ({ children: [], isLoading: false, error: null })),
+  useChildSessions: vi.fn(() => ({
+    children: [],
+    isLoading: false,
+    error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
+  })),
 }));
 vi.mock("@/hooks/useSession", async (importOriginal) => ({
   ...(await importOriginal<typeof UseSessionModule>()),

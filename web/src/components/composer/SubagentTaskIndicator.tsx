@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RunningDot } from "@/components/RunningDot";
 import { useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSessions";
+import { partialCountLabel } from "@/lib/partialCount";
 import { Link, useLocation } from "@/lib/routing";
 import { sessionNavigationSearch } from "@/lib/sessionNavigation";
 import { cn } from "@/lib/utils";
@@ -54,19 +55,23 @@ function indicatorChild(child: ChildSessionInfo): IndicatorChild | null {
   return null;
 }
 
-function statusSummary(items: IndicatorChild[]): string {
+function statusSummary(items: IndicatorChild[], partial: boolean): string {
   const active = items.filter((item) => item.state === "active").length;
   const parked = items.filter((item) => item.state === "parked").length;
   const quiet = items.filter((item) => item.state === "quiet").length;
   const errors = items.filter((item) => item.state === "error").length;
-  const total = items.length;
+  const total = partialCountLabel(items.length, partial);
   const parts = [
     active > 0 ? `${active} active` : null,
     parked > 0 ? `${parked} awaiting input` : null,
     quiet > 0 ? `${quiet} disconnected` : null,
     errors > 0 ? `${errors} need${errors === 1 ? "s" : ""} attention` : null,
   ].filter(Boolean);
-  return `${total} sub-agent${total === 1 ? "" : "s"}: ${parts.join(", ")}`;
+  const plural = partial || items.length !== 1;
+  const head = `${total} sub-agent${plural ? "s" : ""}`;
+  const older = partial ? " (older agents not counted)" : "";
+  const detail = parts.join(", ");
+  return detail ? `${head}: ${detail}${older}` : `${head}${older}`;
 }
 
 function SubagentStateIndicator({ state, label }: { state: IndicatorState; label: string }) {
@@ -146,7 +151,7 @@ function SubagentNavigationRow({
 }
 
 export function SubagentTaskIndicator({ conversationId }: { conversationId: string | null }) {
-  const { children } = useChildSessions(conversationId);
+  const { children, hasMore } = useChildSessions(conversationId);
   const items = children
     .map(indicatorChild)
     .filter((item): item is IndicatorChild => item !== null);
@@ -167,8 +172,8 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
   // null render below) keeps it from re-opening if a sub-agent later goes
   // busy again, and never moves focus itself.
   useEffect(() => {
-    if (count <= 0) setOpen(false);
-  }, [count]);
+    if (count <= 0 && !hasMore) setOpen(false);
+  }, [count, hasMore]);
   // The tally is session-local: a conversation switch starts closed. Flag the
   // reason so the close never yanks focus to the new session's trigger.
   useEffect(() => {
@@ -181,9 +186,12 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
     setOpen(next);
   };
 
-  if (count <= 0) return null;
+  // A loaded page of settled children is not an empty tree when older
+  // pages exist. Hiding the pill there would drop a working child that
+  // sits past this page, with nothing saying the page is partial.
+  if (count <= 0 && !hasMore) return null;
 
-  const countLabel = statusSummary(items);
+  const countLabel = statusSummary(items, hasMore);
   const triggerState: IndicatorState = items.some((item) => item.state === "error")
     ? "error"
     : items.some((item) => item.state === "parked")
@@ -218,7 +226,7 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
             )}
           >
             <BotIcon className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
-            {count}
+            {partialCountLabel(count, hasMore)}
           </Button>
         </PopoverTrigger>
         <PopoverContent
@@ -236,11 +244,21 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
           }}
           className="max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[min(25rem,calc(100vw-2rem))] overflow-y-auto p-2"
         >
-          <ul className="flex flex-col">
-            {items.map((item) => (
-              <SubagentNavigationRow key={item.child.id} item={item} onNavigate={handleNavigate} />
-            ))}
-          </ul>
+          {items.length === 0 ? (
+            <p className="px-2 py-1.5 text-sm text-muted-foreground">
+              Older agents are not in this page.
+            </p>
+          ) : (
+            <ul className="flex flex-col">
+              {items.map((item) => (
+                <SubagentNavigationRow
+                  key={item.child.id}
+                  item={item}
+                  onNavigate={handleNavigate}
+                />
+              ))}
+            </ul>
+          )}
         </PopoverContent>
       </Popover>
     </>

@@ -197,6 +197,8 @@ function renderWorkspace(
     inert?: boolean;
     mobileSideChatsOpen?: boolean;
     queryClient?: QueryClient;
+    agentCount?: number;
+    agentCountPartial?: boolean;
     initialPath?: string;
     closeSelectedTabRef?: { current: (() => boolean) | null };
     permissionLevel?: number | null;
@@ -244,7 +246,8 @@ function renderWorkspace(
         onReveal={onReveal}
         changedCount={overrides.changedCount ?? 0}
         subagentsWorking={0}
-        agentCount={1}
+        agentCount={overrides.agentCount ?? 1}
+        agentCountPartial={overrides.agentCountPartial}
         rootSessionId={null}
         selectedFilePath={overrides.selectedFilePath ?? null}
         openFiles={overrides.openFiles ?? []}
@@ -302,6 +305,16 @@ describe("WorkspacePanel Close Tab", () => {
     const rendered = renderWorkspace({ ...overrides, closeSelectedTabRef });
     return { ...rendered, closeSelectedTab: () => closeSelectedTabRef.current?.() };
   }
+
+  it("marks the Agents badge as a lower bound when the child list is partial", () => {
+    renderWorkspace({ agentCount: 21, agentCountPartial: true });
+    expect(screen.getByRole("tab", { name: "Agents 21+" })).toBeInTheDocument();
+  });
+
+  it("shows the exact Agents badge when the child list is complete", () => {
+    renderWorkspace({ agentCount: 21 });
+    expect(screen.getByRole("tab", { name: "Agents 21" })).toBeInTheDocument();
+  });
 
   it("closes the selected file tab", () => {
     const { closeSelectedTab, onCloseFile, onClosePanel } = renderWithCloser({

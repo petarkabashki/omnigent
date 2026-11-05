@@ -39,6 +39,7 @@ from omnigent.server.routes._sessions.common import (
 )
 from omnigent.server.routes._sessions.orchestration import (
     _child_session_summaries_from_conversations,
+    _list_open_child_page,
 )
 from omnigent.server.schemas import (
     ChildSessionList,
@@ -46,6 +47,7 @@ from omnigent.server.schemas import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.util.session_lifecycle import has_closed_title_marker
 
 
 def register_items_routes(
@@ -156,6 +158,9 @@ def register_items_routes(
         :param before: Cursor — return children before this one.
         :param order: Sort direction, ``"desc"`` (newest-first,
             default) or ``"asc"``. Sort column is ``created_at``.
+            Closed children are never listed. ``has_more`` says older
+            children exist; pass the response ``last_id`` as ``after``
+            to fetch them (a page may hold fewer than ``limit`` rows).
         :param tool: When set, only return children whose title
             starts with this agent type (the segment before the
             ``":"``). Combined with ``session_name`` to form the
@@ -182,19 +187,22 @@ def register_items_routes(
         title_filter: str | None = None
         if tool and session_name:
             title_filter = f"{tool}:{session_name}"
+        # Closed children are archived (hidden by the store); legacy rows closed
+        # before archiving only carry the title marker, so drop those here and
+        # refill the page. Label-only closes (read-only side chats) stay listed.
         page = await asyncio.to_thread(
-            conversation_store.list_conversations,
+            _list_open_child_page,
+            conversation_store,
+            session_id,
             limit=limit,
             after=after,
             before=before,
-            kind="sub_agent",
-            parent_conversation_id=session_id,
             order=order,
-            sort_by="created_at",
             title=title_filter,
         )
+        open_children = page.data
         data = await _child_session_summaries_from_conversations(
-            page.data,
+            open_children,
             session_id,
             conversation_store,
         )

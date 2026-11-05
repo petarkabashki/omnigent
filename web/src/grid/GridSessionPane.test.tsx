@@ -17,6 +17,7 @@ import { retrySession } from "@/lib/sessionsApi";
 import { revealFolderInFilesPanel } from "@/shell/FilesPanel";
 
 const fixture = vi.hoisted(() => ({
+  childrenHasMore: false,
   labels: {} as Record<string, string>,
   permissionLevel: null as number | null,
   terminals: [] as TerminalsModule.TerminalInfo[],
@@ -78,7 +79,9 @@ vi.mock("@/hooks/useSessionLiveness", () => ({
   livenessRowFromSession: () => null,
   useSessionLiveness: () => ({ kind: "online" }),
 }));
-vi.mock("@/hooks/useChildSessions", () => ({ useChildSessions: () => ({ children: [] }) }));
+vi.mock("@/hooks/useChildSessions", () => ({
+  useChildSessions: () => ({ children: [], hasMore: fixture.childrenHasMore }),
+}));
 vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceEnvironment: () => ({ data: { available: true, root: "/workspace" } }),
   useWorkspaceChangedFiles: () => ({ data: { data: [] } }),
@@ -131,6 +134,8 @@ vi.mock("@/shell/WorkspacePanel", () => ({
         data-width={props.width}
         data-terminal={props.selectedTerminalKey ?? ""}
         data-tab={props.rightRailTab ?? ""}
+        data-agent-count={props.agentCount}
+        data-agent-partial={String(props.agentCountPartial)}
         data-end-line={props.filePosition?.endLine}
       >
         <span>{props.selectedFilePath ?? "No file"}</span>
@@ -161,6 +166,7 @@ afterEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   fixture.labels = {};
+  fixture.childrenHasMore = false;
   fixture.permissionLevel = null;
   fixture.terminals = [];
   fixture.terminalPending = false;
@@ -169,6 +175,20 @@ afterEach(() => {
   fixture.failedChat = "";
   fixture.failedTerminal = "";
   vi.restoreAllMocks();
+});
+
+it("tells the workspace its agent count is partial when older children are not loaded", () => {
+  fixture.childrenHasMore = true;
+  render(
+    <MemoryRouter>
+      <TooltipProvider>
+        <RearrangeableGrid
+          grid={{ id: "ui-agents", layout: splitGrid("first", "first", "second", "right")! }}
+        />
+      </TooltipProvider>
+    </MemoryRouter>,
+  );
+  expect(screen.getByTestId("workspace-first")).toHaveAttribute("data-agent-partial", "true");
 });
 
 it("opens agent-requested files only in the active workspace and respects navigation guards", () => {

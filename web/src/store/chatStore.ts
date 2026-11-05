@@ -9135,10 +9135,10 @@ function applyChildSessionUpdated(
 ): void {
   if (queryClient === null) return;
   const key = childSessionsQueryKey(parentId);
-  // Initialize a cold cache rather than skipping: snapshot-on-connect
-  // sends full child rows over the stream, so seeding here lets child
-  // status/preview update live even when no useChildSessions is mounted.
-  const current = queryClient.getQueryData<ChildSessionInfo[]>(key) ?? [];
+  // Cold cache: skip. Seeding a list here would carry no page state, so Load more
+  // and the "older agents" notice would be wrong; the hook's first fetch builds both.
+  const current = queryClient.getQueryData<ChildSessionInfo[]>(key);
+  if (current === undefined) return;
 
   // Build a patch from only the fields PRESENT in the payload (undefined
   // = "not in this delta, leave as-is"); explicit null is a real value.
@@ -9178,6 +9178,15 @@ function applyChildSessionUpdated(
 
   const idx = current.findIndex((c) => c.id === childId);
   if (idx === -1) {
+    // A reconnect replays the newest page as one event per child, newest
+    // first. Prepending each one onto a list that already has rows reverses
+    // that page and leaves anyone between it and the old cursor out of every
+    // later `after=` fetch. Refetch from the newest page instead. An empty
+    // list has no cursor behind it, so one new child can land directly.
+    if (current.length > 0) {
+      void queryClient.invalidateQueries({ queryKey: key });
+      return;
+    }
     // Insert: absent fields default (null / not-busy) until a fuller
     // update (snapshot/refetch) fills them in.
     const inserted: ChildSessionInfo = {

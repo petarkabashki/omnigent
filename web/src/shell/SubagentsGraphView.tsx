@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from "@/lib/routing";
 import { RunningDot } from "@/components/RunningDot";
 import { Badge } from "@/components/ui/badge";
 import { ZoomInIcon, ZoomOutIcon, Maximize2Icon } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { MAX_TREE_DEPTH, useChildSessions, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import { useSession } from "@/hooks/useSession";
 import { cn } from "@/lib/utils";
@@ -14,6 +15,7 @@ import {
   NODE_WIDTH,
   type AgentActivity,
   type AgentNodeData,
+  reachesDepthCap,
 } from "./subagentGraphLayout";
 import { activityDotClassName, sessionStatus } from "./subagentStatus";
 import { useOpenSubagentInPanel } from "./subagentPanelOpener";
@@ -127,20 +129,35 @@ function ZoomControls() {
 
 const nodeTypes: NodeTypes = { agent: AgentNodeComponent };
 
+/** Paging state of one graph level: whether older children are not drawn, and how to fetch them. */
+interface LevelPaging {
+  hasMore: boolean;
+  loadMore: () => Promise<void>;
+  error: string | null;
+}
+
 function ChildCollector({
   parentId,
   depth,
   onCollected,
+  onPaging,
 }: {
   parentId: string;
   depth: number;
   onCollected: (parentId: string, children: ChildSessionInfo[]) => void;
+  onPaging: (parentId: string, paging: LevelPaging) => void;
 }) {
-  const { children } = useChildSessions(depth < MAX_TREE_DEPTH ? parentId : null);
+  const { children, hasMore, loadMore, loadMoreError } = useChildSessions(
+    depth < MAX_TREE_DEPTH ? parentId : null,
+  );
 
   useEffect(() => {
     onCollected(parentId, children);
   }, [parentId, children, onCollected]);
+
+  useEffect(() => {
+    onPaging(parentId, { hasMore, loadMore, error: loadMoreError });
+  }, [parentId, hasMore, loadMore, loadMoreError, onPaging]);
 
   if (depth >= MAX_TREE_DEPTH) return null;
   return (
@@ -151,6 +168,7 @@ function ChildCollector({
           parentId={child.id}
           depth={depth + 1}
           onCollected={onCollected}
+          onPaging={onPaging}
         />
       ))}
     </>
@@ -164,7 +182,30 @@ interface SubagentsGraphViewProps {
 
 export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsGraphViewProps) {
   const { session } = useSession(rootSessionId);
-  const { children: rootChildren } = useChildSessions(rootSessionId);
+  const {
+    children: rootChildren,
+    hasMore: rootHasMore,
+    loadMore: rootLoadMore,
+    loadMoreError: rootLoadMoreError,
+  } = useChildSessions(rootSessionId);
+  const [pagingMap, setPagingMap] = useState<Map<string, LevelPaging>>(() => new Map());
+  const handlePaging = useCallback((parentId: string, paging: LevelPaging) => {
+    setPagingMap((prev) => {
+      const known = prev.get(parentId);
+      if (
+        known?.hasMore === paging.hasMore &&
+        known.loadMore === paging.loadMore &&
+        known.error === paging.error
+      )
+        return prev;
+      return new Map(prev).set(parentId, paging);
+    });
+  }, []);
+  const partialLevels = [
+    { hasMore: rootHasMore, loadMore: rootLoadMore, error: rootLoadMoreError },
+    ...pagingMap.values(),
+  ].filter((level) => level.hasMore);
+  const partialError = partialLevels.find((level) => level.error)?.error ?? null;
 
   const [childrenMap, setChildrenMap] = useState<Map<string, ChildSessionInfo[]>>(() => new Map());
 
@@ -233,6 +274,32 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
       data-workspace-panel-surface
       className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-card"
     >
+      {reachesDepthCap(rootSessionId, childrenMap) && (
+        <div
+          data-testid="graph-depth-notice"
+          className="border-b px-3 py-1 text-sm text-muted-foreground"
+        >
+          Agents nested more than {MAX_TREE_DEPTH} levels deep are not shown.
+        </div>
+      )}
+      {partialLevels.length > 0 && (
+        <div
+          data-testid="graph-more-notice"
+          className="flex items-center gap-2 border-b px-3 py-1 text-sm text-muted-foreground"
+        >
+          <span>
+            {partialError ?? "The graph shows only the newest agents — older agents are not shown."}
+          </span>
+          <Button
+            variant="ghost"
+            size="xs"
+            data-testid="graph-load-more"
+            onClick={() => void Promise.all(partialLevels.map((level) => level.loadMore()))}
+          >
+            Load more
+          </Button>
+        </div>
+      )}
       <div className="h-full w-full" style={{ minHeight: 200 }}>
         <ReactFlow
           nodes={layoutNodes}
@@ -261,6 +328,7 @@ export function SubagentsGraphView({ conversationId, rootSessionId }: SubagentsG
           parentId={child.id}
           depth={1}
           onCollected={handleCollected}
+          onPaging={handlePaging}
         />
       ))}
     </div>

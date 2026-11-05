@@ -70,7 +70,15 @@ vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   // cachedTreeContains (which reads the query cache seeded below) stay
   // genuine; only the hook is replaced.
   ...(await importOriginal<typeof UseChildSessionsModule>()),
-  useChildSessions: vi.fn(() => ({ children: [], isLoading: false, error: null })),
+  useChildSessions: vi.fn(() => ({
+    children: [],
+    isLoading: false,
+    error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
+  })),
 }));
 vi.mock("@/hooks/useSession", async (importOriginal) => ({
   // useRootSessionId stays real: with the snapshot mocked to a
@@ -214,11 +222,23 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
           children,
           isLoading: false,
           error: null,
+          hasMore: false,
+          loadMore: async () => {},
+          isLoadingMore: false,
+          loadMoreError: null,
         };
       }
       // Any non-root id (a regression would query conv_child here)
       // returns empty + loading.
-      return { children: [], isLoading: true, error: null };
+      return {
+        children: [],
+        isLoading: true,
+        error: null,
+        hasMore: false,
+        loadMore: async () => {},
+        isLoadingMore: false,
+        loadMoreError: null,
+      };
     });
     vi.mocked(useSession).mockImplementation((id) => {
       if (id === "conv_root") {
@@ -320,7 +340,15 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
   it.each([undefined, "files"] as const)(
     "returns from a deep-linked child to a root with remembered tab %s",
     (rememberedTab) => {
-      vi.mocked(useChildSessions).mockReturnValue({ children: [], isLoading: false, error: null });
+      vi.mocked(useChildSessions).mockReturnValue({
+        children: [],
+        isLoading: false,
+        error: null,
+        hasMore: false,
+        loadMore: async () => {},
+        isLoadingMore: false,
+        loadMoreError: null,
+      });
       vi.mocked(useSession).mockImplementation((id) => ({
         session: id
           ? {
@@ -401,6 +429,10 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       children: tree[id ?? ""] ?? [],
       isLoading: false,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     }));
     const snapshot = (id: string, parentSessionId: string | null, title: string | null) =>
       ({
@@ -586,6 +618,10 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       children: [],
       isLoading: true,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     vi.mocked(useSession).mockReturnValue({
       session: null,
@@ -621,6 +657,10 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       children: [],
       isLoading: true,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     vi.mocked(useSession).mockReturnValue({
       session: null,
@@ -662,6 +702,10 @@ describe("click sub-agent in rail (real SubagentsPanel)", () => {
       children: [],
       isLoading: true,
       error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
     vi.mocked(useSession).mockReturnValue({
       session: {

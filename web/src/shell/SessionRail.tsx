@@ -6,6 +6,7 @@
 // panel scoped to that session, which renders the raw JSON items —
 // parity with the TUI Ctrl+O overlay.
 
+import { OlderAgentsNotice } from "./OlderAgentsNotice";
 import { BotIcon, ChevronDownIcon, MessageSquareIcon, type LucideIcon } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
@@ -37,17 +38,30 @@ export function SessionRail({
   onExpandExecutionLogs,
   suppressed,
 }: SessionRailProps) {
-  const { children } = useChildSessions(conversationId);
+  const { children, hasMore, loadMore, isLoadingMore, loadMoreError } =
+    useChildSessions(conversationId);
   if (suppressed) return null;
-  return <ExecutionLogsCard childSessions={children} onExpand={onExpandExecutionLogs} />;
+  return (
+    <ExecutionLogsCard
+      childSessions={children}
+      onExpand={onExpandExecutionLogs}
+      paging={hasMore ? { loadMore, isLoadingMore, loadMoreError } : null}
+    />
+  );
 }
 
 interface ExecutionLogsCardProps {
   childSessions: ChildSessionInfo[];
   onExpand: (initialKey: string) => void;
+  /** Set when older children exist beyond ``childSessions``. */
+  paging: {
+    loadMore: () => Promise<void>;
+    isLoadingMore: boolean;
+    loadMoreError: string | null;
+  } | null;
 }
 
-function ExecutionLogsCard({ childSessions, onExpand }: ExecutionLogsCardProps) {
+function ExecutionLogsCard({ childSessions, onExpand, paging }: ExecutionLogsCardProps) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <Card size="sm" data-testid="execution-logs-card">
@@ -91,6 +105,14 @@ function ExecutionLogsCard({ childSessions, onExpand }: ExecutionLogsCardProps) 
               />
             ))}
           </ul>
+          {paging && (
+            <OlderAgentsNotice
+              shown={childSessions.length}
+              loading={paging.isLoadingMore}
+              error={paging.loadMoreError}
+              onLoadMore={paging.loadMore}
+            />
+          )}
         </CardContent>
       )}
     </Card>

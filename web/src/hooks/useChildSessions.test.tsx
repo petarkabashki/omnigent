@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,17 +10,14 @@ vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(),
 }));
 
+let queryClient: QueryClient;
+
 function wrapper({ children }: PropsWithChildren) {
-  return (
-    <QueryClientProvider
-      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-    >
-      {children}
-    </QueryClientProvider>
-  );
+  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
 beforeEach(() => {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.mocked(authenticatedFetch).mockReset();
 });
 
@@ -62,5 +59,147 @@ describe("useDescendantSession", () => {
     expect(result.current).toBeNull();
     await waitFor(() => expect(result.current?.task_summary).toBe("Investigate auth flow"));
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/sessions/conv_parent/child_sessions");
+  });
+
+  it("pages in older children until the target is found", async () => {
+    // WHY: a miss on a partial first page must not read as absent; the card
+    // would otherwise label an older child as an anonymous sub-agent.
+    const row = (id: string) => ({
+      id,
+      title: `researcher:${id}`,
+      task_summary: `Task ${id}`,
+      tool: "researcher",
+      session_name: id,
+      current_task_status: "in_progress",
+      busy: true,
+    });
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            object: "list",
+            data: [row("conv_new")],
+            has_more: true,
+            last_id: "conv_new",
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ object: "list", data: [row("conv_old")], has_more: false })),
+      );
+    const { result } = renderHook(() => useDescendantSession("conv_parent", "conv_old"), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current?.task_summary).toBe("Task conv_old"));
+    expect(authenticatedFetch).toHaveBeenLastCalledWith(
+      "/v1/sessions/conv_parent/child_sessions?after=conv_new",
+    );
+  });
+});
+
+describe("useChildSessions paging", () => {
+  const page = (ids: string[], hasMore: boolean) =>
+    new Response(
+      JSON.stringify({
+        object: "list",
+        data: ids.map((id) => ({
+          id,
+          title: `researcher:${id}`,
+          tool: "researcher",
+          session_name: id,
+          current_task_status: null,
+          busy: false,
+        })),
+        last_id: ids[ids.length - 1],
+        has_more: hasMore,
+      }),
+    );
+
+  it("reports older children and appends the next page after the cursor", async () => {
+    // WHY: the server caps a page; the hook must surface has_more and resume
+    // from last_id so the UI can say so and fetch the rest.
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(page(["conv_old"], false));
+    const { result } = renderHook(() => useChildSessions("conv_parent"), { wrapper });
+
+    await waitFor(() => expect(result.current.hasMore).toBe(true));
+    expect(result.current.children.map((child) => child.id)).toEqual(["conv_new"]);
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(authenticatedFetch).toHaveBeenLastCalledWith(
+      "/v1/sessions/conv_parent/child_sessions?after=conv_new",
+    );
+    expect(result.current.children.map((child) => child.id)).toEqual(["conv_new", "conv_old"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it("keeps the loaded pages when the list is refetched", async () => {
+    // WHY: any child status event invalidates the list; a refetch of page 1
+    // alone would drop the older rows the user asked for and reset the cursor.
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(page(["conv_old"], false))
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(page(["conv_old"], false));
+    const { result } = renderHook(() => useChildSessions("conv_parent"), { wrapper });
+    await waitFor(() => expect(result.current.hasMore).toBe(true));
+    await act(async () => {
+      await result.current.loadMore();
+    });
+    expect(result.current.children).toHaveLength(2);
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["conversation", "conv_parent"] });
+    });
+
+    expect(result.current.children.map((child) => child.id)).toEqual(["conv_new", "conv_old"]);
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it("shows why Load more failed and refetches when the cursor went stale", async () => {
+    // WHY: a deleted cursor row answers 400 stale_cursor; retrying the same
+    // cursor can never succeed, so the list must restart and the user be told.
+    const stale = () =>
+      new Response(JSON.stringify({ error: { code: "stale_cursor", message: "gone" } }), {
+        status: 400,
+      });
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(stale())
+      .mockResolvedValueOnce(page(["conv_new2"], false));
+    const { result } = renderHook(() => useChildSessions("conv_parent"), { wrapper });
+    await waitFor(() => expect(result.current.hasMore).toBe(true));
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(result.current.loadMoreError).toMatch(/changed/i);
+    await waitFor(() =>
+      expect(result.current.children.map((child) => child.id)).toEqual(["conv_new2"]),
+    );
+    expect(result.current.hasMore).toBe(false);
+  });
+
+  it("reports a failed Load more instead of swallowing it", async () => {
+    vi.mocked(authenticatedFetch)
+      .mockResolvedValueOnce(page(["conv_new"], true))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "Server exploded" } }), { status: 500 }),
+      );
+    const { result } = renderHook(() => useChildSessions("conv_parent"), { wrapper });
+    await waitFor(() => expect(result.current.hasMore).toBe(true));
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    expect(result.current.loadMoreError).toBe("Server exploded");
+    expect(result.current.hasMore).toBe(true);
   });
 });

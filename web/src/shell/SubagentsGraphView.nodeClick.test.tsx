@@ -52,12 +52,17 @@ const child: ChildSessionInfo = {
 // Stable arrays: the view compares child lists by identity across renders.
 const rootChildren = [child];
 const noChildren: ChildSessionInfo[] = [];
+const loadMore = async () => {};
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: (id: string | null) => ({
     children: id === "conv_root" ? rootChildren : noChildren,
     isLoading: false,
     error: null,
+    hasMore: false,
+    loadMore,
+    isLoadingMore: false,
+    loadMoreError: null,
   }),
 }));
 vi.mock("@/hooks/useSession", () => ({

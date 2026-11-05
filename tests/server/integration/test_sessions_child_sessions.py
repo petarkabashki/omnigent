@@ -1033,6 +1033,160 @@ async def test_child_sessions_limit_pagination(
     assert body["has_more"] is True
 
 
+async def test_child_sessions_after_cursor_reaches_every_open_child(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    Following ``last_id`` while ``has_more`` is set lists each open child once.
+
+    A closed child sits between open ones; paging with ``limit=1`` must skip it
+    without ending early, so a client can always fetch what the first page left.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    seeded = {
+        suffix: _seed_child(
+            conv_store=conv_store,
+            parent_id=session["id"],
+            title=f"researcher:{suffix}",
+            agent_id=session["agent_id"],
+        )
+        for suffix in ("a", "b", "c")
+    }
+    legacy_closed = seeded["b"]
+    conv_store.update_conversation(
+        legacy_closed.id, title=f"researcher:b:closed:{legacy_closed.id}"
+    )
+
+    listed: list[str] = []
+    params: dict[str, str | int] = {"limit": 1}
+    for _ in range(5):
+        body = (
+            await client.get(f"/v1/sessions/{session['id']}/child_sessions", params=params)
+        ).json()
+        listed += [row["id"] for row in body["data"]]
+        if not body["has_more"]:
+            break
+        params["after"] = body["last_id"]
+
+    assert sorted(listed) == sorted([seeded["a"].id, seeded["c"].id])
+    assert body["has_more"] is False
+
+
+async def test_child_sessions_has_more_false_when_only_closed_rows_remain(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A page of closed rows over one open child reports no further page.
+
+    The store builds the page before closed rows are dropped, so its own
+    ``has_more`` would claim older agents the next page cannot show.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    oldest = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:oldest",
+        agent_id=session["agent_id"],
+    )
+    for suffix in ("closed1", "closed2"):
+        closed = _seed_child(
+            conv_store=conv_store,
+            parent_id=session["id"],
+            title=f"researcher:{suffix}",
+            agent_id=session["agent_id"],
+        )
+        conv_store.update_conversation(closed.id, title=f"researcher:{suffix}:closed:{closed.id}")
+
+    body = (
+        await client.get(f"/v1/sessions/{session['id']}/child_sessions", params={"limit": 2})
+    ).json()
+
+    assert [row["id"] for row in body["data"]] == [oldest.id]
+    assert body["has_more"] is False
+
+
+async def test_stream_snapshot_replays_one_page_of_open_children(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    The stream-connect snapshot carries the newest 20 open children only.
+
+    Closed legacy rows are skipped and older children are left to paging, so
+    connecting never hands the client more than the first page.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    from omnigent.server.routes._sessions.orchestration import _child_snapshot_events
+
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    seeded = [
+        _seed_child(
+            conv_store=conv_store,
+            parent_id=session["id"],
+            title=f"researcher:n{index:02d}",
+            agent_id=session["agent_id"],
+        )
+        for index in range(25)
+    ]
+    newest_closed = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:gone",
+        agent_id=session["agent_id"],
+    )
+    conv_store.update_conversation(
+        newest_closed.id, title=f"researcher:gone:closed:{newest_closed.id}"
+    )
+
+    events = await _child_snapshot_events(conv_store, session["id"])
+
+    assert [event["child_session_id"] for event in events] == [
+        child.id for child in reversed(seeded[5:])
+    ]
+    assert {event["type"] for event in events} == {"session.child_session.updated"}
+
+
+async def test_child_sessions_keeps_label_only_closed_child(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A child closed by label only (a read-only side chat) stays listed.
+
+    Only legacy rows carrying the closed title marker are dropped; the label
+    alone does not unlist a child that was never archived.
+
+    :param client: The test HTTP client.
+    :param db_uri: Per-test SQLite database URI.
+    """
+    session = await _create_parent_session(client)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    side_chat = _seed_child(
+        conv_store=conv_store,
+        parent_id=session["id"],
+        title="researcher:side",
+        agent_id=session["agent_id"],
+    )
+    conv_store.set_labels(side_chat.id, {"omnigent.closed": "true"})
+
+    body = (await client.get(f"/v1/sessions/{session['id']}/child_sessions")).json()
+
+    assert [row["id"] for row in body["data"]] == [side_chat.id]
+
+
 # ── Scoping — parent isolation ────────────────────────────
 
 
@@ -1083,7 +1237,7 @@ async def test_closed_child_session_display_is_sanitized_and_read_only(
     db_uri: str,
 ) -> None:
     """
-    Closed child sessions hide the internal tombstone and reject chat.
+    Closed child sessions are unlisted, hide the internal tombstone and reject chat.
 
     Legacy closed rows only have a ``:closed:<id>`` title suffix. The
     API must strip that suffix from display fields, synthesize the
@@ -1104,13 +1258,10 @@ async def test_closed_child_session_display_is_sanitized_and_read_only(
     tombstoned_title = f"researcher:auth:closed:{child.id}"
     conv_store.update_conversation(child.id, title=tombstoned_title)
 
+    # Closed children are not listed, so they cannot eat a page of the list.
     children_resp = await client.get(f"/v1/sessions/{session['id']}/child_sessions")
     assert children_resp.status_code == 200
-    row = children_resp.json()["data"][0]
-    assert row["title"] == "researcher:auth"
-    assert row["tool"] == "researcher"
-    assert row["session_name"] == "auth"
-    assert row["labels"][CLOSED_LABEL_KEY] == CLOSED_LABEL_VALUE
+    assert children_resp.json()["data"] == []
 
     snapshot_resp = await client.get(f"/v1/sessions/{child.id}")
     assert snapshot_resp.status_code == 200
