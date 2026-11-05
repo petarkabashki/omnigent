@@ -109,13 +109,19 @@ def test_apply_host_interactive_shells_only_replaces_native_wrappers(
     custom_terminal = object()
     custom = SimpleNamespace(name="custom", terminals={"project": custom_terminal})
 
+    acp = SimpleNamespace(name="grok", terminals=None)
+
     _apply_host_interactive_shells(native)
     _apply_host_interactive_shells(custom)
+    _apply_host_interactive_shells(acp)
 
     assert list(native.terminals) == ["zsh", "bash"]
     assert native.terminals["zsh"].command is not None
     assert native.terminals["zsh"].command.endswith("zsh")
     assert custom.terminals == {"project": custom_terminal}
+    # An ACP picker stays empty here. Filling spec.terminals would register
+    # sys_terminal_* for the model; the side shell is built at launch time.
+    assert acp.terminals is None
 
 
 class _TrackingTerminalRegistry:

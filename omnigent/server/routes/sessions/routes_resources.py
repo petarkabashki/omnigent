@@ -38,10 +38,7 @@ from omnigent.entities import (
 )
 from omnigent.entities.session_resources import session_resource_view_to_dict
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.native.native_coding_agents import (
-    native_coding_agent_for_agent_name,
-    native_coding_agent_for_terminal_name,
-)
+from omnigent.native.native_coding_agents import native_coding_agent_for_terminal_name
 from omnigent.runner.routing import RunnerRouter, routing_host_id
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
 from omnigent.server import session_pull_requests as server_prs
@@ -119,6 +116,7 @@ from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.session_pull_request_store import SessionPullRequestLimitError
+from omnigent.terminals.acp_picker_shells import offers_host_shell_inventory
 
 if TYPE_CHECKING:
     from omnigent.inner.native_attachments import FilesystemAttachmentPolicy
@@ -1549,6 +1547,10 @@ def register_resources_routes(
         User-initiated creates are gated on the agent's terminal
         access: the requested ``terminal`` must be one of the names
         declared in the agent spec's ``terminals:`` block. Native
+        wrappers, and unsandboxed ACP picker agents that declare no
+        terminals of their own, accept the selected host's interactive
+        shells instead. Those picker names are not written into the
+        spec, so the model does not gain ``sys_terminal_*``. Native
         harness bootstrap requests (marked ``ensure_native_terminal``
         or ``bridge_inject_dir`` — the ``omnigent claude`` / ``codex``
         wrappers launching the session's own CLI terminal) are exempt:
@@ -1582,7 +1584,7 @@ def register_resources_routes(
                 spec is not None
                 and conv.host_id is not None
                 and host_registry is not None
-                and native_coding_agent_for_agent_name(spec.name) is not None
+                and offers_host_shell_inventory(spec)
             ):
                 reported = host_interactive_shells_for_request(
                     conv.host_id,

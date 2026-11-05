@@ -1575,6 +1575,115 @@ async def test_create_terminal_rejects_shell_absent_from_native_host(
     assert fake_runner.calls == []
 
 
+def _acp_picker_spec(
+    *,
+    name: str,
+    harness: str,
+    sandbox: str = "none",
+    terminals: tuple[str, ...] | None = None,
+):
+    """Agent spec for the ACP convenience-shell create gate."""
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    declared = None
+    if terminals is not None:
+        declared = {shell: TerminalEnvSpec(command=shell) for shell in terminals}
+    return AgentSpec(
+        spec_version=1,
+        name=name,
+        executor=ExecutorSpec(type="omnigent", config={"harness": harness}),
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=".",
+            sandbox=OSEnvSandboxSpec(type=sandbox),
+        ),
+        terminals=declared,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "harness", "sandbox", "declared", "terminal", "accepted"),
+    [
+        ("grok", "grok", "none", None, "zsh", True),
+        ("devin", "acp:devin", "none", None, "bash", True),
+        ("grok", "grok", "none", None, "fish", False),
+        ("custom-agent", "claude-sdk", "none", None, "zsh", False),
+        ("grok", "grok", "linux_bwrap", None, "zsh", False),
+        ("jcode", "jcode", "none", ("bash",), "zsh", False),
+        ("jcode", "jcode", "none", ("bash",), "bash", True),
+    ],
+)
+async def test_create_terminal_acp_picker_uses_host_shells_only_when_unsandboxed(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    harness: str,
+    sandbox: str,
+    declared: tuple[str, ...] | None,
+    terminal: str,
+    accepted: bool,
+) -> None:
+    """ACP picker creates accept the host inventory and leave every other spec closed."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    session_id = "79b22ebd2309e48fdeb450c65611d51b"
+    conv = app.state.test_conversation_store._conversations[session_id]
+    conv.host_id = "host_acp_shells"
+    conv.workspace = "/workspace"
+    app.state.test_host_registry.register(
+        conv.host_id,
+        object(),  # type: ignore[arg-type]
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="zsh-host",
+            interactive_shells=["zsh", "bash"],
+        ),
+        owner=None,
+    )
+    spec = _acp_picker_spec(name=name, harness=harness, sandbox=sandbox, terminals=declared)
+    monkeypatch.setattr(
+        sessions_module,
+        "_load_agent_spec_for_session",
+        lambda conv, agent_store: spec,
+    )
+    fake_runner = _FakeRunnerClient(
+        payload={
+            "id": f"terminal_{terminal}_s1",
+            "object": "session.resource",
+            "type": "terminal",
+            "session_id": session_id,
+            "name": f"{terminal}:s1",
+            "environment": DEFAULT_ENVIRONMENT_ID,
+            "metadata": {"terminal_name": terminal, "session_key": "s1", "running": True},
+        }
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/resources/terminals",
+        json={"terminal": terminal, "session_key": "s1"},
+    )
+
+    if accepted:
+        assert resp.status_code == 200, resp.text
+        assert fake_runner.calls == [("POST", f"/v1/sessions/{session_id}/resources/terminals")]
+        return
+    assert resp.status_code == 400, resp.text
+    assert fake_runner.calls == []
+    message = resp.json()["error"]["message"]
+    if declared == ("bash",):
+        assert "['bash']" in message
+    elif sandbox != "none" or harness == "claude-sdk":
+        assert "none" in message
+    else:
+        assert "zsh" in message
+        assert "bash" in message
+
+
 @pytest.mark.asyncio
 async def test_create_terminal_rejected_without_agent_terminal_access(
     client: httpx.AsyncClient,

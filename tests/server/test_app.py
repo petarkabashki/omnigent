@@ -1536,6 +1536,17 @@ def test_build_acp_bundle_carries_the_harness_id(tmp_path: Path) -> None:
     spec = load(dest)
     assert spec.name == "devin"
     assert spec.executor.config["harness"] == "acp:devin"
+    # No terminals block: a non-empty one would register sys_terminal_*.
+    # The unsandboxed caller process is what later lets the session offer
+    # the host's shells as a side pane.
+    from omnigent.terminals.acp_picker_shells import acp_picker_convenience_shells_allowed
+
+    assert not spec.terminals
+    assert spec.os_env is not None
+    assert spec.os_env.type == "caller_process"
+    assert spec.os_env.sandbox is not None
+    assert spec.os_env.sandbox.type == "none"
+    assert acp_picker_convenience_shells_allowed(spec)
 
 
 def test_ensure_default_native_agents_raises_when_provider_missing(

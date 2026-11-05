@@ -4115,6 +4115,69 @@ async def test_session_agent_terminals_follow_selected_host(
     assert custom_response.json()["terminals"] == ["bash"]
 
 
+_OPEN_OS_ENV = {"type": "caller_process", "cwd": ".", "sandbox": {"type": "none"}}
+_SANDBOXED_OS_ENV = {"type": "caller_process", "cwd": ".", "sandbox": {"type": "linux_bwrap"}}
+
+
+async def test_acp_picker_session_agent_lists_host_shells(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_uri: str,
+) -> None:
+    """An unsandboxed ACP picker lists host shells without a terminals block.
+
+    Custom agents, sandboxed picker-shaped specs, and pickers that declare
+    their own terminals keep that empty or authored list. The menu reads
+    this projection.
+    """
+    host_id = "8b9c07bfb42f687d53af44f018adebee"
+    HostStore(db_uri).upsert_on_connect(host_id, "zsh-host", "owner@example.com")
+    app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="zsh-host",
+            interactive_shells=["zsh", "bash"],
+        ),
+        owner="owner@example.com",
+    )
+
+    async def listed(
+        name: str,
+        harness: str,
+        os_env: dict[str, Any],
+        terminals: dict[str, Any] | None = None,
+    ) -> list[str]:
+        agent = await create_test_agent(
+            client,
+            name=name,
+            include_llm=False,
+            executor={"type": "omnigent", "config": {"harness": harness}},
+            os_env=os_env,
+            terminals=terminals,
+        )
+        session = await _create_session(client, agent["id"])
+        SqlAlchemyConversationStore(db_uri).set_host_id(
+            session["id"], host_id=host_id, workspace=f"/tmp/{name}"
+        )
+        response = await client.get(f"/v1/sessions/{session['id']}/agent")
+        assert response.status_code == 200, response.text
+        return response.json()["terminals"]
+
+    assert await listed("grok", "grok", _OPEN_OS_ENV) == ["zsh", "bash"]
+    assert await listed("devin", "acp:devin", _OPEN_OS_ENV) == ["zsh", "bash"]
+    assert await listed("custom-closed", "claude-sdk", _OPEN_OS_ENV) == []
+    assert await listed("sandboxed-acp", "acp:sandboxed-acp", _SANDBOXED_OS_ENV) == []
+    assert await listed(
+        "jcode",
+        "jcode",
+        _OPEN_OS_ENV,
+        terminals={"bash": {"command": "bash"}},
+    ) == ["bash"]
+
+
 @pytest.mark.parametrize("cached_inventory", [False, True])
 async def test_host_shell_inventory_miss_returns_wrong_replica(
     client: httpx.AsyncClient,

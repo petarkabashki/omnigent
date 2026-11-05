@@ -88,6 +88,7 @@ from omnigent.server.schemas import (
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.terminals.acp_picker_shells import acp_picker_convenience_shells_allowed
 
 
 def register_agent_routes(
@@ -152,17 +153,28 @@ def register_agent_routes(
             conversation=conv,
         )
         terminals_override = None
-        if (
-            conv.host_id is not None
-            and host_registry is not None
-            and native_coding_agent_for_agent_name(agent.name) is not None
-        ):
-            normalized = host_interactive_shells_for_request(
-                conv.host_id,
-                host_registry=host_registry,
-                runner_router=runner_router or get_server_runner_router(),
-            )
-            terminals_override = normalized or None
+        if conv.host_id is not None and host_registry is not None:
+            # Native wrappers always list the host's shells. ACP pickers do
+            # too, but only the unsandboxed seeded shape: the names are an
+            # overlay, not a ``terminals:`` block on the spec.
+            offer_host_shells = native_coding_agent_for_agent_name(agent.name) is not None
+            if not offer_host_shells and agent_cache is not None:
+                try:
+                    loaded = agent_cache.load(
+                        agent.id,
+                        agent.bundle_location,
+                        expand_env=agent.operator_authored,
+                    )
+                    offer_host_shells = acp_picker_convenience_shells_allowed(loaded.spec)
+                except Exception:
+                    offer_host_shells = False
+            if offer_host_shells:
+                normalized = host_interactive_shells_for_request(
+                    conv.host_id,
+                    host_registry=host_registry,
+                    runner_router=runner_router or get_server_runner_router(),
+                )
+                terminals_override = normalized or None
         result = _to_agent_object(
             agent,
             agent_cache,

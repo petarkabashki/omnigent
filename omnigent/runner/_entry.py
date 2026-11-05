@@ -101,7 +101,11 @@ def _host_interactive_shells_from_env() -> list[str] | None:
 
 
 def _apply_host_interactive_shells(spec: AgentSpec) -> None:
-    """Replace a native wrapper's portable terminals with its host inventory."""
+    """Replace a native wrapper's portable terminals with its host inventory.
+
+    ACP picker convenience shells are not applied here. Writing them onto
+    ``spec.terminals`` would register ``sys_terminal_*`` for the model.
+    """
     from omnigent.native.native_coding_agents import (
         native_coding_agent_for_agent_name,
         native_shell_terminal_specs,

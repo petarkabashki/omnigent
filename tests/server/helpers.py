@@ -748,6 +748,7 @@ def build_agent_bundle(
     guardrails: dict[str, Any] | None = None,
     terminals: dict[str, Any] | None = None,
     include_llm: bool = True,
+    os_env: dict[str, Any] | None = None,
 ) -> bytes:
     """
     Build a minimal valid agent bundle (tar.gz) for testing.
@@ -786,6 +787,9 @@ def build_agent_bundle(
         ``None`` omits it (the agent has no terminal access).
     :param include_llm: Whether to include the default ``llm:`` block.
         Set ``False`` for model-less harness tests.
+    :param os_env: Optional ``os_env:`` block written verbatim, e.g.
+        ``{"type": "caller_process", "cwd": ".", "sandbox": {"type":
+        "none"}}``. ``None`` omits it.
     :returns: A gzipped tar archive containing the generated
         ``config.yaml`` plus optional sub-agent and skill files.
     """
@@ -809,6 +813,8 @@ def build_agent_bundle(
         config["guardrails"] = guardrails
     if terminals is not None:
         config["terminals"] = terminals
+    if os_env is not None:
+        config["os_env"] = os_env
     if executor is not None:
         config["executor"] = dict(executor)
         config["executor"].setdefault("config", {}).setdefault("harness", "claude-sdk")
@@ -899,6 +905,7 @@ async def create_test_agent(
     terminals: dict[str, Any] | None = None,
     include_llm: bool = True,
     sub_agents: list[dict[str, Any]] | None = None,
+    os_env: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Create an agent via multipart session create and return the agent JSON.
@@ -933,6 +940,8 @@ async def create_test_agent(
         ``[{"name": "worker"}]``. Required for tests that create a child
         session with a ``sub_agent_name`` — the create route rejects an
         undeclared name.
+    :param os_env: Optional ``os_env:`` block written verbatim into the
+        bundle. ``None`` omits it.
     :returns: Parsed agent response body from the session agent
         endpoint, with an extra ``_session_id`` key for the owning
         session.
@@ -947,6 +956,7 @@ async def create_test_agent(
         terminals=terminals,
         include_llm=include_llm,
         sub_agents=sub_agents,
+        os_env=os_env,
     )
     metadata: dict[str, Any] = {}
     headers: dict[str, str] = {}

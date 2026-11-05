@@ -71,6 +71,7 @@ from omnigent.runner.resource_registry import (
 )
 from omnigent.runner.slow_io import run_provider_cli, run_slow_io
 from omnigent.spec.types import AgentSpec
+from omnigent.terminals.acp_picker_shells import convenience_shell_launch
 from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
 from omnigent.terminals.ws_common import WS_CLOSE_TERMINAL_NOT_FOUND
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -538,6 +539,26 @@ def register_resource_routes(
         if agent_spec is not None:
             terminals_map = getattr(agent_spec, "terminals", None) or {}
             declared_terminal = terminals_map.get(terminal_name)
+
+        if declared_terminal is None and agent_spec is not None:
+            # Convenience panes stay off spec.terminals so the model does
+            # not gain sys_terminal_*. The launch spec is built here.
+            launch = convenience_shell_launch(agent_spec, terminal_name)
+            if launch is not None:
+                if launch.spec is None:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "code": ErrorCode.INVALID_INPUT,
+                                "message": (
+                                    f"Shell {terminal_name!r} is not available on this host. "
+                                    f"Available shells: {list(launch.available) or 'none'}."
+                                ),
+                            }
+                        },
+                    )
+                declared_terminal = launch.spec
 
         if (
             declared_terminal is None
