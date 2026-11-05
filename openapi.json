@@ -5517,6 +5517,12 @@
         "additionalProperties": false,
         "description": "Body of `POST /v1/sessions/{id}/reset` and of the `reset` session event.",
         "properties": {
+          "acknowledge_running_work": {
+            "default": false,
+            "description": "Reset even when a live check still counts sub-agents or background work. The refusal names this field. A mirrored row does not count once that check says the pane is gone. No agent tool sets this; it is the caller's override for a stale count.",
+            "title": "Acknowledge Running Work",
+            "type": "boolean"
+          },
           "children": {
             "const": "keep",
             "default": "keep",
@@ -11116,6 +11122,19 @@
             "description": "Context-fill estimate for the next turn \u2014 set only by executors that make multiple LLM sub-calls per turn (e.g. `openai-agents`). For single-call executors this is absent and `total_tokens` serves the same purpose. The toolbar context ring and `/context` command use this field when present, falling back to `total_tokens`.",
             "title": "Context Tokens"
           },
+          "cost_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "What `cost_usd` or `credits` is: `\"harness\"`, `\"catalog\"`, or `\"credits\"`. `None` when the executor did not declare one.",
+            "title": "Cost Source"
+          },
           "cost_usd": {
             "anyOf": [
               {
@@ -11127,8 +11146,22 @@
               }
             ],
             "default": null,
-            "description": "Authoritative per-turn cost in USD reported directly by the harness/provider (e.g. GitHub Copilot's AI-credit total). When present, the server-side cost path uses it in preference to the catalog token-price estimate; `None` when the harness doesn't report a cost (the common case, where cost is computed from token counts x catalog pricing).",
+            "description": "Authoritative per-turn cost in USD reported directly by the harness/provider. When present, the server-side cost path uses it in preference to the catalog token-price estimate; `None` when the harness doesn't report a dollar cost (the common case, where cost is computed from token counts x catalog pricing). A credit meter is not this field.",
             "title": "Cost Usd"
+          },
+          "credits": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Non-dollar meter for this turn, e.g. Copilot AIC. Meaningful together with `cost_source=\"credits\"`. `None` when the turn is priced in dollars or not priced.",
+            "title": "Credits"
           },
           "input_tokens": {
             "default": 0,
@@ -19880,7 +19913,7 @@
         ]
       },
       "post": {
-        "description": "Launch or return an existing terminal resource.\n\nPreserves `sys_terminal_launch` idempotency: an\nalready-running `(terminal, session_key)` returns the\nexisting resource.\n\nUser-initiated creates are gated on the agent's terminal\naccess: the requested `terminal` must be one of the names\ndeclared in the agent spec's `terminals:` block. Native\nharness bootstrap requests (marked `ensure_native_terminal`\nor `bridge_inject_dir` \u2014 the `omnigent claude` / `codex`\nwrappers launching the session's own CLI terminal) are exempt:\nthey launch undeclared names via the runner's\nsynthesize-from-body path and predate the gate. The markers\nare client-controlled, so the exemption is narrowed to the\nexact shape those wrappers send \u2014 a registered native terminal\nname with `session_key` `\"main\"` \u2014 anything else carrying a\nmarker still goes through the declared-name gate (it would\notherwise be an arbitrary-terminal bypass).\n\n**Returns:** The terminal resource object.\n\n**Raises**\n\n- `OmnigentError` \u2014 400 when the requested terminal is not declared by the agent spec (or the agent has no `terminals:` block at all).",
+        "description": "Launch or return an existing terminal resource.\n\nPreserves `sys_terminal_launch` idempotency: an\nalready-running `(terminal, session_key)` returns the\nexisting resource.\n\nUser-initiated creates are gated on the agent's terminal\naccess: the requested `terminal` must be one of the names\ndeclared in the agent spec's `terminals:` block. Native\nwrappers, and unsandboxed ACP picker agents that declare no\nterminals of their own, accept the selected host's interactive\nshells instead. Those picker names are not written into the\nspec, so the model does not gain `sys_terminal_*`. Native\nharness bootstrap requests (marked `ensure_native_terminal`\nor `bridge_inject_dir` \u2014 the `omnigent claude` / `codex`\nwrappers launching the session's own CLI terminal) are exempt:\nthey launch undeclared names via the runner's\nsynthesize-from-body path and predate the gate. The markers\nare client-controlled, so the exemption is narrowed to the\nexact shape those wrappers send \u2014 a registered native terminal\nname with `session_key` `\"main\"` \u2014 anything else carrying a\nmarker still goes through the declared-name gate (it would\notherwise be an arbitrary-terminal bypass).\n\n**Returns:** The terminal resource object.\n\n**Raises**\n\n- `OmnigentError` \u2014 400 when the requested terminal is not declared by the agent spec (or the agent has no `terminals:` block at all).",
         "operationId": "create_session_terminal_v1_sessions__session_id__resources_terminals_post",
         "parameters": [
           {
