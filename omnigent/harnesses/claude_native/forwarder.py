@@ -34,8 +34,10 @@ from omnigent.harnesses.claude_native.bridge import (
     _display_text,
     _transcript_items_from_entry,
     _transcript_timestamp,
+    clear_alias_paths,
     clear_replacement_identity,
     compute_transcript_cumulative_cost,
+    labels_for_clear_replacement,
     read_active_session_id,
     read_bridge_id,
     read_claude_context_state,
@@ -3579,8 +3581,9 @@ async def _create_clear_replacement_session(
         if isinstance(raw_labels, dict)
         else {}
     )
+    labels = labels_for_clear_replacement(labels)
     labels.setdefault(BRIDGE_ID_LABEL_KEY, read_bridge_id(bridge_dir) or old_session_id)
-    carried_fields, released_old_labels = clear_replacement_identity(old)
+    carried_fields, moved_alias = clear_replacement_identity(old)
 
     create_resp = await client.post(
         "/v1/sessions",
@@ -3630,7 +3633,6 @@ async def _create_clear_replacement_session(
             # the same label, so both agree.
             "labels": {
                 BRIDGE_ID_LABEL_KEY: f"{old_session_id}-cleared",
-                **released_old_labels,
             },
         },
     )
@@ -3644,7 +3646,62 @@ async def _create_clear_replacement_session(
             clear_resp.text,
             extra={"session_id": old_session_id},
         )
+    await _move_cleared_alias(
+        client,
+        old_session_id=old_session_id,
+        new_session_id=new_session_id,
+        alias=moved_alias,
+    )
     return new_session_id
+
+
+async def _move_cleared_alias(
+    client: httpx.AsyncClient,
+    *,
+    old_session_id: str,
+    new_session_id: str,
+    alias: str | None,
+) -> None:
+    """Release the superseded session's role and claim it on the replacement.
+
+    A failure here must not fail the rotation: the terminal has already moved.
+    The role stays where the release stopped, and the log says which call failed.
+    """
+    if not alias:
+        return
+    release_path, claim_path = clear_alias_paths(old_session_id, new_session_id)
+    try:
+        release = await client.delete(release_path)
+        if release.status_code >= 400:
+            _logger.warning(
+                "Failed to release alias %s from superseded session after /clear; "
+                "old_session=%s status=%s body=%s",
+                alias,
+                old_session_id,
+                release.status_code,
+                release.text,
+                extra={"session_id": old_session_id},
+            )
+            return
+        claim = await client.put(claim_path, json={"alias": alias})
+        if claim.status_code >= 400:
+            _logger.warning(
+                "Failed to claim alias %s on the /clear replacement; "
+                "new_session=%s status=%s body=%s",
+                alias,
+                new_session_id,
+                claim.status_code,
+                claim.text,
+                extra={"session_id": new_session_id},
+            )
+    except httpx.HTTPError:
+        _logger.exception(
+            "Moving alias %s across /clear failed; old_session=%s new_session=%s",
+            alias,
+            old_session_id,
+            new_session_id,
+            extra={"session_id": old_session_id},
+        )
 
 
 async def _maybe_rotate_session_on_fork(

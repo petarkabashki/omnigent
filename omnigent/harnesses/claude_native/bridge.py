@@ -134,21 +134,42 @@ BRIDGE_DIR_ENV_VAR = "HARNESS_CLAUDE_NATIVE_BRIDGE_DIR"
 REQUEST_SESSION_ID_ENV_VAR = "HARNESS_CLAUDE_NATIVE_REQUEST_SESSION_ID"
 BRIDGE_ID_LABEL_KEY = "omnigent.claude_native.bridge_id"
 RESUME_COPY_MARKER_SUFFIX = ".omnigent-resume-copy"
-# Mirrors ``ALIAS_LABEL_KEY`` in the conversation store; kept literal so the
-# lightweight hook process need not import the store.
+# Mirrors the conversation-store keys; kept literal so the lightweight hook
+# process need not import the store. Create and PATCH reject these, so copying
+# them onto the replacement makes ``/clear`` fail and leaves the role behind.
 _ALIAS_LABEL_KEY = "omnigent.alias"
+_ROLE_ID_LABEL_KEY = "omnigent.role_id"
+_ROLE_OVERLAY_LABEL_KEY = "omnigent.role_overlay"
+_EXECUTOR_LABEL_KEY = "omnigent.executor"
+_CLEAR_LABELS_TO_DROP = frozenset(
+    {
+        _ALIAS_LABEL_KEY,
+        _ROLE_ID_LABEL_KEY,
+        _ROLE_OVERLAY_LABEL_KEY,
+        _EXECUTOR_LABEL_KEY,
+    }
+)
 
 
-def clear_replacement_identity(old_session: dict) -> tuple[dict[str, str], dict[str, str]]:
+def labels_for_clear_replacement(labels: dict[str, str]) -> dict[str, str]:
+    """Drop role labels that ``POST /v1/sessions`` and ``PATCH`` refuse to copy."""
+    return {key: value for key, value in labels.items() if key not in _CLEAR_LABELS_TO_DROP}
+
+
+def clear_replacement_identity(old_session: dict) -> tuple[dict[str, str], str | None]:
     """
     Split a ``/clear``-superseded session's identity between old and new.
 
-    The replacement keeps the title and project, and the role alias moves to it
-    so ``project/Role`` resolves to one live session.
+    The replacement keeps the title and project. The role alias is not a label
+    patch: naming ``omnigent.alias`` makes the whole PATCH fail, including the
+    runner re-key beside it. Callers release the old alias and claim it on the
+    replacement after that session exists. The executor label is dropped rather
+    than sent as the create ``executor`` field: that field fills unset host and
+    model values from the profile, which would not match the terminal being moved.
 
     :param old_session: Snapshot of the superseded session.
-    :returns: ``(extra_create_fields, old_label_updates)``: fields to add to the
-        replacement's create body, and labels to blank on the superseded session.
+    :returns: ``(extra_create_fields, alias)``. ``alias`` is the role to move,
+        or ``None`` when the superseded session has none.
     """
     extra: dict[str, str] = {}
     for field in ("title", "project_id"):
@@ -156,8 +177,18 @@ def clear_replacement_identity(old_session: dict) -> tuple[dict[str, str], dict[
         if isinstance(value, str) and value:
             extra[field] = value
     labels = old_session.get("labels")
-    has_alias = isinstance(labels, dict) and bool(labels.get(_ALIAS_LABEL_KEY))
-    return extra, ({_ALIAS_LABEL_KEY: ""} if has_alias else {})
+    if not isinstance(labels, dict):
+        return extra, None
+    alias = labels.get(_ALIAS_LABEL_KEY)
+    return extra, alias if isinstance(alias, str) and alias else None
+
+
+def clear_alias_paths(old_session_id: str, new_session_id: str) -> tuple[str, str]:
+    """Paths for releasing a ``/clear`` alias and claiming it on the replacement."""
+    return (
+        f"/v1/sessions/{url_component(old_session_id)}/alias",
+        f"/v1/sessions/{url_component(new_session_id)}/alias",
+    )
 
 
 def _bridge_injection_lock(bridge_dir: Path) -> threading.Lock:

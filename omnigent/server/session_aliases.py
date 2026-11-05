@@ -345,8 +345,8 @@ def _require_in_namespace(
     if own.path:
         target = _namespace_text(namespace.path)
         raise OmnigentError(
-            f"Session {session.id} is filed in {own.path}; move it to {target} first: "
-            f"`omnigent session move {session.id} --project {target}`",
+            f"Session {session.id} is filed in {own.path}; file it in {target} first "
+            f"(PATCH /v1/sessions/{session.id} with that project's id)",
             code=ErrorCode.INVALID_INPUT,
         )
     conversations.set_conversation_project(session.id, _role_project_id(namespace))

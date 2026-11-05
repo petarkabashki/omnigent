@@ -21,8 +21,10 @@ from omnigent.harnesses.claude_native.bridge import (
     BRIDGE_ID_LABEL_KEY,
     CLAUDE_FRAMEWORK_CONTEXT_FILE,
     approval_wait_marker_path,
+    clear_alias_paths,
     clear_replacement_identity,
     hold_approval_wait_marker,
+    labels_for_clear_replacement,
     read_active_session_id,
     read_bridge_id,
     read_claude_session_id,
@@ -550,8 +552,9 @@ def _create_clear_replacement_session(
         if isinstance(raw_labels, dict)
         else {}
     )
+    labels = labels_for_clear_replacement(labels)
     labels.setdefault(BRIDGE_ID_LABEL_KEY, read_bridge_id(bridge_dir) or old_session_id)
-    carried_fields, released_old_labels = clear_replacement_identity(old)
+    carried_fields, moved_alias = clear_replacement_identity(old)
 
     create_resp = client.post(
         f"{ap_server_url}/v1/sessions",
@@ -600,7 +603,6 @@ def _create_clear_replacement_session(
             # ``_auto_create_claude_terminal`` recognises this marker.
             "labels": {
                 BRIDGE_ID_LABEL_KEY: f"{old_session_id}-cleared",
-                **released_old_labels,
             },
         },
     )
@@ -612,6 +614,36 @@ def _create_clear_replacement_session(
             ),
             file=sys.stderr,
         )
+    if moved_alias:
+        import httpx
+
+        release_path, claim_path = clear_alias_paths(old_session_id, new_session_id)
+        try:
+            release = client.delete(f"{ap_server_url}{release_path}")
+            if release.status_code >= 400:
+                print(
+                    "omnigent claude clear hook: failed to release alias "
+                    f"{moved_alias!r} from {old_session_id}: "
+                    f"{release.status_code} {release.text}",
+                    file=sys.stderr,
+                )
+            else:
+                claim = client.put(
+                    f"{ap_server_url}{claim_path}",
+                    json={"alias": moved_alias},
+                )
+                if claim.status_code >= 400:
+                    print(
+                        "omnigent claude clear hook: failed to claim alias "
+                        f"{moved_alias!r} on {new_session_id}: "
+                        f"{claim.status_code} {claim.text}",
+                        file=sys.stderr,
+                    )
+        except httpx.HTTPError as exc:
+            print(
+                f"omnigent claude clear hook: moving alias {moved_alias!r} failed: {exc}",
+                file=sys.stderr,
+            )
     return new_session_id
 
 

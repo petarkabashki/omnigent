@@ -252,7 +252,7 @@ def test_take_files_an_unfiled_session_into_the_roles_namespace(stores: SimpleNa
     assert _role(stores, "Bench", project).holder_session_id == session
 
 
-def test_take_refuses_a_session_filed_elsewhere_with_the_move_command(
+def test_take_refuses_a_session_filed_elsewhere(
     stores: SimpleNamespace,
 ) -> None:
     here, there = _project(stores, "here"), _project(stores, "there")
@@ -271,8 +271,8 @@ def test_take_refuses_a_session_filed_elsewhere_with_the_move_command(
 
     assert caught.value.code == ErrorCode.INVALID_INPUT
     assert caught.value.message == (
-        f"Session {session} is filed in here; move it to there first: "
-        f"`omnigent session move {session} --project there`"
+        f"Session {session} is filed in here; file it in there first "
+        f"(PATCH /v1/sessions/{session} with that project's id)"
     )
 
 
