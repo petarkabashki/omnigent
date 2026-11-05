@@ -1190,15 +1190,28 @@ async def _join_runner_terminal_after_reset(
     :raises click.ClickException: If the runner may be alive when the budget
         runs out; a launch here would destroy its pane.
     """
+
+    def _join_budget_exhausted() -> click.ClickException:
+        return click.ClickException(
+            f"Timed out waiting for the runner to bring up Codex for {session_id!r}. "
+            "The runner may still be alive, so nothing was launched here. "
+            "Check the runner, then run this command again."
+        )
+
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _RESET_JOIN_TIMEOUT_S
     unregistered_since: float | None = None
     while True:
+        # A retry sleep can wake after the deadline. httpx rejects a
+        # non-positive timeout, so stop before the next ensure.
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise _join_budget_exhausted()
         try:
             await _ensure_codex_terminal_on_runner(
                 client,
                 session_id,
-                timeout_s=min(_CODEX_ENSURE_TIMEOUT_S, deadline - loop.time()),
+                timeout_s=min(_CODEX_ENSURE_TIMEOUT_S, remaining),
             )
             break
         except _CodexRunnerUnreachableError:
@@ -1210,11 +1223,7 @@ async def _join_runner_terminal_after_reset(
         elif loop.time() - unregistered_since >= _RUNNER_RECONNECT_GRACE_S:
             return None
         if loop.time() + _RESET_JOIN_RETRY_INTERVAL_S >= deadline:
-            raise click.ClickException(
-                f"Timed out waiting for the runner to bring up Codex for {session_id!r}. "
-                "The runner may still be alive, so nothing was launched here. "
-                "Check the runner, then run this command again."
-            )
+            raise _join_budget_exhausted()
         await asyncio.sleep(_RESET_JOIN_RETRY_INTERVAL_S)
     terminal = await _wait_for_codex_terminal_ready(
         client, session_id, timeout_s=_DAEMON_TERMINAL_READY_TIMEOUT_S

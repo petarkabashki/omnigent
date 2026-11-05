@@ -602,7 +602,45 @@ async def test_prepare_codex_terminal_stops_rather_than_launching_over_a_live_ru
     with pytest.raises(click.ClickException, match="may still be alive, so nothing was launched"):
         await _prepare_existing_session()
 
+    assert ensures.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_codex_terminal_stops_when_a_retry_sleep_passes_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A sleep that wakes after the deadline must not call ensure with a bad timeout."""
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def time(self) -> float:
+            return self.now
+
+    clock = _Clock()
+
+    async def _overshoot(_delay: float) -> None:
+        clock.now += 2.5
+
+    ensures = _serve_runner_join(
+        monkeypatch,
+        tmp_path,
+        ensure_statuses=[502],
+        status_replies=[_runner_status(online=True)],
+    )
+    monkeypatch.setattr(codex_native, "_RESET_JOIN_TIMEOUT_S", 2.1)
+    monkeypatch.setattr(codex_native, "_RESET_JOIN_RETRY_INTERVAL_S", 2.0)
+    monkeypatch.setattr(codex_native.asyncio, "get_running_loop", lambda: clock)
+    monkeypatch.setattr(codex_native.asyncio, "sleep", _overshoot)
+
+    with pytest.raises(click.ClickException, match="may still be alive, so nothing was launched"):
+        await _prepare_existing_session()
+
     assert ensures.await_count == 1
+    assert ensures.await_args is not None
+    assert ensures.await_args.kwargs["timeout"] > 0
 
 
 @pytest.mark.asyncio
