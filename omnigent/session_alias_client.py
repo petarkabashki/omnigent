@@ -89,12 +89,14 @@ def reset_session(
     *,
     stop_running: bool = False,
     drop_pending: bool = False,
+    acknowledge_running_work: bool = False,
 ) -> dict[str, Any]:
     """Reset a session's model context in place via ``POST /v1/sessions/{id}/reset``.
 
     The body stays empty unless a flag is set, so a refusal uses the server's
-    default words (a running turn, or queued input). ``stop_running`` and
-    ``drop_pending`` are the retries those words name.
+    default words (a running turn, queued input, or live sub-agents and
+    background work). ``stop_running``, ``drop_pending``, and
+    ``acknowledge_running_work`` are the retries those words name.
 
     The reset can wait out a harness stop, so this call allows longer than the
     client's default timeout.
@@ -103,6 +105,8 @@ def reset_session(
     :param session_id: Session to reset, already resolved from an alias.
     :param stop_running: Interrupt a running turn before resetting.
     :param drop_pending: Discard queued input instead of refusing.
+    :param acknowledge_running_work: Reset even if sub-agents or background
+        work are still counted. The server's sentence names this field.
     :returns: The server's reset result (``session_id``, ``epoch``, ``boundary_item_id``).
     :raises OmnigentError: The server's message, unchanged, including a client timeout.
     """
@@ -111,6 +115,8 @@ def reset_session(
         payload["stop_running"] = True
     if drop_pending:
         payload["pending"] = "drop"
+    if acknowledge_running_work:
+        payload["acknowledge_running_work"] = True
     try:
         response = client.post(
             f"/v1/sessions/{session_id}/reset",

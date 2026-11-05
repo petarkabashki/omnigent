@@ -11,7 +11,11 @@ import pytest
 from omnigent.entities import ContextResetData, Conversation, ConversationItem
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.routes._sessions import reset as reset_module
-from omnigent.server.routes._sessions.reset import is_reset_in_flight, run_context_reset
+from omnigent.server.routes._sessions.reset import (
+    is_reset_in_flight,
+    run_context_reset,
+    running_work_snapshot,
+)
 from omnigent.server.schemas import ResetSessionRequest
 from omnigent.stores.conversation_store import (
     FORK_CARRY_HISTORY_LABEL_KEY,
@@ -25,6 +29,38 @@ pytestmark = pytest.mark.asyncio
 class _Forwarded:
     status_code: int
     body: str = ""
+
+
+class _Children:
+    """Child rows a reset's live check reads, without a database."""
+
+    def __init__(self, rows: list[Conversation]) -> None:
+        self._rows = rows
+
+    def list_child_conversation_ids_by_parent(
+        self, parent_conversation_ids: list[str]
+    ) -> dict[str, list[str]]:
+        return {
+            parent: [row.id for row in self._rows if row.parent_conversation_id == parent]
+            for parent in parent_conversation_ids
+        }
+
+    def get_conversations(self, conversation_ids: list[str]) -> dict[str, Conversation]:
+        wanted = set(conversation_ids)
+        return {row.id: row for row in self._rows if row.id in wanted}
+
+
+def _child(status: str, *, runner_id: str | None = None) -> Conversation:
+    return Conversation(
+        id="child",
+        created_at=1,
+        updated_at=1,
+        root_conversation_id="conv_1",
+        parent_conversation_id="conv_1",
+        kind="sub_agent",
+        live_status=status,
+        runner_id=runner_id,
+    )
 
 
 @dataclass
@@ -95,6 +131,10 @@ class _Harness:
     dropped: bool = False
     interrupted: bool = False
     dispatching: bool = False
+    children: list[Conversation] = field(default_factory=list)
+    observed_status: dict[str, str] = field(default_factory=dict)
+    runner_online: dict[str, bool] = field(default_factory=dict)
+    background_tasks: int = 0
     items_seen_by_forward: list[int] = field(default_factory=list)
     forward_gate: asyncio.Event | None = None
     #: Recorded by a hook while the runner handles ``prepare``.
@@ -124,6 +164,17 @@ class _Harness:
         async def wake() -> bool:
             return self.wake_result
 
+        async def running_work() -> Any:
+            return running_work_snapshot(
+                "conv_1",
+                _Children(self.children),
+                observed_status=lambda sid: self.observed_status.get(sid),
+                runner_online_of=lambda ids: {
+                    sid: self.runner_online[sid] for sid in ids if sid in self.runner_online
+                },
+                background_tasks=self.background_tasks,
+            )
+
         return await run_context_reset(
             session_id="conv_1",
             conv=Conversation(
@@ -145,6 +196,7 @@ class _Harness:
             native_harness=self.native_harness,
             publish=self.published.append,
             dispatching=lambda: self.dispatching,
+            running_work_of=running_work,
         )
 
 
@@ -384,6 +436,74 @@ async def test_sdk_reset_keeps_the_external_session_id() -> None:
 
     assert harness.store.log == ["forward prepare", "forward commit"]
     assert harness.store.external_session_id == "sid-old"
+
+
+_LIVE_CHILD = "The session has 1 running sub-agent; retry with acknowledge_running_work=true"
+
+
+def _live_child() -> _Harness:
+    # No runner of its own: the pane is the parent's, and the live check says it is up.
+    return _Harness(
+        children=[_child("running")],
+        observed_status={"child": "running"},
+        runner_online={"conv_1": True},
+    )
+
+
+async def test_live_child_blocks_reset() -> None:
+    harness = _live_child()
+
+    with pytest.raises(OmnigentError) as caught:
+        await harness.run()
+
+    assert caught.value.code == ErrorCode.SESSION_BUSY
+    assert caught.value.message == _LIVE_CHILD
+    assert harness.store.items == {}
+    assert harness.forwarded == []
+
+
+async def test_acknowledged_running_child_resets() -> None:
+    result = await _live_child().run(acknowledge_running_work=True)
+
+    assert result.epoch == 1
+
+
+async def test_dead_mirrored_child_does_not_block() -> None:
+    # The row and the relay cache still say running after the pane's runner died.
+    harness = _Harness(
+        children=[_child("running")],
+        observed_status={"child": "running"},
+        runner_online={"conv_1": False},
+    )
+
+    result = await harness.run()
+
+    assert result.epoch == 1
+    assert harness.forwarded[0]["phase"] == "prepare"
+
+
+async def test_live_background_work_blocks_until_acknowledged() -> None:
+    harness = _Harness(background_tasks=2, runner_online={"conv_1": True})
+
+    with pytest.raises(OmnigentError) as caught:
+        await harness.run()
+
+    assert caught.value.message == (
+        "The session has 2 background tasks; retry with acknowledge_running_work=true"
+    )
+    assert harness.forwarded == []
+
+    result = await harness.run(acknowledge_running_work=True)
+
+    assert result.epoch == 1
+
+
+async def test_dead_pane_drops_a_stale_background_tally() -> None:
+    harness = _Harness(background_tasks=2, runner_online={"conv_1": False})
+
+    result = await harness.run()
+
+    assert result.epoch == 1
 
 
 async def test_stop_running_interrupts_first() -> None:

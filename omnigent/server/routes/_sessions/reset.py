@@ -15,9 +15,9 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
@@ -65,6 +65,186 @@ IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native", "codex-native"})
 _NATIVE_RESUME_LABEL_KEYS = (FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY, FORK_CARRY_HISTORY_LABEL_KEY)
 
 RunnerForward = Callable[[dict[str, Any]], Awaitable[Any]]
+
+
+class _ChildLookup(Protocol):
+    """The two store reads a reset uses to see sub-agent rows."""
+
+    def list_child_conversation_ids_by_parent(
+        self, parent_conversation_ids: list[str]
+    ) -> dict[str, list[str]]:
+        """Return direct child ids for each parent."""
+
+    def get_conversations(self, conversation_ids: list[str]) -> Mapping[str, Conversation]:
+        """Return the conversations that exist for ``conversation_ids``."""
+
+
+@dataclass(frozen=True)
+class MirroredChild:
+    """A sub-agent row as stored. Its status can outlive the pane."""
+
+    session_id: str
+    status: str | None
+    runner_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunningWork:
+    """Sub-agents and background tasks a reset still has to account for."""
+
+    subagents: int = 0
+    background_tasks: int = 0
+
+
+def count_live_running_work(
+    session_id: str,
+    children: Iterable[MirroredChild],
+    *,
+    observed_status: Mapping[str, str],
+    runner_online: Mapping[str, bool],
+    background_tasks: int,
+) -> RunningWork:
+    """Count work that blocks a reset.
+
+    ``observed_status`` is the relay cache. ``runner_online`` is the live
+    check: ``False`` means that pane's runner is gone, so a mirrored
+    ``running`` row does not count. When the check cannot tell, a mirrored
+    running row still counts, and ``acknowledge_running_work`` overrides it.
+
+    :param session_id: Session being reset, e.g. ``"conv_parent"``.
+    :param children: Sub-agent rows belonging to that session.
+    :param observed_status: Relay status by session id. Absent ids have no
+        fresh observation.
+    :param runner_online: Live runner reachability by session id. Absent ids
+        were not checked.
+    :param background_tasks: Mirrored background-task tally for ``session_id``.
+    :returns: Counts of work that is still live, or still unverified.
+    """
+    subagents = sum(
+        1
+        for child in children
+        if _child_still_running(session_id, child, observed_status, runner_online)
+    )
+    background = background_tasks if background_tasks > 0 else 0
+    if background and runner_online.get(session_id) is False:
+        background = 0
+    return RunningWork(subagents=subagents, background_tasks=background)
+
+
+def running_work_message(work: RunningWork) -> str:
+    """Return the refusal that names ``acknowledge_running_work=true``."""
+    parts: list[str] = []
+    if work.subagents:
+        noun = "sub-agent" if work.subagents == 1 else "sub-agents"
+        parts.append(f"{work.subagents} running {noun}")
+    if work.background_tasks:
+        noun = "background task" if work.background_tasks == 1 else "background tasks"
+        parts.append(f"{work.background_tasks} {noun}")
+    return f"The session has {' and '.join(parts)}; retry with acknowledge_running_work=true"
+
+
+def running_work_snapshot(
+    session_id: str,
+    conversation_store: _ChildLookup,
+    *,
+    observed_status: Callable[[str], str | None],
+    runner_online_of: Callable[[list[str]], Mapping[str, bool]] | None,
+    background_tasks: int,
+) -> RunningWork:
+    """Load sub-agent rows and count those the live check still sees.
+
+    :param session_id: Session being reset.
+    :param conversation_store: Store that lists child ids and their rows.
+    :param observed_status: Relay status for one session id, or ``None``.
+    :param runner_online_of: Live runner check for the ids a stale row might
+        still be charging to. ``None`` when this server cannot check.
+    :param background_tasks: Mirrored background-task tally for the session.
+    :returns: The counts :func:`count_live_running_work` produces.
+    """
+    children = _load_mirrored_children(conversation_store, session_id)
+    observed: dict[str, str] = {}
+    probe: list[str] = []
+    seen: set[str] = set()
+
+    def add_probe(target_id: str) -> None:
+        if target_id not in seen:
+            seen.add(target_id)
+            probe.append(target_id)
+
+    if background_tasks > 0:
+        add_probe(session_id)
+    for child in children:
+        status = observed_status(child.session_id)
+        if isinstance(status, str):
+            observed[child.session_id] = status
+        if child.status in _BUSY_STATUSES or status in _BUSY_STATUSES:
+            add_probe(child.session_id if child.runner_id else session_id)
+    online: Mapping[str, bool] = {}
+    if probe and runner_online_of is not None:
+        online = runner_online_of(probe)
+    return count_live_running_work(
+        session_id,
+        children,
+        observed_status=observed,
+        runner_online=online,
+        background_tasks=background_tasks,
+    )
+
+
+def _pane_id(session_id: str, child: MirroredChild) -> str:
+    """Return the session whose runner is the child's pane.
+
+    A native mirror often has no runner of its own; its pane is the parent's.
+    """
+    return child.session_id if child.runner_id else session_id
+
+
+def _child_still_running(
+    session_id: str,
+    child: MirroredChild,
+    observed_status: Mapping[str, str],
+    runner_online: Mapping[str, bool],
+) -> bool:
+    observed = observed_status.get(child.session_id)
+    mirrored_busy = child.status in _BUSY_STATUSES
+    observed_busy = observed in _BUSY_STATUSES
+    if not mirrored_busy and not observed_busy:
+        return False
+    if runner_online.get(_pane_id(session_id, child)) is False:
+        return False
+    if observed is not None and not observed_busy:
+        return False
+    return True
+
+
+def _load_mirrored_children(
+    conversation_store: _ChildLookup, session_id: str
+) -> list[MirroredChild]:
+    descendant_ids: list[str] = []
+    seen = {session_id}
+    frontier = [session_id]
+    while frontier:
+        grouped = conversation_store.list_child_conversation_ids_by_parent(frontier)
+        next_frontier: list[str] = []
+        for parent_id in frontier:
+            for child_id in grouped.get(parent_id, ()):
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                descendant_ids.append(child_id)
+                next_frontier.append(child_id)
+        frontier = next_frontier
+    if not descendant_ids:
+        return []
+    rows = conversation_store.get_conversations(descendant_ids)
+    return [
+        MirroredChild(session_id=row.id, status=row.live_status, runner_id=row.runner_id)
+        for row in rows.values()
+    ]
+
+
+async def _no_running_work() -> RunningWork:
+    return RunningWork()
 
 
 def is_reset_in_flight(session_id: str) -> bool:
@@ -115,6 +295,7 @@ async def run_context_reset(
     publish: Callable[[dict[str, Any]], object],
     dispatching: Callable[[], bool] = lambda: False,
     created_by: str | None = None,
+    running_work_of: Callable[[], Awaitable[RunningWork]] | None = None,
 ) -> ResetSessionResponse:
     """
     Reset a session's model context in place.
@@ -129,9 +310,12 @@ async def run_context_reset(
         e.g. ``"claude-native"``, or ``None`` for an SDK harness.
     :param publish: Publishes an SSE payload on the session stream.
     :param dispatching: Whether a message dispatch is still in flight here.
+    :param running_work_of: Live sub-agent and background-task counts.
+        ``None`` counts nothing, for a caller that has no children to check.
     :returns: The new epoch and boundary item id.
-    :raises OmnigentError: 409 for busy, pending input, an unsupported
-        harness or a concurrent reset; 503 when no runner is reachable.
+    :raises OmnigentError: 409 for a busy turn, pending input, live
+        sub-agents or background work, an unsupported harness, or a
+        concurrent reset; 503 when no runner is reachable.
     """
     if reset.summary == "auto":
         raise _unsupported("summary 'auto' is not supported yet; use 'none' or {'text': ...}")
@@ -183,6 +367,7 @@ async def run_context_reset(
             dispatching=dispatching,
             created_by=created_by,
             native_harness=native_harness,
+            running_work_of=running_work_of or _no_running_work,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -215,11 +400,13 @@ async def _reset_in_place(
     dispatching: Callable[[], bool],
     created_by: str | None,
     native_harness: str | None,
+    running_work_of: Callable[[], Awaitable[RunningWork]],
 ) -> ResetSessionResponse:
     # A message that passed the input gate before the reset registered may
     # still be on its way to the runner; let it land so the busy check sees it.
     await _wait_until(lambda: not dispatching(), "A message is still being delivered")
     await _ensure_idle(reset, status_of, interrupt)
+    await _ensure_no_running_work(reset, running_work_of)
     if await has_server_pending() or pending_inputs.has_pending(session_id):
         if reset.pending == "reject":
             raise OmnigentError(
@@ -311,6 +498,24 @@ async def _ensure_idle(
     await _wait_until(
         lambda: status_of() not in _BUSY_STATUSES, "The running turn did not stop in time"
     )
+
+
+async def _ensure_no_running_work(
+    reset: ResetSessionRequest,
+    running_work_of: Callable[[], Awaitable[RunningWork]],
+) -> None:
+    """Refuse while sub-agents or background work are still live.
+
+    The count comes from a live check. A mirrored row whose pane is gone
+    does not count. ``acknowledge_running_work`` overrides a count the
+    check still got wrong.
+    """
+    work = await running_work_of()
+    if work.subagents == 0 and work.background_tasks == 0:
+        return
+    if reset.acknowledge_running_work:
+        return
+    raise OmnigentError(running_work_message(work), code=ErrorCode.SESSION_BUSY)
 
 
 async def _forward_reset(

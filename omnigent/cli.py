@@ -7814,8 +7814,23 @@ def session_send(address: str, message: str, server: str | None) -> None:
     default=False,
     help="Discard queued input. The server asks for this when input is still queued.",
 )
+@click.option(
+    "--acknowledge-running-work",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reset while sub-agents or background work are still running. "
+        "The server asks for this with acknowledge_running_work=true."
+    ),
+)
 @click.option("--server", default=None, help=_SERVER_OPTION_HELP)
-def session_reset(address: str, stop: bool, drop_pending: bool, server: str | None) -> None:
+def session_reset(
+    address: str,
+    stop: bool,
+    drop_pending: bool,
+    acknowledge_running_work: bool,
+    server: str | None,
+) -> None:
     """Reset a session's model context in place, keeping its id and items.
 
     ADDRESS is a session id, ``project/Role``, ``/Role``, or a bare ``Role``.
@@ -7837,6 +7852,7 @@ def session_reset(address: str, stop: bool, drop_pending: bool, server: str | No
                 str(entry["session_id"]),
                 stop_running=stop,
                 drop_pending=drop_pending,
+                acknowledge_running_work=acknowledge_running_work,
             )
         except OmnigentError as exc:
             # The server's sentence is the whole output. Click's "Error:"

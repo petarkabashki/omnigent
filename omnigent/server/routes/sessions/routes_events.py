@@ -177,6 +177,7 @@ from omnigent.server.routes._sessions.common import (
     _logger,
     _pushed_model_options_cache,
     _session_active_response_cache,
+    _session_background_task_count_cache,
     _session_mcp_startup_cache,
     _session_sandbox_status_cache,
     _session_status_cache,
@@ -291,6 +292,7 @@ from omnigent.server.routes._sessions.reset import (
     RESET_FORWARD_TIMEOUT_S,
     is_reset_in_flight,
     run_context_reset,
+    running_work_snapshot,
 )
 from omnigent.server.routing_outcomes import (
     ACTOR_UNKNOWN,
@@ -2282,6 +2284,22 @@ def register_events_routes(
                 _, client = await _wake_bound_runner_for_control(reset_conv)
                 return client is not None
 
+            def _runner_online(ids: list[str]) -> dict[str, bool]:
+                if liveness_lookup is None or not ids:
+                    return {}
+                found = liveness_lookup(ids)
+                return {sid: row.runner_online for sid, row in found.items()}
+
+            async def _running_work() -> Any:
+                return await asyncio.to_thread(
+                    running_work_snapshot,
+                    session_id,
+                    conversation_store,
+                    observed_status=_session_status_cache.get,
+                    runner_online_of=_runner_online,
+                    background_tasks=_session_background_task_count_cache.get(session_id, 0),
+                )
+
             from omnigent.server.routes import sessions as _sessions_facade
 
             reset_native_agent = _native_coding_agent_for_session(reset_conv)
@@ -2306,6 +2324,7 @@ def register_events_routes(
                 ),
                 dispatching=lambda: _dispatch_in_flight.get(session_id, 0) > 0,
                 created_by=created_by,
+                running_work_of=_running_work,
             )
             await asyncio.to_thread(record_override, session_id, "reset", "owner")
             return {

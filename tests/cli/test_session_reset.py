@@ -30,10 +30,12 @@ def test_session_reset_prints_the_epoch(monkeypatch: Any) -> None:
         *,
         stop_running: bool = False,
         drop_pending: bool = False,
+        acknowledge_running_work: bool = False,
     ) -> dict[str, object]:
         calls["session_id"] = session_id
         calls["stop_running"] = stop_running
         calls["drop_pending"] = drop_pending
+        calls["acknowledge_running_work"] = acknowledge_running_work
         return {"session_id": session_id, "epoch": 2, "boundary_item_id": "item_1"}
 
     monkeypatch.setattr("omnigent.cli._session_api_client", _client)
@@ -49,7 +51,57 @@ def test_session_reset_prints_the_epoch(monkeypatch: Any) -> None:
         "session_id": "conv_abc",
         "stop_running": True,
         "drop_pending": False,
+        "acknowledge_running_work": False,
     }
+
+
+def test_session_reset_passes_acknowledge_running_work(monkeypatch: Any) -> None:
+    calls: dict[str, object] = {}
+
+    def resolve(_client: object, _address: str) -> dict[str, str]:
+        return {"session_id": "conv_abc", "handle": "omnigent/Scratch"}
+
+    def reset(
+        _client: object,
+        session_id: str,
+        *,
+        stop_running: bool = False,
+        drop_pending: bool = False,
+        acknowledge_running_work: bool = False,
+    ) -> dict[str, object]:
+        calls["acknowledge_running_work"] = acknowledge_running_work
+        return {"session_id": session_id, "epoch": 4, "boundary_item_id": "item_1"}
+
+    monkeypatch.setattr("omnigent.cli._session_api_client", _client)
+    monkeypatch.setattr("omnigent.session_alias_client.resolve_address", resolve)
+    monkeypatch.setattr("omnigent.session_alias_client.reset_session", reset)
+
+    result = CliRunner().invoke(
+        cli, ["session", "reset", "conv_abc", "--acknowledge-running-work"]
+    )
+
+    assert result.exit_code == 0
+    assert calls == {"acknowledge_running_work": True}
+    assert "epoch 4" in result.output
+
+
+def test_session_reset_prints_the_running_work_refusal(monkeypatch: Any) -> None:
+    sentence = "The session has 1 running sub-agent; retry with acknowledge_running_work=true"
+
+    def resolve(_client: object, _address: str) -> dict[str, str]:
+        return {"session_id": "conv_abc", "handle": "omnigent/Scratch"}
+
+    def reset(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise OmnigentError(sentence)
+
+    monkeypatch.setattr("omnigent.cli._session_api_client", _client)
+    monkeypatch.setattr("omnigent.session_alias_client.resolve_address", resolve)
+    monkeypatch.setattr("omnigent.session_alias_client.reset_session", reset)
+
+    result = CliRunner().invoke(cli, ["session", "reset", "conv_abc"])
+
+    assert result.exit_code != 0
+    assert result.output.strip() == sentence
 
 
 def test_session_reset_prints_the_server_refusal(monkeypatch: Any) -> None:

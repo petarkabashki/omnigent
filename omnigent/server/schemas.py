@@ -4207,6 +4207,10 @@ class ResetSessionRequest(BaseModel):
     :param stop_running: Interrupt a running turn first instead of returning 409.
     :param pending: ``"reject"`` returns 409 while input is queued;
         ``"drop"`` discards it. ``"carry"`` is not supported yet.
+    :param acknowledge_running_work: Reset even when a live check still
+        counts sub-agents or background work. The refusal names this field.
+        A mirrored row does not count once that check says the pane is gone.
+        No agent tool sets this; it is the caller's override for a stale count.
     :param children: Only ``"keep"``; closing children is not supported yet.
     :param idempotency_key: Repeating a key returns the first result.
     """
@@ -4216,6 +4220,7 @@ class ResetSessionRequest(BaseModel):
     summary: Literal["none", "auto"] | ResetSummaryText = "none"
     stop_running: bool = False
     pending: Literal["reject", "drop", "carry"] = "reject"
+    acknowledge_running_work: bool = False
     children: Literal["keep"] = "keep"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
