@@ -1098,7 +1098,7 @@ _CLAUDE_LAUNCH_REFUSED_MESSAGE = (
     "minutes, send a message to try again."
 )
 _CLAUDE_LAUNCH_RECOVERED_MESSAGE = (
-    "Claude has started. The earlier \"Claude did not start\" message no longer applies, and "
+    'Claude has started. The earlier "Claude did not start" message no longer applies, and '
     "Omnigent is no longer retrying. A message sent while Claude was down was not delivered, "
     "so send it again."
 )
