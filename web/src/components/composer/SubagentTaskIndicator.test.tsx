@@ -65,6 +65,16 @@ describe("SubagentTaskIndicator", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("stays up when the loaded page is settled and older children exist", () => {
+    setChildren([child({ id: "done", current_task_status: "completed" })], true);
+    renderIndicator();
+    const pill = screen.getByTestId("subagent-task-pill");
+    expect(pill).toHaveTextContent("0+");
+    expect(pill).toHaveAccessibleName("0+ sub-agents (older agents not counted)");
+    fireEvent.click(pill);
+    expect(screen.getByText("Older agents are not in this page.")).toBeInTheDocument();
+  });
+
   it("counts direct children needing attention while excluding settled rows", () => {
     setChildren([
       child({ id: "working", busy: true }),

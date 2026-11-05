@@ -83,6 +83,10 @@ function mockChildTree(tree: Record<string, ChildSessionInfo[]>) {
     children: id !== null ? (tree[id] ?? []) : [],
     isLoading: false,
     error: null,
+    hasMore: false,
+    loadMore: async () => {},
+    isLoadingMore: false,
+    loadMoreError: null,
   }));
 }
 
@@ -626,7 +630,15 @@ describe("buildTree", () => {
 
 describe("SubagentsPanel view-mode toggle", () => {
   it("defaults to list view", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel();
 

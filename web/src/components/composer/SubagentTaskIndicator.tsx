@@ -68,7 +68,10 @@ function statusSummary(items: IndicatorChild[], partial: boolean): string {
     errors > 0 ? `${errors} need${errors === 1 ? "s" : ""} attention` : null,
   ].filter(Boolean);
   const plural = partial || items.length !== 1;
-  return `${total} sub-agent${plural ? "s" : ""}: ${parts.join(", ")}${partial ? " (older agents not counted)" : ""}`;
+  const head = `${total} sub-agent${plural ? "s" : ""}`;
+  const older = partial ? " (older agents not counted)" : "";
+  const detail = parts.join(", ");
+  return detail ? `${head}: ${detail}${older}` : `${head}${older}`;
 }
 
 function SubagentStateIndicator({ state, label }: { state: IndicatorState; label: string }) {
@@ -169,8 +172,8 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
   // null render below) keeps it from re-opening if a sub-agent later goes
   // busy again, and never moves focus itself.
   useEffect(() => {
-    if (count <= 0) setOpen(false);
-  }, [count]);
+    if (count <= 0 && !hasMore) setOpen(false);
+  }, [count, hasMore]);
   // The tally is session-local: a conversation switch starts closed. Flag the
   // reason so the close never yanks focus to the new session's trigger.
   useEffect(() => {
@@ -183,7 +186,10 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
     setOpen(next);
   };
 
-  if (count <= 0) return null;
+  // A loaded page of settled children is not an empty tree when older
+  // pages exist. Hiding the pill there would drop a working child that
+  // sits past this page, with nothing saying the page is partial.
+  if (count <= 0 && !hasMore) return null;
 
   const countLabel = statusSummary(items, hasMore);
   const triggerState: IndicatorState = items.some((item) => item.state === "error")
@@ -238,11 +244,21 @@ export function SubagentTaskIndicator({ conversationId }: { conversationId: stri
           }}
           className="max-h-[min(24rem,var(--radix-popover-content-available-height))] w-[min(25rem,calc(100vw-2rem))] overflow-y-auto p-2"
         >
-          <ul className="flex flex-col">
-            {items.map((item) => (
-              <SubagentNavigationRow key={item.child.id} item={item} onNavigate={handleNavigate} />
-            ))}
-          </ul>
+          {items.length === 0 ? (
+            <p className="px-2 py-1.5 text-sm text-muted-foreground">
+              Older agents are not in this page.
+            </p>
+          ) : (
+            <ul className="flex flex-col">
+              {items.map((item) => (
+                <SubagentNavigationRow
+                  key={item.child.id}
+                  item={item}
+                  onNavigate={handleNavigate}
+                />
+              ))}
+            </ul>
+          )}
         </PopoverContent>
       </Popover>
     </>

@@ -10358,6 +10358,36 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
       ...overrides,
     });
 
+    it("refetches instead of prepending a new child onto a list that already has rows", () => {
+      // A reconnect replays a page of children newest-first. Prepending each
+      // one would reverse that page and hide anyone between it and the cursor.
+      client.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"), [
+        {
+          id: "conv_older",
+          title: "researcher:older",
+          task_summary: null,
+          tool: "researcher",
+          session_name: "older",
+          labels: {},
+          current_task_status: "completed",
+          last_task_error: null,
+          busy: false,
+          last_message_preview: "done",
+          pending_elicitations_count: 0,
+        },
+      ]);
+      const spy = vi.spyOn(client, "invalidateQueries");
+      handleSessionEvent({
+        type: "session_child_session_updated",
+        conversationId: "conv_parent",
+        childSessionId: "conv_child1",
+        child: child(),
+      });
+      const cached = client.getQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"));
+      expect(cached?.map((row) => row.id)).toEqual(["conv_older"]);
+      expect(spy).toHaveBeenCalledWith({ queryKey: childSessionsQueryKey("conv_parent") });
+    });
+
     it("upserts a new child into the cached list", () => {
       client.setQueryData<ChildSessionInfo[]>(childSessionsQueryKey("conv_parent"), []);
       handleSessionEvent({

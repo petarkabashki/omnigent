@@ -180,7 +180,15 @@ describe("SubagentsPanel", () => {
   it("always renders a 'main' row linking to the root session", () => {
     // No children at all — the panel still shows the main link so
     // the user always has a path back to the parent.
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel({ rootSessionId: "conv_root" });
 
@@ -200,7 +208,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("labels the main row with the root agent's name when available", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",
@@ -230,7 +246,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("labels native-wrapper main rows with the product name, not the YAML agent name", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",
@@ -260,7 +284,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("labels Pi native-wrapper main rows with the product name", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",
@@ -289,7 +321,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("shows the root's latest message as the main-row preview", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",
@@ -338,14 +378,30 @@ describe("SubagentsPanel", () => {
   });
 
   it("omits the main-row preview when the root has no message yet", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     // Default useSession mock (beforeEach) returns items: [] — nothing to preview.
     renderPanel({ rootSessionId: "conv_root" });
     expect(screen.queryByTestId("subagent-main-preview")).toBeNull();
   });
 
   it("renders an 'Add agent' button, with the dialog mounted only after a click", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel({ rootSessionId: "conv_root" });
 
@@ -417,6 +473,10 @@ describe("SubagentsPanel", () => {
         children: [],
         isLoading: false,
         error: null,
+        hasMore: false,
+        loadMore: async () => {},
+        isLoadingMore: false,
+        loadMoreError: null,
       });
       useSessionMock.mockReturnValue({
         session: {
@@ -447,7 +507,15 @@ describe("SubagentsPanel", () => {
   );
 
   it("renders a loading state when the initial fetch is in flight", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: true, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: true,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel();
 
@@ -459,6 +527,10 @@ describe("SubagentsPanel", () => {
       children: [],
       isLoading: false,
       error: new Error("network down"),
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
     });
 
     renderPanel();
@@ -798,7 +870,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("fetches child sessions without polling (push-driven via watch-set)", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel({ rootSessionId: "conv_root" });
 
@@ -807,7 +887,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("highlights the main row when conversationId === rootSessionId (on the parent)", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
 
     renderPanel({ conversationId: "conv_root", rootSessionId: "conv_root" });
 
@@ -989,7 +1077,15 @@ describe("SubagentsPanel", () => {
       // quiet grey disconnected dot rather than the red "Failed" pill.
       // Parametrized over BOTH disconnect codes, mirroring the child-row
       // it.each above so neither code can regress on the main row.
-      useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+      useChildSessionsMock.mockReturnValue({
+        children: [],
+        isLoading: false,
+        error: null,
+        hasMore: false,
+        loadMore: async () => {},
+        isLoadingMore: false,
+        loadMoreError: null,
+      });
       useSessionMock.mockReturnValue({
         session: {
           id: "conv_root",
@@ -1021,7 +1117,15 @@ describe("SubagentsPanel", () => {
   );
 
   it("does not add a failure avatar to the main harness", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",
@@ -1053,7 +1157,15 @@ describe("SubagentsPanel", () => {
   });
 
   it("does not add a working avatar to the main harness", () => {
-    useChildSessionsMock.mockReturnValue({ children: [], isLoading: false, error: null });
+    useChildSessionsMock.mockReturnValue({
+      children: [],
+      isLoading: false,
+      error: null,
+      hasMore: false,
+      loadMore: async () => {},
+      isLoadingMore: false,
+      loadMoreError: null,
+    });
     useSessionMock.mockReturnValue({
       session: {
         id: "conv_root",

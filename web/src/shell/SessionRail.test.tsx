@@ -1,12 +1,13 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as UseChildSessionsModule from "@/hooks/useChildSessions";
 
 const h = vi.hoisted(() => ({
   hook: {} as Record<string, unknown>,
 }));
 
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/hooks/useChildSessions")>()),
+  ...(await importOriginal<typeof UseChildSessionsModule>()),
   useChildSessions: () => h.hook,
 }));
 

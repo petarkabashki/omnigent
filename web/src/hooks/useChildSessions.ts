@@ -249,6 +249,8 @@ async function fetchChildSessionsRestoringDepth(
   for (let requests = 0; children.length < loadedCount && page.hasMore; requests++) {
     if (requests >= MAX_RESTORE_PAGES) break;
     try {
+      // Each page supplies the next cursor, so the requests cannot run together.
+      // oxlint-disable-next-line no-await-in-loop
       const next = await fetchChildSessionsPage(sessionId, page.cursor);
       children = mergeNewChildren(children, next.children);
       page = next.page;
@@ -372,13 +374,15 @@ export function useChildSessions(
         mergeNewChildren(current ?? [], next.children),
       );
       queryClient.setQueryData(childSessionsPageStateKey(sessionId), next.page);
-    } catch (error) {
-      if (isStaleCursorError(error)) {
+    } catch (loadError) {
+      if (isStaleCursorError(loadError)) {
         // The cursor row was deleted; a refetch walks from the newest page again.
         setLoadMoreError("The agent list changed while loading. Refreshing.");
         void queryClient.invalidateQueries({ queryKey: childSessionsQueryKey(sessionId) });
       } else {
-        setLoadMoreError(error instanceof Error ? error.message : "Could not load older agents.");
+        setLoadMoreError(
+          loadError instanceof Error ? loadError.message : "Could not load older agents.",
+        );
       }
     } finally {
       setIsLoadingMore(false);
