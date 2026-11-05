@@ -28,7 +28,12 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   agent's project, the picker's `namespace`, or the CLI's `workspace`, else the root.
   Resolve repairs labels to match the row and never creates one. Names with no row
   fall back to the label scan; legacy label-projects have no rows. `sys_role_list`
-  lists a namespace's held and vacant roles.
+  lists a namespace's held and vacant roles. The session header shows a holder's
+  handle at every width, outside the breadcrumb the native shells hide. Opening
+  it lists that namespace: a filled chip is held, a hollow chip is vacant. Take
+  claims a vacant name with `PUT /v1/sessions/{id}/alias`. A live holder is not
+  taken over from the web UI. Release role is in the session menu and calls
+  `DELETE /v1/sessions/{id}/alias`.
 - `kill-switch`: an explicit disable refuses new peer sends and independent
   creates, even if an enable is also listed, and hides the Automations page's
   trigger templates (`/v1/info` reports `features.session_orchestration`). Restart every server replica to
@@ -71,6 +76,13 @@ workers on its host or a new managed sandbox. This is enabled by default, with
 - Open an independent worker in Chat or Terminal and follow its "Created by"
   link. On mobile web, the same link is in the header. Ask the manager to list
   its sessions and match `created_by_session_id` to its own session ID.
+- On a top-level session that holds a role, the header shows `project/Role`, or
+  `/Role` when the session is unfiled. Narrow the window below 768 pixels, and
+  open the same session in the iOS or Android shell: the handle stays visible
+  beside the title, not inside the breadcrumb. Open the handle to see filled
+  and hollow chips. Take on a hollow chip claims it for this session. A filled
+  chip held by someone else has no Take over action. Release role is in the
+  session menu (the header kebab on a phone).
 - On Automations, pick a *Jira tickets*, *Slack messages*, or *GitHub issues*
   card from suggestions on **Your automations** or the **Templates** tab at
   `/tasks?view=templates`. Suggestions appear below saved automations or the

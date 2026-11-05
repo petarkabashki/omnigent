@@ -36,6 +36,8 @@ import { ConversationBreadcrumb } from "./ConversationBreadcrumb";
 import { CreatedBySession } from "./CreatedBySession";
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
+import { HeaderRoleHandle } from "@/components/roles/HeaderRoleHandle";
+import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
 import { HeaderProjectTag } from "./HeaderProjectTag";
 import { HeaderTitle } from "./HeaderTitle";
 import { UNTITLED_CONVERSATION_LABEL } from "./sidebarNav";
@@ -540,6 +542,20 @@ export function ChatHeader({
         title={conversationTitle ?? UNTITLED_CONVERSATION_LABEL}
       />
     ) : null;
+  // The title slot is desktop-only, and the native shells hide the breadcrumb.
+  // The handle stays a sibling of that breadcrumb so it remains at every width.
+  const roleAlias =
+    !pending && !isChildSession && actionConversation
+      ? (actionConversation.labels?.[ALIAS_LABEL_KEY] ?? "")
+      : "";
+  const roleHandle =
+    roleAlias && actionConversation ? (
+      <HeaderRoleHandle
+        conversationId={actionConversation.id}
+        namespacePath={projectName ?? ""}
+        alias={roleAlias}
+      />
+    ) : null;
   return (
     <header
       className={cn(
@@ -609,6 +625,7 @@ export function ChatHeader({
             className="pr-1"
           />
         )}
+        {roleHandle}
         {conversationId && createdBySessionId && (
           <CreatedBySession key={createdBySessionId} sessionId={createdBySessionId} />
         )}

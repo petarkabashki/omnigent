@@ -6,6 +6,7 @@ import type { Conversation } from "@/hooks/useConversations";
 import type * as ConversationsModule from "@/hooks/useConversations";
 import type * as UnseenConversationsModule from "@/hooks/useUnseenConversations";
 import type * as UseFileContentModule from "@/hooks/useFileContent";
+import type * as RolesApiModule from "@/lib/rolesApi";
 import type * as SessionsApiModule from "@/lib/sessionsApi";
 import { setOmnigentHostConfig } from "@/lib/host";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
@@ -15,6 +16,13 @@ import { PINNED_LABEL_KEY } from "@/lib/sessionListCache";
 import { toast } from "sonner";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
+
+const releaseSessionRole = vi.hoisted(() => vi.fn(async () => undefined));
+
+vi.mock("@/lib/rolesApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof RolesApiModule>();
+  return { ...actual, releaseSessionRole };
+});
 
 const mocks = vi.hoisted(() => ({
   isMobile: false,
@@ -180,6 +188,16 @@ describe("HeaderConversationMenu", () => {
     ]);
     expect(screen.getByTestId("header-move-to-project")).toBeInTheDocument();
     expect(screen.getByTestId("header-rename-conversation")).toBeInTheDocument();
+    expect(screen.queryByTestId("header-release-role")).toBeNull();
+  });
+
+  it("releases the role from the session menu", async () => {
+    renderMenu({
+      conversation: { ...CONVERSATION, labels: { "omnigent.alias": "Product" } },
+    });
+    openMenu();
+    fireEvent.click(screen.getByTestId("header-release-role"));
+    await waitFor(() => expect(releaseSessionRole).toHaveBeenCalledWith(CONVERSATION.id));
   });
 
   it("opens from the keyboard and focuses the first action", () => {

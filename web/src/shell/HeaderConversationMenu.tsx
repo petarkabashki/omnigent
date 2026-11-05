@@ -22,6 +22,7 @@ import {
   PinOffIcon,
   ShareIcon,
   Trash2Icon,
+  UserMinusIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useIsMutating, useQueryClient } from "@tanstack/react-query";
+import { useReleaseRole } from "@/hooks/useRoles";
+import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
 import { PIN_WRITE_MUTATION_KEY } from "@/lib/sessionListCache";
 import { exportSessionTranscript } from "@/lib/sessionsApi";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
@@ -119,6 +122,8 @@ export function HeaderConversationMenu({
   const rename = useRenameConversation();
   const moveToProject = useMoveToProject();
   const archive = useArchiveConversation();
+  const releaseRole = useReleaseRole();
+  const roleAlias = conversation.labels?.[ALIAS_LABEL_KEY] ?? "";
   const archiveWorktreePrompt = useArchiveWorktreePrompt();
   const deleteConversation = useStopAndDeleteConversation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -306,6 +311,21 @@ export function HeaderConversationMenu({
         <PencilIcon className="size-3.5" />
         Rename
       </DropdownMenuItem>
+      {roleAlias && (
+        <DropdownMenuItem
+          data-testid="header-release-role"
+          className={itemClass}
+          disabled={releaseRole.isPending}
+          onSelect={() =>
+            releaseRole.mutate(conversation.id, {
+              onError: (error) => toast.error(error.message),
+            })
+          }
+        >
+          <UserMinusIcon className="size-3.5" />
+          Release role
+        </DropdownMenuItem>
+      )}
       <DropdownMenuItem
         data-testid="header-mark-unread-conversation"
         className={itemClass}

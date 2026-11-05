@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Agent } from "@/hooks/useAgents";
 import type { Conversation } from "@/hooks/useConversations";
 import type * as NativeBridgeModule from "@/lib/nativeBridge";
+import type * as RolesApiModule from "@/lib/rolesApi";
 import { setOmnigentHostConfig } from "@/lib/host";
 import * as sessionsApi from "@/lib/sessionsApi";
 import type { Session } from "@/lib/types";
@@ -17,15 +18,23 @@ import {
   type TerminalFirstContextValue,
 } from "./TerminalFirstContext";
 
-const { isIOSShellMock, isAndroidShellMock, isMobileMock } = vi.hoisted(() => ({
-  isIOSShellMock: vi.fn(() => false),
-  isAndroidShellMock: vi.fn(() => false),
-  isMobileMock: vi.fn(() => false),
-}));
+const { isIOSShellMock, isAndroidShellMock, isMobileMock, listNamespaceRolesMock } = vi.hoisted(
+  () => ({
+    isIOSShellMock: vi.fn(() => false),
+    isAndroidShellMock: vi.fn(() => false),
+    isMobileMock: vi.fn(() => false),
+    listNamespaceRolesMock: vi.fn(async () => [] as unknown[]),
+  }),
+);
 
 vi.mock("@/hooks/useIsMobileViewport", () => ({
   useIsMobileViewport: () => isMobileMock(),
 }));
+
+vi.mock("@/lib/rolesApi", async (importOriginal) => {
+  const actual = await importOriginal<typeof RolesApiModule>();
+  return { ...actual, listNamespaceRoles: listNamespaceRolesMock };
+});
 
 vi.mock("@/lib/nativeBridge", async (importOriginal) => {
   const actual = await importOriginal<typeof NativeBridgeModule>();
@@ -148,6 +157,8 @@ afterEach(() => {
   isIOSShellMock.mockReturnValue(false);
   isAndroidShellMock.mockReturnValue(false);
   isMobileMock.mockReturnValue(false);
+  listNamespaceRolesMock.mockReset();
+  listNamespaceRolesMock.mockResolvedValue([]);
 });
 
 it.each([false, true])("links the creating session (mobile=%s)", async (mobile) => {
@@ -856,6 +867,37 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
     // Rightmost control in the header's action cluster.
     expect(trigger.parentElement?.lastElementChild).toBe(trigger);
     expect(screen.getByText(conversation.title as string)).toBeInTheDocument();
+  });
+
+  it("shows the role handle below 768px, outside the breadcrumb", async () => {
+    isMobileMock.mockReturnValue(true);
+    isIOSShellMock.mockReturnValue(true);
+    listNamespaceRolesMock.mockResolvedValue([
+      {
+        roleId: "role-1",
+        name: "Product",
+        handle: "lab/Product",
+        path: "lab",
+        permanent: true,
+        state: "held",
+        holderSessionId: conversation.id,
+      },
+    ]);
+    renderHeader({
+      sidebarOpen: true,
+      conversationId: conversation.id,
+      conversationTitle: conversation.title,
+      projectName: "lab",
+      actionConversation: {
+        ...conversation,
+        labels: { "omnigent.alias": "Product" },
+      },
+    });
+
+    const handle = await screen.findByTestId("header-role-handle");
+    expect(handle).toHaveTextContent("lab/Product");
+    expect(handle.closest("nav.conversation-breadcrumb")).toBeNull();
+    expect(handle.className).not.toMatch(/\bhidden\b/);
   });
 
   it("keeps the mobile Share / Agent info analytics on the owner-managed path", () => {
