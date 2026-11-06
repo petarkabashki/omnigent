@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
+import { VisitHistoryButtons } from "./VisitHistoryButtons";
 
 const SIDEBAR_TOGGLE_KEYS = [MOD_KEY, ALT_KEY, "["] as const;
 const SEARCH_KEYS = [MOD_KEY, "K"] as const;
@@ -62,6 +63,7 @@ export function SidebarHeaderActions({
 }) {
   return (
     <div className="flex items-center gap-1" data-testid="sidebar-header-actions">
+      <VisitHistoryButtons className="max-md:hidden" />
       <SidebarSearchButton onOpenSearch={onOpenSearch} />
       <SidebarSettingsButton onSettingsClick={onSettingsClick} className="max-md:hidden" />
       <Tooltip>

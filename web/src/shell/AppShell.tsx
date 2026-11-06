@@ -27,6 +27,7 @@ import { useSessionAgent } from "@/hooks/useAgents";
 import { useApproveHotkey } from "@/hooks/useApproveHotkey";
 import { useSidebarToggleHotkeys } from "@/hooks/useSidebarToggleHotkeys";
 import { useCommandPaletteHotkey } from "@/hooks/useCommandPaletteHotkey";
+import { useVisitHistoryTracker } from "@/hooks/useVisitHistory";
 import { useCloseTabShortcut } from "@/hooks/useCloseTabShortcut";
 import { useNewSessionHotkey } from "@/hooks/useNewSessionHotkey";
 import { useNewShellHotkey } from "@/hooks/useNewShellHotkey";
@@ -1795,6 +1796,7 @@ function AppShellImpl() {
     setCommandPaletteOpen(true);
   }, []);
   const isEmbedded = useIsEmbedded();
+  useVisitHistoryTracker(!isEmbedded);
   useCommandPaletteHotkey(
     () => {
       setSessionSearch(false);

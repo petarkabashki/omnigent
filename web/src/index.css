@@ -1005,7 +1005,7 @@ html[data-electron-mac] .electron-sidebar-header-actions {
 /* Clear the fixed native-control area plus the font-relative action cluster
  * when the collapsed sidebar exposes the chat header at the window edge. */
 html[data-electron-mac] .traffic-light-clearance {
-  padding-left: calc(var(--mac-traffic-light-width) + 5rem);
+  padding-left: calc(var(--mac-traffic-light-width) + 9.75rem);
 }
 /* A maximized rail reaches the same window corner while the sidebar is closed.
  * Once the sidebar opens, the rail starts to its right and needs no clearance. */
@@ -1013,7 +1013,7 @@ html[data-electron-mac]
   .app-shell:not([data-sidebar-open])
   aside[aria-label="Workspace"][data-maximized]
   .workspace-tab-strip {
-  padding-left: calc(var(--mac-traffic-light-width) + 5rem);
+  padding-left: calc(var(--mac-traffic-light-width) + 9.75rem);
 }
 /* Below md the phone header and drawer carry their own controls, so drop the
  * title-bar cluster and start those headers right of the lights. */

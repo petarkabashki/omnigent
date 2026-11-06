@@ -35,6 +35,7 @@ import {
 import { AgentInfoButton } from "@/components/AgentInfo";
 import { openSessionGraph } from "@/hooks/useSessionGraphTrigger";
 import { isMacPlatform } from "@/lib/hotkeys";
+import { isMacElectronShell } from "@/lib/nativeBridge";
 import { ConversationBreadcrumb } from "./ConversationBreadcrumb";
 import { CreatedBySession } from "./CreatedBySession";
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
@@ -56,6 +57,7 @@ import { TAB_BADGE_BASE } from "./railTabs";
 import { TerminalSplitControls } from "./TerminalSplitControls";
 import { ViewModeMenuItems, ViewModeToggle } from "./ViewModeToggle";
 import { SidebarOpenButton } from "./SidebarOpenButton";
+import { VisitHistoryButtons } from "./VisitHistoryButtons";
 
 const RIGHT_PANEL_KEYS = [MOD_KEY, ALT_KEY, "]"] as const;
 
@@ -586,6 +588,7 @@ export function ChatHeader({
           !sidebarOpen && !canvas && "traffic-light-clearance",
         )}
       >
+        {!sidebarOpen && !isMobile && !isMacElectronShell() && <VisitHistoryButtons />}
         {!sidebarOpen && (!canvas || canvas.compact || canvas.focused) && (
           <SidebarOpenButton
             onOpenSidebar={onOpenSidebar}
