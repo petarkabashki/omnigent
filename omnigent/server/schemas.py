@@ -2158,6 +2158,29 @@ class NativeUsageBaseline(BaseModel):
     cumulative_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
+class EngineEpochUsage(BaseModel):
+    """
+    What one engine epoch of a session spent, for a session that switched engines.
+
+    Epochs are the stretches between engine switches, oldest first. Figures are
+    the session's own spend (sub-agents excluded) and, like all cost, a floor.
+
+    :param epoch: Zero-based position, e.g. ``0`` for the engine the session started on.
+    :param harness: Harness the epoch ran on, e.g. ``"claude-native"``; ``None`` if unknown.
+    :param model: Model the epoch ran, e.g. ``"claude-opus-4-8"``; ``None`` if unknown.
+    :param cost_usd: Cost of the epoch, ``None`` when it was never priced.
+    :param input_tokens: Input tokens of the epoch, cache reads included.
+    :param output_tokens: Output tokens of the epoch.
+    """
+
+    epoch: int
+    harness: str | None = None
+    model: str | None = None
+    cost_usd: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 class ModelUsage(BaseModel):
     """
     Cumulative token/cost usage attributed to a single LLM model.
@@ -2385,6 +2408,8 @@ class SessionResponse(BaseModel):
     :param native_usage_baseline: Pi's own cumulative token baseline, excluding
         descendants. Available even when display usage aggregation is skipped;
         ``None`` for other harnesses or older servers.
+    :param engine_epochs: Per-engine spend, oldest first, present only when the
+        session switched engines and usage was requested; ``None`` otherwise.
     :param last_task_error: Error details from the most recently
         failed task. Only present when ``status == "failed"`` and
         the task stored an error. Lets clients display the failure
@@ -2517,6 +2542,7 @@ class SessionResponse(BaseModel):
     usage_by_model: dict[str, ModelUsage] | None = None
     usage_included: bool = True
     native_usage_baseline: NativeUsageBaseline | None = None
+    engine_epochs: list[EngineEpochUsage] | None = None
     last_task_error: dict[str, str] | None = None
     external_session_id: str | None = None
     context_epoch: int = 0

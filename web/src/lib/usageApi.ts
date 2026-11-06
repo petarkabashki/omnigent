@@ -84,3 +84,45 @@ export async function fetchUsageReport(): Promise<UsageReport> {
     })),
   };
 }
+
+/** What one engine epoch of a session spent (``engine_epochs`` on the session read). */
+export interface EngineEpochUsage {
+  epoch: number;
+  harness: string | null;
+  model: string | null;
+  costUsd: number | null;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * Per-engine spend for a session that switched engines; empty when it never did.
+ *
+ * @param sessionId - Session to read, e.g. ``"conv_abc"``.
+ */
+export async function fetchEngineEpochs(sessionId: string): Promise<EngineEpochUsage[]> {
+  const params =
+    "include_usage=true&include_items=false&include_liveness=false&refresh_state=false";
+  const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}?${params}`);
+  if (!res.ok) throw new Error(`Session usage fetch failed: ${res.status}`);
+  const wire: {
+    engine_epochs?:
+      | {
+          epoch: number;
+          harness: string | null;
+          model: string | null;
+          cost_usd: number | null;
+          input_tokens: number;
+          output_tokens: number;
+        }[]
+      | null;
+  } = await res.json();
+  return (wire.engine_epochs ?? []).map((e) => ({
+    epoch: e.epoch,
+    harness: e.harness ?? null,
+    model: e.model ?? null,
+    costUsd: e.cost_usd ?? null,
+    inputTokens: e.input_tokens,
+    outputTokens: e.output_tokens,
+  }));
+}

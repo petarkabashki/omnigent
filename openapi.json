@@ -2260,6 +2260,73 @@
         "title": "ElicitationResolvedEvent",
         "type": "object"
       },
+      "EngineEpochUsage": {
+        "description": "What one engine epoch of a session spent, for a session that switched engines.\n\nEpochs are the stretches between engine switches, oldest first. Figures are\nthe session's own spend (sub-agents excluded) and, like all cost, a floor.",
+        "properties": {
+          "cost_usd": {
+            "anyOf": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cost of the epoch, `None` when it was never priced.",
+            "title": "Cost Usd"
+          },
+          "epoch": {
+            "description": "Zero-based position, e.g. `0` for the engine the session started on.",
+            "format": "int64",
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Harness the epoch ran on, e.g. `\"claude-native\"`; `None` if unknown.",
+            "title": "Harness"
+          },
+          "input_tokens": {
+            "default": 0,
+            "description": "Input tokens of the epoch, cache reads included.",
+            "format": "int64",
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model the epoch ran, e.g. `\"claude-opus-4-8\"`; `None` if unknown.",
+            "title": "Model"
+          },
+          "output_tokens": {
+            "default": 0,
+            "description": "Output tokens of the epoch.",
+            "format": "int64",
+            "title": "Output Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch"
+        ],
+        "title": "EngineEpochUsage",
+        "type": "object"
+      },
       "ErrorData": {
         "description": "Data for a persisted error banner item.\n\nThese items mirror `response.error` events so clients can render\nthe same error banner after reconnect / refresh. They are listed in\n`NON_CONTENT_ITEM_TYPES` because they are operator-visible\ntranscript metadata, not content the next agent turn should receive.",
         "properties": {
@@ -8906,6 +8973,21 @@
             "format": "int64",
             "title": "Created At",
             "type": "integer"
+          },
+          "engine_epochs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EngineEpochUsage"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-engine spend, oldest first, present only when the session switched engines and usage was requested; `None` otherwise.",
+            "title": "Engine Epochs"
           },
           "external_session_id": {
             "anyOf": [

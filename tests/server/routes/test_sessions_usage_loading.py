@@ -24,6 +24,7 @@ from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, UnifiedAuthProvider
 from omnigent.server.routes._sessions import orchestration
 from omnigent.server.routes.sessions import create_sessions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store import EngineBinding
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.budgets import budget
@@ -467,3 +468,37 @@ async def test_slow_usage_request_does_not_hold_session_metadata(
         usage_response = await usage_task
     assert usage_response.status_code == 200, usage_response.text
     assert usage_response.json()["total_cost_usd"] == 7.75
+
+
+async def test_snapshot_lists_per_engine_spend_only_after_a_switch(
+    usage_app: _UsageApp, usage_client: httpx.AsyncClient
+) -> None:
+    url = f"/v1/sessions/{usage_app.parent_id}"
+    before = await usage_client.get(url, params=_USAGE_SNAPSHOT_PARAMS)
+    assert before.json().get("engine_epochs") is None
+
+    store = usage_app.conversations
+    parent = store.get_conversation(usage_app.parent_id)
+    assert parent is not None and parent.agent_id is not None
+    usage_before = dict(parent.session_usage)
+    store.apply_engine_switch(
+        parent.id,
+        target=EngineBinding(parent.agent_id, None, None, {}),
+        expected_external_session_id=None,
+        response_id="reset_1",
+        summary="handoff",
+        engine_change={
+            "from": {"harness": "claude-native", "model": "opus"},
+            "to": {"harness": "codex-native", "model": "gpt"},
+            "usage_before": usage_before,
+        },
+    )
+    store.update_session_usage(
+        parent.id, lambda usage, _epoch: usage.update(total_cost_usd=1.75) or True
+    )
+
+    rows = (await usage_client.get(url, params=_USAGE_SNAPSHOT_PARAMS)).json()["engine_epochs"]
+    assert [(r["epoch"], r["harness"], r["cost_usd"]) for r in rows] == [
+        (0, "claude-native", 1.0),
+        (1, "codex-native", 0.75),
+    ]

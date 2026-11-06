@@ -57,6 +57,8 @@ vi.mock("@/lib/identity", async (importOriginal) => ({
   ...(await importOriginal<typeof IdentityModule>()),
   getCurrentUserId: () => viewerData.current,
 }));
+const { fetchEngineEpochsMock } = vi.hoisted(() => ({ fetchEngineEpochsMock: vi.fn() }));
+vi.mock("@/lib/usageApi", () => ({ fetchEngineEpochs: fetchEngineEpochsMock }));
 vi.mock("@/lib/clipboard", () => ({ copyText: copyTextMock }));
 // The codex-only "Restart with model…" dialog mounts (closed) inside
 // AgentInfoContent for codex sessions; stub its routing + fork deps so it
@@ -403,6 +405,58 @@ describe("AgentInfoButton hover behavior", () => {
     act(() => vi.advanceTimersByTime(HOVER_CLOSE_DELAY_MS + 50));
 
     expect(screen.getByTestId("agent-info-panel")).toBeInTheDocument();
+  });
+});
+
+describe("AgentInfoButton cost by engine", () => {
+  beforeEach(() => {
+    useChatStore.setState({ sessionCostUsd: 14 });
+  });
+
+  it("lists each engine's cost once the session has switched engines", async () => {
+    fetchEngineEpochsMock.mockResolvedValue([
+      {
+        epoch: 0,
+        harness: "claude-native",
+        model: "opus",
+        costUsd: 10,
+        inputTokens: 1,
+        outputTokens: 1,
+      },
+      {
+        epoch: 1,
+        harness: "codex-native",
+        model: "gpt",
+        costUsd: 4,
+        inputTokens: 1,
+        outputTokens: 1,
+      },
+    ]);
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_switched");
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    const rows = await screen.findAllByTestId("agent-info-engine-epoch");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "claude-native · opus$10.00",
+      "codex-native · gpt$4.00",
+    ]);
+  });
+
+  it("refetches the breakdown when the session's harness changes", async () => {
+    fetchEngineEpochsMock.mockClear().mockResolvedValue([]);
+    useChatStore.setState({ sessionHarness: "claude-native" });
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_live");
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    await vi.waitFor(() => expect(fetchEngineEpochsMock).toHaveBeenCalledTimes(1));
+    act(() => useChatStore.setState({ sessionHarness: "codex-native" }));
+    await vi.waitFor(() => expect(fetchEngineEpochsMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows no engine rows for a session that never switched", async () => {
+    fetchEngineEpochsMock.mockResolvedValue([]);
+    renderButtonWithSession(AGENT_WITH_BOTH, "conv_plain");
+    fireEvent.click(screen.getByTestId("agent-info-trigger"));
+    await vi.waitFor(() => expect(fetchEngineEpochsMock).toHaveBeenCalled());
+    expect(screen.queryByTestId("agent-info-engine-epochs")).toBeNull();
   });
 });
 

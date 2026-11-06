@@ -252,6 +252,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
+from omnigent.server.routes._sessions.engine_epochs import engine_epochs_from_switches
 from omnigent.server.routes._sessions.helpers import (
     SessionLiveness,
     _antigravity_subagent_labels_from_body,
@@ -1527,14 +1528,28 @@ def _build_session_response(
     native_usage_baseline = None
     if harness == "pi-native":
         own_usage = conv.session_usage or {}
-        cached = int(own_usage.get("cache_read_input_tokens", 0) or 0)
-        native_usage_baseline = NativeUsageBaseline(
-            cumulative_input_tokens=int(own_usage.get("input_tokens", 0) or 0) + cached,
-            cumulative_output_tokens=int(own_usage.get("output_tokens", 0) or 0),
-            cumulative_cache_read_input_tokens=cached,
-            cumulative_cost_usd=own_usage.get("total_cost_usd")
+        # Pi's reports are added to the reset base server-side, so resume it
+        # from this epoch's own spend; the whole total would count the base twice.
+        raw_base = own_usage.get(CONTEXT_RESET_BASE_KEY)
+        base = raw_base if isinstance(raw_base, dict) else {}
+
+        def epoch_own(key: str) -> int:
+            return max(0, int(own_usage.get(key, 0) or 0) - int(base.get(key, 0) or 0))
+
+        cached = epoch_own("cache_read_input_tokens")
+        epoch_cost = (
+            max(
+                0.0, float(own_usage["total_cost_usd"]) - float(base.get("total_cost_usd", 0) or 0)
+            )
             if own_usage.get("native_cost_complete") is True
-            else None,
+            and own_usage.get("total_cost_usd") is not None
+            else None
+        )
+        native_usage_baseline = NativeUsageBaseline(
+            cumulative_input_tokens=epoch_own("input_tokens") + cached,
+            cumulative_output_tokens=epoch_own("output_tokens"),
+            cumulative_cache_read_input_tokens=cached,
+            cumulative_cost_usd=epoch_cost,
         )
     # Collapse per-user pin keys to the canonical bare key for this viewer, so
     # the snapshot never carries another user's pin key (see _labels_for_viewer).
@@ -14268,6 +14283,16 @@ async def _get_session_snapshot(
     response.inference_configured = inference_configured
     response.inference_error = inference_error
     response.usage_included = include_usage
+    if include_usage and conv.context_epoch > 0:
+        resets = await asyncio.to_thread(
+            conv_store.list_items, conv.id, type="context_reset", limit=1000
+        )
+        switches = [
+            item.data.engine_change
+            for item in resets.data
+            if getattr(item.data, "engine_change", None)
+        ]
+        response.engine_epochs = engine_epochs_from_switches(switches, conv.session_usage or {})
     startup = getattr(request.app.state, "startup_inputs", None) if request is not None else None
     if startup is not None and STARTUP_LABEL in conv.labels:
         queued = await startup.pending_snapshot(session_id)

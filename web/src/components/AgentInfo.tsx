@@ -25,6 +25,7 @@ import {
   type UpsertMcpServerInput,
 } from "@/hooks/useAgents";
 import type { ModelUsage } from "@/lib/types";
+import { fetchEngineEpochs, type EngineEpochUsage } from "@/lib/usageApi";
 import { formatSessionCostUsd, formatTokenCount } from "@/lib/formatCost";
 import { showToast } from "@/components/ui/toast";
 import {
@@ -156,6 +157,49 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
       {children}
     </span>
+  );
+}
+
+/**
+ * Per-engine spend rows for a session that switched engines in place. Renders
+ * nothing until the server reports more than one epoch.
+ *
+ * @param sessionId - Session whose epochs to load, e.g. ``"conv_abc"``.
+ */
+function EngineEpochBreakdown({ sessionId }: { sessionId: string }) {
+  const [epochs, setEpochs] = useState<EngineEpochUsage[]>([]);
+  // An engine switch changes the harness; refetch so the new epoch shows.
+  const harness = useChatStore((s) => s.sessionHarness);
+  useEffect(() => {
+    let cancelled = false;
+    fetchEngineEpochs(sessionId)
+      .then((rows) => {
+        if (!cancelled) setEpochs(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setEpochs([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, harness]);
+  if (epochs.length < 2) return null;
+  return (
+    <div className="flex flex-col gap-1" data-testid="agent-info-engine-epochs">
+      <SectionLabel>Cost by engine</SectionLabel>
+      {epochs.map((row) => (
+        <div
+          key={row.epoch}
+          className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground"
+          data-testid="agent-info-engine-epoch"
+        >
+          <span className="truncate">{[row.harness, row.model].filter(Boolean).join(" · ")}</span>
+          <span className="font-mono tabular-nums">
+            {row.costUsd != null ? formatSessionCostUsd(row.costUsd) : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1469,6 +1513,7 @@ export function AgentInfoContent({
             {usageByModel != null && Object.keys(usageByModel).length > 0 && (
               <ModelUsageBreakdown usageByModel={usageByModel} />
             )}
+            <EngineEpochBreakdown sessionId={sessionId} />
           </div>
         )}
       <McpServersSection
