@@ -59,14 +59,17 @@ cd "$repo_root"
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 healthy() { curl -fsS -o /dev/null "${server_url}/health" 2>/dev/null; }
 
-# The listener on our port, whichever run started it, so a server restarted
-# with --restart-server is still found and stopped.
+# The omnigent listener on our port, whichever run started it, so a server
+# restarted with --restart-server is still found and stopped. A forwarder such
+# as socat can share the port on another address, so check every listener.
 server_pid() {
     local pid
-    pid="$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -1)" || true
-    if [ -n "$pid" ] && ps -o args= -p "$pid" | grep -q 'omnigent server'; then
-        echo "$pid"
-    fi
+    for pid in $(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true); do
+        if ps -o args= -p "$pid" | grep -q 'omnigent server'; then
+            echo "$pid"
+            return 0
+        fi
+    done
 }
 
 stop_server() {
