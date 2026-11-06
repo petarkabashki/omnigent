@@ -5320,23 +5320,39 @@ class _SPAStaticFiles(StaticFiles):
     ``.woff2``, …) returns the static 404 verbatim. Other extensionless
     paths fall back to ``index.html``.
 
-    The HTML shell is rebased for the deployment ``base_path`` once at
-    startup (see :func:`_rewrite_web_ui_index`) and served from memory with
-    a content ``etag`` so ``If-None-Match`` revalidation still yields ``304``.
+    The HTML shell is rebased for the deployment ``base_path`` (see
+    :func:`_rewrite_web_ui_index`) and served from memory with a content
+    ``etag`` so ``If-None-Match`` revalidation still yields ``304``. A changed
+    ``index.html`` is picked up on the next request, so a UI build can be
+    deployed without restarting the server.
     """
 
     def __init__(self, *args: Any, base_path: str = "", **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self._base_path = base_path
+        self._index_file = Path(self.directory) / "index.html"  # type: ignore[arg-type]
+        self._index_stamp: tuple[int, int] | None = None
         self._index_html: bytes | None = None
         self._index_etag: str | None = None
-        index_file = Path(self.directory) / "index.html"  # type: ignore[arg-type]
-        if index_file.is_file():
-            html = _rewrite_web_ui_index(index_file.read_text(encoding="utf-8"), base_path)
-            self._index_html = html.encode("utf-8")
-            self._index_etag = f'"{hashlib.md5(self._index_html).hexdigest()}"'
+        self._refresh_shell()
+
+    def _refresh_shell(self) -> None:
+        """Reload the HTML shell if it changed, keeping the last good copy on a failed read."""
+        try:
+            status = self._index_file.stat()
+            stamp = (status.st_mtime_ns, status.st_size)
+            if stamp == self._index_stamp:
+                return
+            source = self._index_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        self._index_html = _rewrite_web_ui_index(source, self._base_path).encode("utf-8")
+        self._index_etag = f'"{hashlib.md5(self._index_html).hexdigest()}"'
+        self._index_stamp = stamp
 
     def _shell_response(self, scope: Scope) -> Response:
         """Serve the rebased HTML shell from memory, honoring ``If-None-Match``."""
+        self._refresh_shell()
         assert self._index_html is not None
         if_none_match = next(
             (v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"if-none-match"),

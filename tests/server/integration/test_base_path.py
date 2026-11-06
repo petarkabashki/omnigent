@@ -282,6 +282,33 @@ async def test_unprefixed_paths_still_served_under_base_path(
     assert info.status_code == 200
 
 
+async def test_new_web_ui_build_served_without_restart(
+    runtime_init: None,
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployed index.html goes live on the next request; a missing one keeps the last."""
+    web_ui_dist = _make_web_ui(tmp_path)
+    monkeypatch.setattr(app_module, "_WEB_UI_DIST", web_ui_dist)
+    index_file = web_ui_dist / "index.html"
+    transport = httpx.ASGITransport(app=_make_app(db_uri, tmp_path, "/proxy/6767"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.get("/proxy/6767/")
+        index_file.write_text(index_file.read_text().replace("AbCd1234", "NewBuild99"))
+        second = await client.get("/proxy/6767/c/session_123")
+        revalidated = await client.get(
+            "/proxy/6767/", headers={"If-None-Match": first.headers["etag"]}
+        )
+        index_file.unlink()
+        during_deploy = await client.get("/proxy/6767/")
+
+    assert 'src="/proxy/6767/assets/index-NewBuild99.js"' in second.text
+    assert second.headers["etag"] != first.headers["etag"]
+    assert revalidated.status_code == 200
+    assert 'src="/proxy/6767/assets/index-NewBuild99.js"' in during_deploy.text
+
+
 async def test_root_deployment_unchanged_without_base_path(
     runtime_init: None,
     db_uri: str,
