@@ -1852,6 +1852,19 @@ def test_resize_paths_preserve_multiple_images_and_cached_originals(tmp_path: Pa
     assert _content_to_input_items(content, tmp_path) == items
 
 
+def test_engine_handoff_is_the_first_turn_input_item(tmp_path: Path) -> None:
+    from omnigent.inner.codex_native_executor import _content_to_input_items
+    from omnigent.inner.native_attachments import strip_engine_handoff, with_engine_handoff
+
+    content = with_engine_handoff("carry on", "the handoff", harness="codex-native")
+
+    handoff, message = _content_to_input_items(content, tmp_path)
+
+    assert "the handoff" in handoff["text"]
+    assert message == {"type": "text", "text": "carry on"}
+    assert strip_engine_handoff(handoff["text"]) == ""
+
+
 def test_input_file_text_is_inlined_as_a_text_item(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

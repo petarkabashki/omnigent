@@ -140,8 +140,12 @@ class ClaudeNativeReset:
         )
         self._holds[session_id] = hold
 
-    async def commit(self, session_id: str) -> None:
-        """Relaunch after the server cleared the session's Claude session id."""
+    async def commit(self, session_id: str, *, relaunch: bool = True) -> None:
+        """Wipe the old state and relaunch, after the server cleared the session id.
+
+        :param relaunch: ``False`` after an engine switch: the pane stays down
+            and the next message launches the new engine.
+        """
         hold = self._holds.pop(session_id, None)
         if hold is None or hold.expired:
             lock = self.ensure_lock_for_session(session_id)
@@ -161,7 +165,8 @@ class ClaudeNativeReset:
                 await self._wipe(bridge_dir)
         finally:
             lock.release()
-        await self.relaunch(session_id)
+        if relaunch:
+            await self.relaunch(session_id)
 
     async def _bridge_dir_for_unprepared_commit(self, session_id: str) -> Path | None:
         """Resolve the directory for a ``commit`` this runner saw no ``prepare`` for.

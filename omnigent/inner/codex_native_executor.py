@@ -79,10 +79,12 @@ from omnigent.inner.native_attachments import (
     FRAMEWORK_NOTICE_BLOCK_TYPE,
     attachment_reference_line,
     codex_resize_metadata_path,
+    engine_handoff_text,
     materialize_attachment,
     parse_data_uri,
     unresolved_attachment_marker,
     uses_filesystem_delivery,
+    wrap_engine_handoff,
 )
 from omnigent.native.input_diagnostics import (
     log_input_event,
@@ -1317,7 +1319,11 @@ def _content_to_input_items(content: object, bridge_dir: Path) -> list[dict[str,
                 continue
             block_type = block.get("type")
             if block_type == FRAMEWORK_NOTICE_BLOCK_TYPE:
-                _apply_resize_notice_to_latest_image(items, block.get("source_metadata"))
+                handoff = engine_handoff_text(block)
+                if handoff is not None:
+                    items.insert(0, {"type": "text", "text": wrap_engine_handoff(handoff)})
+                else:
+                    _apply_resize_notice_to_latest_image(items, block.get("source_metadata"))
                 continue
             if block_type in {"input_text", "text"}:
                 text = block.get("text")

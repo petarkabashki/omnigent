@@ -186,6 +186,7 @@ from omnigent.server.routes._sessions.common import (
     get_server_runner_router,
     set_server_runner_router,
 )
+from omnigent.server.routes._sessions.engine_switch import resolve_engine_target
 from omnigent.server.routes._sessions.helpers import (
     _TUI_INJECT_FORWARD_TIMEOUT_S,
     SessionLiveness,
@@ -1014,6 +1015,7 @@ def register_events_routes(
             session_id=session_id,
             epoch=int(ack["epoch"]),
             boundary_item_id=str(ack["boundary_item_id"]),
+            engine_changed=bool(ack.get("engine_changed")),
         )
 
     @event_router.post(
@@ -2276,6 +2278,19 @@ def register_events_routes(
                     background_tasks=_session_background_task_count_cache.get(session_id, 0),
                 )
 
+            async def _resolve_engine() -> Any:
+                assert reset_request.engine is not None
+                return await resolve_engine_target(
+                    conv=reset_conv,
+                    engine=reset_request.engine,
+                    user_id=user_id,
+                    agent_store=agent_store,
+                    agent_cache=agent_cache,
+                    permission_store=permission_store,
+                    conversation_store=conversation_store,
+                    host_store=getattr(request.app.state, "host_store", None),
+                )
+
             from omnigent.server.routes import sessions as _sessions_facade
 
             reset_native_agent = _native_coding_agent_for_session(reset_conv)
@@ -2304,6 +2319,7 @@ def register_events_routes(
                 generate_summary=generate_summary,
                 on_gates_passed=on_gates_passed,
                 compact=compact,
+                resolve_engine=_resolve_engine,
             )
             await asyncio.to_thread(record_override, session_id, "reset", "owner")
             return reset_result
@@ -2480,7 +2496,7 @@ def register_events_routes(
                 ) from exc
             reset_conv = conv
             reset_summary: Callable[[], Awaitable[str]] | None = None
-            if reset_request.summary == "auto":
+            if reset_request.summary == "auto" and reset_request.engine is None:
                 reset_harness = await asyncio.to_thread(
                     _resolve_harness, conv, agent_store=agent_store
                 )
@@ -2491,6 +2507,7 @@ def register_events_routes(
                 "queued": False,
                 "epoch": str(reset_result.epoch),
                 "boundary_item_id": reset_result.boundary_item_id,
+                "engine_changed": reset_result.engine_changed,
             }
         if body.type == _CLEAR_TYPE:
             # Like /compact, /clear runs in the vendor TUI: the runner types the

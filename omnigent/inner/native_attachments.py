@@ -47,6 +47,11 @@ _ATTACHMENT_RETRY_STATUSES = frozenset({408, 500, 502, 503, 504})
 # seeding): brackets end the match early, newlines break the line shape.
 _MARKER_UNSAFE = re.compile(r"[\[\]\r\n]")
 FRAMEWORK_NOTICE_BLOCK_TYPE = "_omnigent_framework_notice"
+_ENGINE_HANDOFF_METADATA_KEY = "engine_handoff"
+_ENGINE_HANDOFF_OPEN = "<omnigent-engine-handoff>"
+_ENGINE_HANDOFF_CLOSE = "</omnigent-engine-handoff>"
+#: Native harnesses that read a notice block; see :func:`with_engine_handoff`.
+_ENGINE_HANDOFF_NOTICE_HARNESSES = frozenset({"claude-native", "codex-native"})
 
 # Maps a data-URI MIME type to the file extension used when no filename
 # is supplied, e.g. ``"image/png"`` -> ``".png"``.
@@ -579,6 +584,53 @@ def framework_notice_block(source_metadata: Mapping[str, object]) -> dict[str, o
     return {"type": FRAMEWORK_NOTICE_BLOCK_TYPE, "source_metadata": dict(source_metadata)}
 
 
+def engine_handoff_notice(handoff: str) -> dict[str, object]:
+    """Build the notice that hands a native engine the session so far."""
+    return framework_notice_block({_ENGINE_HANDOFF_METADATA_KEY: handoff})
+
+
+def engine_handoff_text(block: Mapping[str, object]) -> str | None:
+    """Return the handoff a notice block carries, or ``None`` for any other notice."""
+    metadata = block.get("source_metadata")
+    handoff = metadata.get(_ENGINE_HANDOFF_METADATA_KEY) if isinstance(metadata, Mapping) else None
+    return handoff if isinstance(handoff, str) and handoff else None
+
+
+def wrap_engine_handoff(handoff: str) -> str:
+    """Mark a handoff sent as turn input, so the transcript mirror can leave it out."""
+    return f"{_ENGINE_HANDOFF_OPEN}\n{handoff}\n{_ENGINE_HANDOFF_CLOSE}"
+
+
+def strip_engine_handoff(text: str) -> str:
+    """Remove a :func:`wrap_engine_handoff` block from mirrored turn input."""
+    if not text.startswith(_ENGINE_HANDOFF_OPEN):
+        return text
+    _, closed, rest = text.partition(_ENGINE_HANDOFF_CLOSE)
+    return rest.lstrip("\n") if closed else text
+
+
+def with_engine_handoff(content: object, handoff: str, *, harness: str) -> list[object]:
+    """
+    Return turn ``content`` carrying ``handoff`` for a native ``harness``.
+
+    Claude and Codex take it as a notice outside the user's text. The other
+    native harnesses read only text blocks, so they get it as plain input.
+
+    :param content: The user's message content, a string or a block list.
+    :param handoff: The boundary's handoff note.
+    :param harness: Canonical target harness, e.g. ``"codex-native"``.
+    :returns: Content blocks with the handoff first.
+    """
+    blocks: list[object] = (
+        list(content)
+        if isinstance(content, list)
+        else [{"type": "input_text", "text": str(content or "")}]
+    )
+    if harness in _ENGINE_HANDOFF_NOTICE_HARNESSES:
+        return [engine_handoff_notice(handoff), *blocks]
+    return [{"type": "input_text", "text": handoff}, *blocks]
+
+
 def framework_notices(content: object) -> list[str]:
     """Extract transient framework notices from structured content."""
     if not isinstance(content, list):
@@ -587,7 +639,7 @@ def framework_notices(content: object) -> list[str]:
     for block in content:
         if not isinstance(block, dict) or block.get("type") != FRAMEWORK_NOTICE_BLOCK_TYPE:
             continue
-        text = resize_notice(block.get("source_metadata"))
+        text = engine_handoff_text(block) or resize_notice(block.get("source_metadata"))
         if text:
             notices.append(text)
     return notices

@@ -326,3 +326,204 @@ async def test_codex_thread_id_patch_from_before_a_reset_is_refused(
     )
     assert current.status_code == 200, current.text
     assert (await client.get(f"/v1/sessions/{sid}")).json()["external_session_id"] == "thread-new"
+
+
+_CLAUDE_EXECUTOR = {"type": "omnigent", "config": {"harness": "claude-native"}}
+_CODEX_EXECUTOR = {"type": "omnigent", "config": {"harness": "codex-native"}}
+
+
+async def _switch_session(
+    client: httpx.AsyncClient,
+    *bodies: dict[str, Any],
+    target_executor: dict[str, Any] = _CODEX_EXECUTOR,
+    prepare_session: Callable[[str], None] = lambda _session_id: None,
+) -> tuple[str, str, str, list[httpx.Response], list[dict[str, Any]]]:
+    """Create a claude-native session and a target agent, then POST each body at it.
+
+    Each body names the target through the ``{target}`` agent id placeholder.
+    """
+    from omnigent.runtime import set_runner_client
+
+    runner, captured = _fake_runner(200)
+    set_runner_client(runner)
+    try:
+        source = await create_test_agent(client, name="source", executor=_CLAUDE_EXECUTOR)
+        target = await create_test_agent(client, name="target", executor=target_executor)
+        items = [
+            {
+                "type": "message",
+                "data": {
+                    "role": role,
+                    "content": [{"type": "input_text", "text": f"turn {n}"}],
+                    **({"agent": "source"} if role == "assistant" else {}),
+                },
+            }
+            for n, role in enumerate(("user", "assistant") * 7)
+        ]
+        created = await client.post(
+            "/v1/sessions", json={"agent_id": source["id"], "initial_items": items}
+        )
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        prepare_session(sid)
+        responses = []
+        for body in bodies:
+            engine = {**body.get("engine", {})}
+            if engine.get("agent_id") == "{target}":
+                engine["agent_id"] = target["id"]
+            responses.append(
+                await client.post(f"/v1/sessions/{sid}/reset", json={**body, "engine": engine})
+            )
+    finally:
+        await runner.aclose()
+        set_runner_client(None)
+    return sid, source["id"], target["id"], responses, captured
+
+
+def _seed_native_state(session_id: str) -> None:
+    from omnigent.runtime import get_conversation_store
+
+    store = get_conversation_store()
+    store.set_external_session_id(session_id, "sid-old")
+    store.set_labels(
+        session_id,
+        {
+            "omnigent.claude_native.permission_mode": "plan",
+            "omnigent.fork.source_external_session_id": "sid-source",
+            "omnigent.fork.carry_history": "true",
+            "team": "kept",
+        },
+    )
+    store.increment_session_usage(session_id, {"input_tokens": 7})
+
+
+async def test_engine_switch_rebinds_the_session_and_records_the_change(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes import sessions as sessions_module
+
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        sessions_module.session_stream,
+        "publish",
+        lambda _session_id, payload: published.append(payload),
+    )
+    sid, source_id, target_id, (resp,), captured = await _switch_session(
+        client,
+        {"engine": {"agent_id": "{target}", "model": "gpt-5.4", "reasoning_effort": "high"}},
+        prepare_session=_seed_native_state,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["engine_changed"] is True
+    assert captured == [
+        {**_PREPARE, "harness": "claude-native"},
+        {**_COMMIT, "harness": "claude-native", "engine_switch": True},
+    ]
+    conversation = get_conversation_store().get_conversation(sid)
+    assert conversation is not None
+    assert conversation.agent_id == target_id
+    assert conversation.model_override == "gpt-5.4"
+    assert conversation.reasoning_effort == "high"
+    assert conversation.external_session_id is None
+    assert conversation.context_epoch == 1
+    assert conversation.labels["omnigent.wrapper"] == "codex-native-ui"
+    assert conversation.labels["team"] == "kept"
+    assert "omnigent.claude_native.permission_mode" not in conversation.labels
+    assert "omnigent.fork.source_external_session_id" not in conversation.labels
+    assert "omnigent.fork.carry_history" not in conversation.labels
+
+    [boundary] = await _reset_items(client, sid)
+    assert boundary["engine_change"]["from"]["agent_id"] == source_id
+    assert boundary["engine_change"]["from"]["harness"] == "claude-native"
+    assert boundary["engine_change"]["to"] == {
+        "agent_id": target_id,
+        "harness": "codex-native",
+        "model": "gpt-5.4",
+    }
+    assert boundary["engine_change"]["usage_before"]["input_tokens"] == 7
+    assert boundary["previous_external_session_id"] == "sid-old"
+    resets = [event for event in published if event.get("type") == "session.reset"]
+    assert [event["engine_changed"] for event in resets] == [True]
+
+
+async def test_engine_handoff_names_both_engines_and_replays_for_an_sdk_target(
+    client: httpx.AsyncClient,
+) -> None:
+    from omnigent.runner.session_history import split_history_at_boundary
+
+    sid, _, _, (resp,), _ = await _switch_session(
+        client,
+        {"engine": {"agent_id": "{target}"}},
+        target_executor={"type": "omnigent", "config": {"harness": "goose"}},
+    )
+
+    assert resp.status_code == 200, resp.text
+    [boundary] = await _reset_items(client, sid)
+    summary = boundary["summary"]
+    assert "from claude-native to goose" in summary
+    assert "sys_session_get_history on this session id" in summary
+    assert f"keeps its id, {sid}" in summary
+    assert "4 earlier messages are not shown" in summary
+    assert "turn 3" not in summary.replace("turn 13", "")
+    assert "turn 4" in summary
+    assert "turn 13" in summary
+
+    listed = await client.get(f"/v1/sessions/{sid}/items", params={"limit": 100})
+    prefix, remaining = split_history_at_boundary(listed.json()["data"])
+    assert remaining == []
+    assert prefix[1]["content"][0]["text"] == summary
+
+
+async def test_engine_switch_key_gives_one_epoch(client: httpx.AsyncClient) -> None:
+    body = {"engine": {"agent_id": "{target}"}, "idempotency_key": "k1"}
+    sid, _, _, (first, again), captured = await _switch_session(client, body, body)
+
+    assert first.status_code == 200, first.text
+    assert again.json() == first.json()
+    assert again.json()["engine_changed"] is True
+    assert len(captured) == 2
+    assert len(await _reset_items(client, sid)) == 1
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        pytest.param({"agent_id": "ag_missing"}, id="malformed-agent"),
+        pytest.param({"agent_id": "f" * 32}, id="unknown-agent"),
+        pytest.param({"agent_id": "{target}", "model": "claude-opus-4-8"}, id="wrong-family"),
+        pytest.param({"agent_id": "{target}", "model": "bad model!"}, id="bad-model"),
+        pytest.param({"agent_id": "{target}", "reasoning_effort": "huge"}, id="bad-effort"),
+    ],
+)
+async def test_engine_refusal_changes_nothing(
+    client: httpx.AsyncClient, engine: dict[str, Any]
+) -> None:
+    from omnigent.runtime import get_conversation_store
+
+    sid, source_id, _, (resp,), captured = await _switch_session(
+        client, {"engine": engine}, prepare_session=_seed_native_state
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert captured == []
+    assert await _reset_items(client, sid) == []
+    conversation = get_conversation_store().get_conversation(sid)
+    assert conversation is not None
+    assert conversation.agent_id == source_id
+    assert conversation.external_session_id == "sid-old"
+    assert conversation.context_epoch == 0
+
+
+async def test_engine_refuses_the_harness_the_session_already_runs(
+    client: httpx.AsyncClient,
+) -> None:
+    sid, _, _, (resp,), captured = await _switch_session(
+        client, {"engine": {"agent_id": "{target}"}}, target_executor=_CLAUDE_EXECUTOR
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert "use the model selector" in resp.text
+    assert captured == []
+    assert await _reset_items(client, sid) == []

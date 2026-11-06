@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from omnigent.entities import ContextResetData, Conversation, ConversationItem
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_availability import HARNESS_BINARY_MISSING, HARNESS_NEEDS_AUTH
 from omnigent.server.routes._sessions import reset as reset_module
+from omnigent.server.routes._sessions.engine_switch import (
+    _require_installed,
+    resolve_engine_target,
+)
 from omnigent.server.routes._sessions.reset import (
+    EngineTarget,
     is_reset_in_flight,
     run_context_reset,
     running_work_snapshot,
 )
-from omnigent.server.schemas import ResetSessionRequest
+from omnigent.server.routes.sandbox_inference import CONFIGURED_SESSION_HARNESS_LOCKED
+from omnigent.server.schemas import ResetEngine, ResetSessionRequest
 from omnigent.stores.conversation_store import (
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
@@ -72,6 +80,10 @@ class _Store:
     external_session_id: str | None = "sid-old"
     #: Written after the reset reads the id, ahead of its compare-and-clear.
     racing_external_session_id: str | None = None
+    session_usage: dict[str, Any] = field(default_factory=dict)
+    engine_switch_error: BaseException | None = None
+    engine_writes: list[dict[str, Any]] = field(default_factory=list)
+    advanced_epochs: list[int] = field(default_factory=list)
 
     def get_conversation(self, conversation_id: str) -> Conversation:
         return Conversation(
@@ -80,7 +92,37 @@ class _Store:
             updated_at=1,
             root_conversation_id=conversation_id,
             external_session_id=self.external_session_id,
+            session_usage=self.session_usage,
         )
+
+    def apply_engine_switch(
+        self,
+        conversation_id: str,
+        *,
+        stable_id: str | None = None,
+        **write: Any,
+    ) -> ConversationItem:
+        self.log.append("apply_engine_switch")
+        if self.engine_switch_error is not None:
+            raise self.engine_switch_error
+        self.engine_writes.append(write)
+        self.epoch += 1
+        item = ConversationItem(
+            id=stable_id or f"reset_{self.epoch}",
+            type="context_reset",
+            status="completed",
+            response_id=write["response_id"],
+            created_at=1,
+            data=ContextResetData(
+                epoch=self.epoch, summary=write["summary"], engine_change=write["engine_change"]
+            ),
+        )
+        self.items[item.id] = item
+        return item
+
+    def advance_context_epoch(self, conversation_id: str, epoch: int) -> bool:
+        self.advanced_epochs.append(epoch)
+        return True
 
     def reset_external_session_id(self, conversation_id: str, *, expected: str | None) -> bool:
         if self.racing_external_session_id is not None:
@@ -139,6 +181,7 @@ class _Harness:
     forward_gate: asyncio.Event | None = None
     #: Recorded by a hook while the runner handles ``prepare``.
     id_landing_during_prepare: str | None = None
+    resolve_engine: Any = None
 
     async def run(self, **request: Any) -> Any:
         async def has_pending() -> bool:
@@ -177,6 +220,7 @@ class _Harness:
 
         return await run_context_reset(
             session_id="conv_1",
+            resolve_engine=self.resolve_engine,
             conv=Conversation(
                 id="conv_1",
                 created_at=1,
@@ -551,3 +595,174 @@ async def test_concurrent_reset_is_refused() -> None:
         )
     finally:
         reset_module._reset_in_flight.pop("conv_1", None)
+
+
+_ENGINE_REQUEST = {"engine": {"agent_id": "ag_new"}}
+_ENGINE_TARGET = EngineTarget(
+    agent_id="ag_new",
+    harness="codex-native",
+    model="gpt-5.4",
+    model_override="gpt-5.4",
+    reasoning_effort="high",
+    presentation_labels={"omnigent.ui": "terminal"},
+    source_agent_id="ag_old",
+    source_harness="claude-native",
+    source_model="opus",
+)
+
+
+async def _resolved_engine() -> EngineTarget:
+    return _ENGINE_TARGET
+
+
+@pytest.fixture
+def stub_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reset_module, "engine_handoff_summary", lambda *_: "the handoff")
+
+
+async def test_engine_switch_rebinds_between_prepare_and_commit(stub_handoff: None) -> None:
+    harness = _Harness(native_harness="claude-native", resolve_engine=_resolved_engine)
+    harness.store.session_usage = {"cost_usd": 1.5}
+
+    response = await harness.run(**_ENGINE_REQUEST, summary={"text": "ignored"})
+
+    assert response.engine_changed is True
+    assert harness.store.log == ["forward prepare", "apply_engine_switch", "forward commit"]
+    assert harness.forwarded[-1] == {
+        "type": "reset",
+        "phase": "commit",
+        "harness": "claude-native",
+        "engine_switch": True,
+    }
+    [write] = harness.store.engine_writes
+    assert write["expected_external_session_id"] == "sid-old"
+    assert write["summary"] == "the handoff"
+    assert write["engine_change"] == {
+        "from": {"agent_id": "ag_old", "harness": "claude-native", "model": "opus"},
+        "to": {"agent_id": "ag_new", "harness": "codex-native", "model": "gpt-5.4"},
+        "usage_before": {"cost_usd": 1.5},
+    }
+    assert harness.store.advanced_epochs == [1]
+    assert harness.published[0]["engine_changed"] is True
+    assert harness.published[0]["summary_present"] is True
+
+
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("database gone"), OmnigentError("raced", code=ErrorCode.CONFLICT)]
+)
+async def test_failed_engine_switch_relaunches_the_old_harness(
+    stub_handoff: None, failure: Exception
+) -> None:
+    harness = _Harness(native_harness="claude-native", resolve_engine=_resolved_engine)
+    harness.store.engine_switch_error = failure
+
+    with pytest.raises(type(failure)):
+        await harness.run(**_ENGINE_REQUEST)
+
+    assert harness.forwarded == [
+        {"type": "reset", "phase": "prepare", "harness": "claude-native", "pending": "reject"},
+        {"type": "reset", "phase": "commit", "harness": "claude-native"},
+    ]
+    assert harness.store.items == {}
+    assert harness.published == []
+
+
+async def test_engine_refusal_stops_nothing_and_reaches_no_runner() -> None:
+    async def refuse() -> EngineTarget:
+        raise OmnigentError("no such agent", code=ErrorCode.INVALID_INPUT)
+
+    harness = _Harness(status="running", server_pending=True, resolve_engine=refuse)
+
+    code = await _error_code(harness, **_ENGINE_REQUEST, stop_running=True, pending="drop")
+
+    assert code == ErrorCode.INVALID_INPUT
+    assert harness.forwarded == []
+    assert harness.interrupted is False
+    assert harness.dropped is False
+    assert harness.store.log == []
+
+
+async def test_engine_switch_outside_the_in_place_natives_is_refused() -> None:
+    harness = _Harness(native_harness="pi-native", resolve_engine=_resolved_engine)
+
+    assert await _error_code(harness, **_ENGINE_REQUEST) == ErrorCode.RESET_UNSUPPORTED
+    assert harness.forwarded == []
+
+
+async def test_engine_switch_keeps_the_reset_gates(stub_handoff: None) -> None:
+    harness = _Harness(status="running", resolve_engine=_resolved_engine)
+
+    assert await _error_code(harness, **_ENGINE_REQUEST) == ErrorCode.SESSION_BUSY
+    assert harness.store.engine_writes == []
+
+
+async def test_engine_key_replay_reports_the_switch_and_writes_nothing(stub_handoff: None) -> None:
+    harness = _Harness(resolve_engine=_resolved_engine)
+    request = {**_ENGINE_REQUEST, "idempotency_key": "k1"}
+
+    first = await harness.run(**request)
+    forwarded = len(harness.forwarded)
+    again = await harness.run(**request)
+
+    assert again == first
+    assert again.engine_changed is True
+    assert len(harness.forwarded) == forwarded
+    assert len(harness.store.engine_writes) == 1
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"parent_conversation_id": "conv_parent"}, "parent owns its spec"),
+        ({"inference_snapshot": {"harness": "goose"}}, CONFIGURED_SESSION_HARNESS_LOCKED),
+    ],
+)
+async def test_engine_gates_refuse_a_child_and_a_frozen_account(
+    fields: dict[str, Any], message: str
+) -> None:
+    conversation = Conversation(
+        id="conv_1", created_at=1, updated_at=1, root_conversation_id="conv_1", **fields
+    )
+
+    with pytest.raises(OmnigentError, match=message) as refused:
+        await resolve_engine_target(
+            conv=conversation,
+            engine=ResetEngine(agent_id="ag_new"),
+            user_id="user_1",
+            agent_store=None,
+            agent_cache=None,
+            permission_store=None,
+            conversation_store=None,
+            host_store=None,
+        )
+
+    assert refused.value.code == ErrorCode.INVALID_INPUT
+
+
+_MISSING_CODEX = {"codex-native": HARNESS_BINARY_MISSING}
+_UNAUTHED_CODEX = {"codex-native": HARNESS_NEEDS_AUTH}
+
+
+class _Hosts:
+    def __init__(self, configured_harnesses: dict[str, Any], user_id: str = "user_1") -> None:
+        self.host = SimpleNamespace(user_id=user_id, configured_harnesses=configured_harnesses)
+
+    def get_host(self, host_id: str) -> Any:
+        return self.host
+
+
+def _hosted_session() -> Conversation:
+    return Conversation(
+        id="conv_1", created_at=1, updated_at=1, root_conversation_id="conv_1", host_id="host_1"
+    )
+
+
+async def test_engine_gate_refuses_a_harness_the_bound_host_lacks() -> None:
+    with pytest.raises(OmnigentError, match=HARNESS_BINARY_MISSING) as refused:
+        _require_installed("codex-native", _hosted_session(), "user_1", _Hosts(_MISSING_CODEX))
+
+    assert refused.value.code == ErrorCode.INVALID_INPUT
+
+
+async def test_engine_gate_passes_a_harness_that_only_needs_auth() -> None:
+    _require_installed("codex-native", _hosted_session(), "user_1", _Hosts(_UNAUTHED_CODEX))

@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 import httpx
 
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.harness_aliases import canonicalize_harness, is_native_harness
 from omnigent.runner.app_support import (
     _resolve_forwarded_message_content,
     _SpecEntry,
@@ -29,6 +30,14 @@ class _LoadHistoryAsInputFn(Protocol):
 
 
 @dataclasses.dataclass(frozen=True)
+class EngineHandoff:
+    """The handoff a native engine still owes its first turn."""
+
+    harness: str
+    summary: str
+
+
+@dataclasses.dataclass(frozen=True)
 class SessionHistory:
     """Session-history helpers the rest of the runner app calls."""
 
@@ -36,11 +45,14 @@ class SessionHistory:
     convert_raw_items_to_input: Callable[[list[_JsonObject]], list[_JsonObject]]
     extract_last_assistant_text: Callable[[str], str]
     handle_harness_compaction: Callable[[str, _JsonObject], Coroutine[Any, Any, bool]]
+    load_engine_handoff: Callable[..., Coroutine[Any, Any, EngineHandoff | None]]
     load_history_as_input: _LoadHistoryAsInputFn
     seed_last_server_item_id: Callable[[str], Coroutine[Any, Any, None]]
 
 
 _HISTORY_BOUNDARY_TYPES = frozenset({"compaction", "context_reset"})
+#: A first turn's message sits right after its boundary, so few rows settle it.
+_ENGINE_HANDOFF_ITEM_WINDOW = 20
 
 
 def _summary_pair(summary: str) -> list[_JsonObject]:
@@ -95,6 +107,37 @@ def split_history_at_boundary(
     return _summary_pair(str(boundary.get("summary", ""))), remaining
 
 
+def pending_engine_handoff(
+    items_newest_first: list[_JsonObject], *, drop_item_id: str | None = None
+) -> EngineHandoff | None:
+    """Return the handoff for the first turn of an engine switch to a native harness.
+
+    The boundary is the only state: once a message follows it, the handoff was
+    delivered. SDK targets replay the boundary's summary, so they owe nothing.
+
+    :param items_newest_first: Raw ``/items`` rows, newest first.
+    :param drop_item_id: The turn's own persisted message, which doesn't count.
+    :returns: The target harness and note, or ``None``.
+    """
+    for item in items_newest_first:
+        if drop_item_id is not None and item.get("id") == drop_item_id:
+            continue
+        item_type = item.get("type")
+        if item_type == "message" or item_type in _HISTORY_BOUNDARY_TYPES - {"context_reset"}:
+            return None
+        if item_type != "context_reset":
+            continue
+        change = item.get("engine_change")
+        target = change.get("to") if isinstance(change, dict) else None
+        harness = target.get("harness") if isinstance(target, dict) else None
+        summary = item.get("summary")
+        if not isinstance(harness, str) or not isinstance(summary, str) or not summary:
+            return None
+        canonical = canonicalize_harness(harness) or harness
+        return EngineHandoff(canonical, summary) if is_native_harness(canonical) else None
+    return None
+
+
 def build_session_history(
     *,
     _background_tasks: set[asyncio.Task[Any]],
@@ -108,6 +151,29 @@ def build_session_history(
 
     The keyword arguments are the runner app's shared session state and helpers.
     """
+
+    async def _load_engine_handoff(
+        session_id: str, *, drop_item_id: str | None = None
+    ) -> EngineHandoff | None:
+        """Fetch the session's newest items and return a handoff still owed, if any."""
+        try:
+            resp = await server_client.get(
+                f"/v1/sessions/{session_id}/items",
+                params={"limit": str(_ENGINE_HANDOFF_ITEM_WINDOW), "order": "desc"},
+                timeout=10.0,
+            )
+            rows = resp.json().get("data") if resp.status_code == 200 else None
+        except (httpx.HTTPError, ValueError, AttributeError):
+            _logger.warning(
+                "Engine handoff lookup failed for session=%s",
+                session_id,
+                extra={"session_id": session_id},
+            )
+            return None
+        if not isinstance(rows, list):
+            return None
+        items = [row for row in rows if isinstance(row, dict)]
+        return pending_engine_handoff(items, drop_item_id=drop_item_id)
 
     async def _seed_last_server_item_id(session_id: str) -> None:
         """
@@ -452,6 +518,7 @@ def build_session_history(
         convert_raw_items_to_input=_convert_raw_items_to_input,
         extract_last_assistant_text=_extract_last_assistant_text,
         handle_harness_compaction=_handle_harness_compaction,
+        load_engine_handoff=_load_engine_handoff,
         load_history_as_input=_load_history_as_input,
         seed_last_server_item_id=_seed_last_server_item_id,
     )

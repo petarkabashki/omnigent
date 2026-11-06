@@ -251,6 +251,7 @@ from omnigent.stores.conversation_store import (
     SIDE_CHAT_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
     ConversationNotFoundError,
+    agent_switch_dropped_label_keys,
     pinned_label_key,
     runner_seen_is_fresh,
 )
@@ -2045,7 +2046,6 @@ def register_core_routes(
         entries = alias_entries([fresh], project_store, user_id)
         return entries[0] if entries else {"session_id": session.id, "alias": None}
 
-    @router.put("/sessions/{session_id}/alias")
     async def _approve_agent_alias_change(
         request: Request, user_id: str | None, session_id: str, question: str
     ) -> Conversation:
@@ -2080,6 +2080,7 @@ def register_core_routes(
             )
         return source
 
+    @router.put("/sessions/{session_id}/alias")
     async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
         """Take or create the named role in the session's own namespace.
 
@@ -2092,12 +2093,10 @@ def register_core_routes(
             validate_alias,
         )
 
-        payload = await request.json()
-
         user_id = _require_user(request, auth_provider)
         by_agent = request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None
+        payload = await request.json()
         alias = payload.get("alias") if isinstance(payload, dict) else None
-
         if by_agent:
             name = validate_alias(alias)
             source = require_orchestration_source(
@@ -4531,6 +4530,7 @@ def register_core_routes(
             body = body.model_copy(update={"sandbox_provider": sandbox_profile["provider"]})
 
         from omnigent.server.routes.sandbox_inference import (
+            CONFIGURED_SESSION_HARNESS_LOCKED,
             actual_harness,
             configured_snapshot,
             validate_saved_selection,
@@ -4599,9 +4599,7 @@ def register_core_routes(
             )
             if not same_harness:
                 raise OmnigentError(
-                    "A configured session can only fork into the same harness. "
-                    "Start a new session to choose another harness and provider.",
-                    code=ErrorCode.INVALID_INPUT,
+                    CONFIGURED_SESSION_HARNESS_LOCKED, code=ErrorCode.INVALID_INPUT
                 )
             bound_provider = resolve_bound_provider(
                 source.inference_snapshot["runtime_config"],
@@ -4724,12 +4722,7 @@ def register_core_routes(
         # otherwise ride along as stale metadata that could hydrate a wrong mode
         # in generic native-wrapper UI state. Drop it whenever the agent changes.
         if switching_agent:
-            from omnigent.mcp_selection import MCP_SELECTION_PREFIX
-
-            dropped_label_keys_set.add(_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY)
-            dropped_label_keys_set.update(
-                key for key in source.labels if key.startswith(MCP_SELECTION_PREFIX)
-            )
+            dropped_label_keys_set |= agent_switch_dropped_label_keys(source.labels)
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always

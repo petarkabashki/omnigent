@@ -58,6 +58,7 @@ from omnigent.spec.types import (
     StateUpdate,
 )
 from omnigent.stores.conversation_store import (
+    CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
     CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
 )
@@ -252,7 +253,7 @@ _CODEX_NATIVE_COLLABORATION_MODES: frozenset[str] = frozenset({"default", "plan"
 # Current permission mode of a live claude-native session.
 # ``terminal_launch_args`` records only the launch mode, so this label is what
 # the web UI reads back after a reload.
-_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY = "omnigent.claude_native.permission_mode"
+_CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY = CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY
 
 
 # Permission modes switchable on a running session — the ones Claude

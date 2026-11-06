@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from omnigent.db.utils import get_or_create_engine
 from omnigent.entities import (
     CompactionData,
+    ContextResetData,
     Conversation,
+    ConversationItem,
     ErrorData,
     FunctionCallData,
     FunctionCallOutputData,
@@ -28,14 +30,23 @@ from omnigent.entities import (
     ReasoningData,
     ResourceEventData,
 )
-from omnigent.errors import StaleCursorError
+from omnigent.errors import ErrorCode, OmnigentError, StaleCursorError
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.session_import import (
     IMPORT_EXTERNAL_SESSION_ID_LABEL_KEY,
     IMPORT_SOURCE_LABEL_KEY,
 )
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
-from omnigent.stores.conversation_store import ConversationUpdateResult
+from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
+    FORK_CARRY_HISTORY_LABEL_KEY,
+    FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+    ConversationUpdateResult,
+    EngineBinding,
+    labels_after_agent_switch,
+    labels_after_engine_switch,
+)
+from omnigent.stores.conversation_store import sqlalchemy_store as store_module
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -9324,3 +9335,162 @@ def test_profiled_host_binding_rejects_stale_rollback_state(conversation_store, 
             expected_binding=previous,
         )
     assert conversation_store.get_profile_host_binding(conversation.id) == current
+
+
+_ENGINE_OLD_AGENT_ID = "a" * 32
+_ENGINE_NEW_AGENT_ID = "b" * 32
+_ENGINE_STABLE_ID = "c" * 32
+_ENGINE_SOURCE_LABELS = {
+    "omnigent.ui": "terminal",
+    "omnigent.wrapper": "claude-code-native-ui",
+    "omnigent.claude_native.permission_mode": "plan",
+    "omnigent.codex_native.collaboration_mode": "plan",
+    "omnigent.last_task_error_code": "usage_limit",
+    FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY: "sid-source",
+    FORK_CARRY_HISTORY_LABEL_KEY: "true",
+    ALIAS_LABEL_KEY: "Product",
+    "team": "kept",
+}
+
+
+def _engine_source(conversation_store: SqlAlchemyConversationStore) -> str:
+    """Create a claude-native session with everything an engine switch must handle."""
+    conversation = conversation_store.create_conversation(
+        agent_id=_ENGINE_OLD_AGENT_ID,
+        labels=_ENGINE_SOURCE_LABELS,
+        terminal_launch_args=["--permission-mode", "plan"],
+        reasoning_effort="high",
+        model_override="opus",
+        harness_override="claude-native",
+    )
+    conversation_store.set_external_session_id(conversation.id, "sid-old")
+    return conversation.id
+
+
+def _switch_engine(
+    conversation_store: SqlAlchemyConversationStore,
+    conversation_id: str,
+    *,
+    expected: str | None = "sid-old",
+    stable_id: str | None = None,
+) -> ConversationItem:
+    return conversation_store.apply_engine_switch(
+        conversation_id,
+        target=EngineBinding(
+            agent_id=_ENGINE_NEW_AGENT_ID,
+            model_override="gpt-5.4",
+            reasoning_effort=None,
+            presentation_labels={"omnigent.ui": "terminal", "omnigent.wrapper": "codex-native-ui"},
+        ),
+        expected_external_session_id=expected,
+        response_id="reset_1",
+        summary="the handoff",
+        engine_change={"from": {"harness": "claude-native"}, "to": {"harness": "codex-native"}},
+        stable_id=stable_id,
+    )
+
+
+def _assert_engine_unchanged(
+    conversation_store: SqlAlchemyConversationStore, conversation_id: str
+) -> None:
+    conversation = conversation_store.get_conversation(conversation_id)
+    assert conversation is not None
+    assert conversation.agent_id == _ENGINE_OLD_AGENT_ID
+    assert conversation.external_session_id == "sid-old"
+    assert conversation.terminal_launch_args == ["--permission-mode", "plan"]
+    assert conversation.model_override == "opus"
+    assert conversation.harness_override == "claude-native"
+    assert conversation.labels == _ENGINE_SOURCE_LABELS
+    items = conversation_store.list_items(conversation_id, order="asc", limit=10).data
+    assert [item.type for item in items if item.type == "context_reset"] == []
+
+
+def test_engine_switch_rebinds_the_session_in_place(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conversation_id = _engine_source(conversation_store)
+
+    item = _switch_engine(conversation_store, conversation_id)
+
+    conversation = conversation_store.get_conversation(conversation_id)
+    assert conversation is not None
+    assert conversation.agent_id == _ENGINE_NEW_AGENT_ID
+    assert conversation.harness_override is None
+    assert conversation.model_override == "gpt-5.4"
+    assert conversation.reasoning_effort is None
+    assert conversation.external_session_id is None
+    assert conversation.terminal_launch_args is None
+    assert conversation.labels == {
+        "omnigent.ui": "terminal",
+        "omnigent.wrapper": "codex-native-ui",
+        ALIAS_LABEL_KEY: "Product",
+        "team": "kept",
+    }
+    assert isinstance(item.data, ContextResetData)
+    assert item.data.summary == "the handoff"
+    assert item.data.previous_external_session_id == "sid-old"
+    assert item.data.engine_change == {
+        "from": {"harness": "claude-native"},
+        "to": {"harness": "codex-native"},
+    }
+
+
+def test_engine_switch_conflict_changes_nothing(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conversation_id = _engine_source(conversation_store)
+
+    with pytest.raises(OmnigentError) as refused:
+        _switch_engine(conversation_store, conversation_id, expected="sid-other")
+
+    assert refused.value.code == ErrorCode.CONFLICT
+    _assert_engine_unchanged(conversation_store, conversation_id)
+
+
+def test_engine_switch_failure_restores_the_old_engines_launch_state(
+    conversation_store: SqlAlchemyConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation_id = _engine_source(conversation_store)
+
+    def fail(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise RuntimeError("rebind failed")
+
+    monkeypatch.setattr(store_module, "labels_after_engine_switch", fail)
+
+    with pytest.raises(RuntimeError, match="rebind failed"):
+        _switch_engine(conversation_store, conversation_id)
+
+    _assert_engine_unchanged(conversation_store, conversation_id)
+
+
+def test_engine_switch_stable_id_applies_once(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conversation_id = _engine_source(conversation_store)
+
+    first = _switch_engine(conversation_store, conversation_id, stable_id=_ENGINE_STABLE_ID)
+    conversation_store.set_external_session_id(conversation_id, "sid-new-engine")
+    again = _switch_engine(conversation_store, conversation_id, stable_id=_ENGINE_STABLE_ID)
+
+    assert again.id == first.id
+    assert again.deduplicated is True
+    conversation = conversation_store.get_conversation(conversation_id)
+    assert conversation is not None
+    assert conversation.external_session_id == "sid-new-engine"
+
+
+def test_fork_and_engine_switch_share_the_agent_switch_label_rules() -> None:
+    labels = {
+        "omnigent.ui": "terminal",
+        "omnigent.wrapper": "claude-code-native-ui",
+        "omnigent.mcp.selected.old": "true",
+        "team": "kept",
+    }
+    forked = labels_after_agent_switch(labels, presentation_labels={})
+    switched = labels_after_engine_switch(labels, presentation_labels={})
+
+    assert forked["team"] == switched["team"] == "kept"
+    assert "omnigent.ui" not in forked
+    assert "omnigent.ui" not in switched
+    assert labels_after_agent_switch(labels)["omnigent.ui"] == "terminal"

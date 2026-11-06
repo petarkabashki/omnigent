@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import QueryableAttribute, Session, load_only
 from sqlalchemy.sql.selectable import Subquery
 
-from omnigent._wrapper_labels import UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY
+from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.db.account_authority import AccountAuthority, require_active_account
 from omnigent.db.compression import encode as compress_text
 from omnigent.db.converters import sql_agent_to_entity
@@ -81,6 +81,7 @@ from omnigent.db.utils import (
     strip_nul_bytes,
 )
 from omnigent.entities import (
+    ContextResetData,
     Conversation,
     ConversationItem,
     NewConversationItem,
@@ -93,7 +94,6 @@ from omnigent.native.session_todos import validate_session_todos
 from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store import (
     _FORK_ONLY_DROPPED_LABEL_KEYS,
-    _INSTANCE_SCOPED_LABEL_KEYS,
     _SANDBOX_REPO_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
     FORK_CARRY_HISTORY_LABEL_KEY,
@@ -111,10 +111,13 @@ from omnigent.stores.conversation_store import (
     ConversationUpdateResult,
     CreatedSession,
     DailyCostState,
+    EngineBinding,
     ProfileHostBinding,
     ProjectSessionSweep,
     SessionActivity,
     SessionConnectivity,
+    labels_after_agent_switch,
+    labels_after_engine_switch,
     pinned_label_key,
     runner_seen_is_fresh,
 )
@@ -2881,7 +2884,19 @@ class SqlAlchemyConversationStore(ConversationStore):
             with store-assigned IDs and timestamps.
         """
         now = now_epoch()
+        prepared_rows = self._prepare_item_rows(conversation_id, items, now)
+        return run_write_transaction(
+            self._conv_session_immediate,
+            "append_conversation_items",
+            lambda session: self._write_prepared_items(
+                session, conversation_id, items, prepared_rows, now
+            ),
+        )
 
+    def _prepare_item_rows(
+        self, conversation_id: str, items: list[NewConversationItem], now: int
+    ) -> list[tuple[NewConversationItem, dict[str, object], str | None]]:
+        """Build row values outside any transaction; see :meth:`append`."""
         # Encode every item payload up front, in one batch, BEFORE opening the
         # write transaction. The transform depends only on item data, not on any
         # row we lock, so a subclass whose encode is a per-call RPC (encrypt)
@@ -2923,212 +2938,212 @@ class SqlAlchemyConversationStore(ConversationStore):
             if search is not None:
                 values["search_text"] = search
             prepared_rows.append((item, values, search))
+        return prepared_rows
 
-        def write(session: Session) -> list[ConversationItem]:
-            # Built fresh on every attempt: a CockroachDB 40001 replay must
-            # re-run the dedup probe against a fresh snapshot and rebuild the
-            # result list rather than appending to a previous attempt's.
-            persisted: list[ConversationItem] = []
-            # Lock the conversation row to serialize position writes.
-            # On PostgreSQL this is a row-level FOR UPDATE lock; on
-            # SQLite the database-level lock already serializes.
-            self._lock_conversation(session, conversation_id)
+    def _write_prepared_items(
+        self,
+        session: Session,
+        conversation_id: str,
+        items: list[NewConversationItem],
+        prepared_rows: list[tuple[NewConversationItem, dict[str, object], str | None]],
+        now: int,
+    ) -> list[ConversationItem]:
+        """Insert prepared rows in ``session``'s transaction; safe to replay."""
+        workspace_id = current_workspace_id()
+        # Built fresh on every attempt: a CockroachDB 40001 replay must
+        # re-run the dedup probe against a fresh snapshot and rebuild the
+        # result list rather than appending to a previous attempt's.
+        persisted: list[ConversationItem] = []
+        # Lock the conversation row to serialize position writes.
+        # On PostgreSQL this is a row-level FOR UPDATE lock; on
+        # SQLite the database-level lock already serializes.
+        self._lock_conversation(session, conversation_id)
 
-            # Idempotent-append probe: rows already stored under a stable id are
-            # those items' result. Each id is a bind parameter, so probe in bounded
-            # batches; the lock just taken serializes concurrent retries.
-            stable_ids = list(
-                dict.fromkeys(item.stable_id for item in items if item.stable_id is not None)
-            )
-            existing_by_id: dict[str, SqlConversationItem] = {}
-            deduped_by_id: dict[str, ConversationItem] = {}
-            if stable_ids:
-                existing_rows: list[SqlConversationItem] = []
-                for start in range(0, len(stable_ids), _APPEND_STABLE_ID_PROBE_BATCH):
-                    batch = stable_ids[start : start + _APPEND_STABLE_ID_PROBE_BATCH]
-                    existing_rows.extend(
-                        session.execute(
-                            select(SqlConversationItem).where(
-                                SqlConversationItem.workspace_id == current_workspace_id(),
-                                SqlConversationItem.conversation_id == conversation_id,
-                                SqlConversationItem.id.in_(batch),
-                            )
+        # Idempotent-append probe: rows already stored under a stable id are
+        # those items' result. Each id is a bind parameter, so probe in bounded
+        # batches; the lock just taken serializes concurrent retries.
+        stable_ids = list(
+            dict.fromkeys(item.stable_id for item in items if item.stable_id is not None)
+        )
+        existing_by_id: dict[str, SqlConversationItem] = {}
+        deduped_by_id: dict[str, ConversationItem] = {}
+        if stable_ids:
+            existing_rows: list[SqlConversationItem] = []
+            for start in range(0, len(stable_ids), _APPEND_STABLE_ID_PROBE_BATCH):
+                batch = stable_ids[start : start + _APPEND_STABLE_ID_PROBE_BATCH]
+                existing_rows.extend(
+                    session.execute(
+                        select(SqlConversationItem).where(
+                            SqlConversationItem.workspace_id == current_workspace_id(),
+                            SqlConversationItem.conversation_id == conversation_id,
+                            SqlConversationItem.id.in_(batch),
                         )
-                        .scalars()
-                        .all()
                     )
-                replaced_ids = {item.replaces_pending_id for item in items}
-                existing_rows = [
-                    row
-                    for row in existing_rows
-                    if not (
-                        row.id in replaced_ids and row.response_id == PENDING_INPUT_RESPONSE_ID
-                    )
-                ]
-                existing_by_id = {row.id: row for row in existing_rows}
-                decoded = self._decode_item_data_batch([row.data for row in existing_rows])
-                deduped_by_id.update(
-                    {
-                        row.id: _to_item(row, data).model_copy(update={"deduplicated": True})
-                        for row, data in zip(existing_rows, decoded, strict=True)
-                    }
+                    .scalars()
+                    .all()
                 )
-                if all(item.stable_id in existing_by_id for item in items):
-                    # Pure duplicate re-post: nothing inserts, so leave
-                    # ``updated_at`` and the position counter untouched — a
-                    # retry must not make an old conversation look active.
-                    # Membership (not a length compare) so a batch repeating
-                    # one persisted stable id still counts as pure.
-                    return [
-                        deduped_by_id[item.stable_id]
-                        for item in items
-                        if item.stable_id is not None
-                    ]
+            replaced_ids = {item.replaces_pending_id for item in items}
+            existing_rows = [
+                row
+                for row in existing_rows
+                if not (row.id in replaced_ids and row.response_id == PENDING_INPUT_RESPONSE_ID)
+            ]
+            existing_by_id = {row.id: row for row in existing_rows}
+            decoded = self._decode_item_data_batch([row.data for row in existing_rows])
+            deduped_by_id.update(
+                {
+                    row.id: _to_item(row, data).model_copy(update={"deduplicated": True})
+                    for row, data in zip(existing_rows, decoded, strict=True)
+                }
+            )
+            if all(item.stable_id in existing_by_id for item in items):
+                # Pure duplicate re-post: nothing inserts, so leave
+                # ``updated_at`` and the position counter untouched — a
+                # retry must not make an old conversation look active.
+                # Membership (not a length compare) so a batch repeating
+                # one persisted stable id still counts as pure.
+                return [
+                    deduped_by_id[item.stable_id] for item in items if item.stable_id is not None
+                ]
 
-            replacements: dict[str, tuple[int, int]] = {}
-            for item, prepared, _ in prepared_rows:
-                if item.replaces_pending_id is None or item.stable_id in existing_by_id:
-                    continue
-                row = session.scalar(
-                    select(SqlConversationItem)
+        replacements: dict[str, tuple[int, int]] = {}
+        for item, prepared, _ in prepared_rows:
+            if item.replaces_pending_id is None or item.stable_id in existing_by_id:
+                continue
+            row = session.scalar(
+                select(SqlConversationItem)
+                .where(
+                    SqlConversationItem.workspace_id == workspace_id,
+                    SqlConversationItem.conversation_id == conversation_id,
+                    SqlConversationItem.id == item.replaces_pending_id,
+                    SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+                )
+                .limit(1)
+            )
+            if row is not None:
+                replacements[cast(str, prepared["id"])] = (row.position, row.created_at)
+                session.execute(
+                    delete(SqlConversationItem).where(
+                        SqlConversationItem.workspace_id == workspace_id,
+                        SqlConversationItem.conversation_id == conversation_id,
+                        SqlConversationItem.id == row.id,
+                        SqlConversationItem.created_at == row.created_at,
+                    )
+                )
+
+        new_pending = {
+            cast(str, values["id"])
+            for item, values, _ in prepared_rows
+            if item.response_id == PENDING_INPUT_RESPONSE_ID
+            and item.stable_id not in existing_by_id
+        }
+        if new_pending:
+            queued = list(
+                session.scalars(
+                    select(SqlConversationItem.id)
                     .where(
                         SqlConversationItem.workspace_id == workspace_id,
                         SqlConversationItem.conversation_id == conversation_id,
-                        SqlConversationItem.id == item.replaces_pending_id,
                         SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
                     )
-                    .limit(1)
+                    .limit(MAX_PENDING_INPUTS)
                 )
-                if row is not None:
-                    replacements[cast(str, prepared["id"])] = (row.position, row.created_at)
-                    session.execute(
-                        delete(SqlConversationItem).where(
-                            SqlConversationItem.workspace_id == workspace_id,
-                            SqlConversationItem.conversation_id == conversation_id,
-                            SqlConversationItem.id == row.id,
-                            SqlConversationItem.created_at == row.created_at,
-                        )
-                    )
-
-            new_pending = {
-                cast(str, values["id"])
-                for item, values, _ in prepared_rows
-                if item.response_id == PENDING_INPUT_RESPONSE_ID
-                and item.stable_id not in existing_by_id
-            }
-            if new_pending:
-                queued = list(
-                    session.scalars(
-                        select(SqlConversationItem.id)
-                        .where(
-                            SqlConversationItem.workspace_id == workspace_id,
-                            SqlConversationItem.conversation_id == conversation_id,
-                            SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
-                        )
-                        .limit(MAX_PENDING_INPUTS)
-                    )
-                )
-                if len(queued) + len(new_pending) > MAX_PENDING_INPUTS:
-                    raise OmnigentError(
-                        "Too many messages waiting for startup", code=ErrorCode.CONFLICT
-                    )
-
-            conv_row = session.get(SqlConversation, (current_workspace_id(), conversation_id))
-            has_new_conversation_activity = any(
-                item.type != "resource_event"
-                and (item.stable_id is None or item.stable_id not in existing_by_id)
-                for item in items
             )
-            if conv_row is not None and has_new_conversation_activity:
-                conv_row.updated_at = now
-
-            # Allocate item positions from the conversation's maintained
-            # next_position counter instead of running a MAX(position) aggregate
-            # on every append. Reading + advancing the counter under
-            # _lock_conversation keeps allocation O(1), drops a query per write,
-            # and stays collision-free. The aggregate is an index lookup on this
-            # schema (ix_conversation_items_conversation_id_position), but a
-            # maintained counter avoids the per-append round-trip regardless and
-            # scales to backends where that same allocation is a full scan.
-            #
-            # Backwards compatibility: conversations created before this counter
-            # existed have next_position = NULL; fall back to a one-time
-            # MAX(position) scan (coalesce to -1 so the first item gets 0), then
-            # persist the counter below so every later append is scan-free.
-            if conv_row is not None and conv_row.next_position is not None:
-                next_pos = conv_row.next_position
-            else:
-                next_pos = (
-                    session.execute(
-                        select(func.coalesce(func.max(SqlConversationItem.position), -1)).where(
-                            SqlConversationItem.workspace_id == current_workspace_id(),
-                            SqlConversationItem.conversation_id == conversation_id,
-                        )
-                    ).scalar_one()
-                    + 1
+            if len(queued) + len(new_pending) > MAX_PENDING_INPUTS:
+                raise OmnigentError(
+                    "Too many messages waiting for startup", code=ErrorCode.CONFLICT
                 )
 
-            fts_rows: list[tuple[str, str, str]] = []
-            row_values: list[dict[str, object]] = []
-            batch_stable: dict[str, ConversationItem] = {}
-            for item, prepared, search in prepared_rows:
-                if item.stable_id is not None:
-                    if item.stable_id in existing_by_id:
-                        persisted.append(deduped_by_id[item.stable_id])
-                        continue
-                    if item.stable_id in batch_stable:
-                        # Same stable id twice in one batch: the first
-                        # occurrence is this one's result too (inserting both
-                        # would collide on the primary key).
-                        persisted.append(
-                            batch_stable[item.stable_id].model_copy(update={"deduplicated": True})
-                        )
-                        continue
-                position = next_pos
-                values = dict(prepared)
-                replacement = replacements.get(cast(str, values["id"]))
-                if replacement is not None:
-                    position, values["created_at"] = replacement
-                else:
-                    next_pos += 1
-                values["position"] = position
-                item_id = cast(str, values["id"])
-                if search:
-                    fts_rows.append((item_id, conversation_id, search))
-                row_values.append(values)
-                persisted.append(
-                    ConversationItem(
-                        id=item_id,
-                        type=item.type,
-                        status=item.status,
-                        response_id=item.response_id,
-                        created_at=cast(int, values["created_at"]),
-                        data=item.data,
-                        created_by=item.created_by,
-                    )
-                )
-                if item.stable_id is not None:
-                    batch_stable[item.stable_id] = persisted[-1]
-            # One executemany for the batch: positions are pre-allocated above so
-            # the rows carry no inter-row dependency, and a single round-trip
-            # persists all N. A per-row ORM add round-trips per item, which
-            # dominates append latency against a remote managed Postgres.
-            if row_values:
-                session.execute(insert(SqlConversationItem), row_values)
-            insert_fts_bulk(session, fts_rows)
-
-            # Persist the advanced counter so the next append reads it instead
-            # of scanning; this also lazily backfills a pre-counter conversation.
-            if conv_row is not None:
-                conv_row.next_position = next_pos
-
-            return persisted
-
-        return run_write_transaction(
-            self._conv_session_immediate,
-            "append_conversation_items",
-            write,
+        conv_row = session.get(SqlConversation, (current_workspace_id(), conversation_id))
+        has_new_conversation_activity = any(
+            item.type != "resource_event"
+            and (item.stable_id is None or item.stable_id not in existing_by_id)
+            for item in items
         )
+        if conv_row is not None and has_new_conversation_activity:
+            conv_row.updated_at = now
+
+        # Allocate item positions from the conversation's maintained
+        # next_position counter instead of running a MAX(position) aggregate
+        # on every append. Reading + advancing the counter under
+        # _lock_conversation keeps allocation O(1), drops a query per write,
+        # and stays collision-free. The aggregate is an index lookup on this
+        # schema (ix_conversation_items_conversation_id_position), but a
+        # maintained counter avoids the per-append round-trip regardless and
+        # scales to backends where that same allocation is a full scan.
+        #
+        # Backwards compatibility: conversations created before this counter
+        # existed have next_position = NULL; fall back to a one-time
+        # MAX(position) scan (coalesce to -1 so the first item gets 0), then
+        # persist the counter below so every later append is scan-free.
+        if conv_row is not None and conv_row.next_position is not None:
+            next_pos = conv_row.next_position
+        else:
+            next_pos = (
+                session.execute(
+                    select(func.coalesce(func.max(SqlConversationItem.position), -1)).where(
+                        SqlConversationItem.workspace_id == current_workspace_id(),
+                        SqlConversationItem.conversation_id == conversation_id,
+                    )
+                ).scalar_one()
+                + 1
+            )
+
+        fts_rows: list[tuple[str, str, str]] = []
+        row_values: list[dict[str, object]] = []
+        batch_stable: dict[str, ConversationItem] = {}
+        for item, prepared, search in prepared_rows:
+            if item.stable_id is not None:
+                if item.stable_id in existing_by_id:
+                    persisted.append(deduped_by_id[item.stable_id])
+                    continue
+                if item.stable_id in batch_stable:
+                    # Same stable id twice in one batch: the first
+                    # occurrence is this one's result too (inserting both
+                    # would collide on the primary key).
+                    persisted.append(
+                        batch_stable[item.stable_id].model_copy(update={"deduplicated": True})
+                    )
+                    continue
+            position = next_pos
+            values = dict(prepared)
+            replacement = replacements.get(cast(str, values["id"]))
+            if replacement is not None:
+                position, values["created_at"] = replacement
+            else:
+                next_pos += 1
+            values["position"] = position
+            item_id = cast(str, values["id"])
+            if search:
+                fts_rows.append((item_id, conversation_id, search))
+            row_values.append(values)
+            persisted.append(
+                ConversationItem(
+                    id=item_id,
+                    type=item.type,
+                    status=item.status,
+                    response_id=item.response_id,
+                    created_at=cast(int, values["created_at"]),
+                    data=item.data,
+                    created_by=item.created_by,
+                )
+            )
+            if item.stable_id is not None:
+                batch_stable[item.stable_id] = persisted[-1]
+        # One executemany for the batch: positions are pre-allocated above so
+        # the rows carry no inter-row dependency, and a single round-trip
+        # persists all N. A per-row ORM add round-trips per item, which
+        # dominates append latency against a remote managed Postgres.
+        if row_values:
+            session.execute(insert(SqlConversationItem), row_values)
+        insert_fts_bulk(session, fts_rows)
+
+        # Persist the advanced counter so the next append reads it instead
+        # of scanning; this also lazily backfills a pre-counter conversation.
+        if conv_row is not None:
+            conv_row.next_position = next_pos
+
+        return persisted
 
     def list_projects(
         self,
@@ -4290,6 +4305,139 @@ class SqlAlchemyConversationStore(ConversationStore):
             return True
 
         return run_write_transaction(self._session_immediate, "advance_context_epoch", write)
+
+    def apply_engine_switch(
+        self,
+        conversation_id: str,
+        *,
+        target: EngineBinding,
+        expected_external_session_id: str | None,
+        response_id: str,
+        summary: str,
+        engine_change: dict[str, Any],
+        reason: str = "api",
+        stable_id: str | None = None,
+        created_by: str | None = None,
+    ) -> ConversationItem:
+        """See :meth:`ConversationStore.apply_engine_switch`."""
+        if stable_id is not None:
+            existing = self.get_item(conversation_id, stable_id)
+            if existing is not None and existing.type == "context_reset":
+                return existing.model_copy(update={"deduplicated": True})
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            raise ConversationNotFoundError(conversation_id)
+        latest = self.list_items(conversation_id, order="desc", limit=1).data
+        boundary = NewConversationItem(
+            type="context_reset",
+            response_id=response_id,
+            created_by=created_by,
+            stable_id=stable_id,
+            data=ContextResetData(
+                epoch=conversation.context_epoch + 1,
+                last_item_id=latest[0].id if latest else None,
+                summary=summary,
+                reason=reason,  # type: ignore[arg-type]
+                engine_change=engine_change,
+                previous_external_session_id=expected_external_session_id,
+            ),
+        )
+        now = now_epoch()
+        prepared_rows = self._prepare_item_rows(conversation_id, [boundary], now)
+
+        def rebind(session: Session) -> ConversationItem:
+            [item] = self._write_prepared_items(
+                session, conversation_id, [boundary], prepared_rows, now
+            )
+            if item.deduplicated:
+                return item
+            row = session.get(SqlConversation, (current_workspace_id(), conversation_id))
+            if row is None:
+                raise ConversationNotFoundError(conversation_id)
+            row.agent_id = target.agent_id
+            overrides = _decode_session_overrides(row.session_overrides)
+            overrides["harness_override"] = None
+            overrides["model_override"] = target.model_override
+            overrides["reasoning_effort"] = target.reasoning_effort
+            overrides["reported_model"] = None
+            row.session_overrides = _encode_session_overrides(overrides)
+            labels = _fetch_labels(session, conversation_id)
+            kept = labels_after_engine_switch(
+                labels, presentation_labels=target.presentation_labels
+            )
+            session.execute(
+                delete(SqlConversationLabel).where(
+                    SqlConversationLabel.workspace_id == current_workspace_id(),
+                    SqlConversationLabel.conversation_id == conversation_id,
+                    SqlConversationLabel.key.in_(labels.keys() - kept.keys()),
+                )
+            )
+            changed = {key: value for key, value in kept.items() if labels.get(key) != value}
+            if changed:
+                _upsert_labels(session, conversation_id, changed, now)
+            return item
+
+        launch_args = self._clear_engine_launch_state(
+            conversation_id, expected_external_session_id
+        )
+        try:
+            return run_write_transaction(
+                self._conv_session_immediate, "apply_engine_switch", rebind
+            )
+        except BaseException:
+            self._restore_engine_launch_state(
+                conversation_id, expected_external_session_id, launch_args
+            )
+            raise
+
+    def _engine_metadata_row(
+        self, session: Session, conversation_id: str
+    ) -> SqlConversationMetadata:
+        """Lock and return a session's metadata row, for an engine switch."""
+        query = select(SqlConversationMetadata).where(
+            SqlConversationMetadata.workspace_id == current_workspace_id(),
+            SqlConversationMetadata.id == conversation_id,
+        )
+        if self._meta_supports_for_update:
+            query = query.with_for_update()
+        meta = session.scalar(query)
+        if meta is None:
+            raise ConversationNotFoundError(conversation_id)
+        return meta
+
+    def _clear_engine_launch_state(
+        self, conversation_id: str, expected_external_session_id: str | None
+    ) -> str | None:
+        """Compare and clear the vendor id and launch args; return the stored args."""
+
+        def clear(session: Session) -> str | None:
+            meta = self._engine_metadata_row(session, conversation_id)
+            if meta.external_session_id != expected_external_session_id:
+                raise OmnigentError(
+                    "The session's native session id changed during the switch; retry.",
+                    code=ErrorCode.CONFLICT,
+                )
+            launch_args = meta.terminal_launch_args
+            meta.external_session_id = None
+            meta.terminal_launch_args = None
+            return launch_args
+
+        return run_write_transaction(self._session_immediate, "clear_engine_launch_state", clear)
+
+    def _restore_engine_launch_state(
+        self,
+        conversation_id: str,
+        external_session_id: str | None,
+        launch_args: str | None,
+    ) -> None:
+        """Put back what :meth:`_clear_engine_launch_state` took, so the old engine resumes."""
+
+        def restore(session: Session) -> None:
+            meta = self._engine_metadata_row(session, conversation_id)
+            meta.external_session_id = external_session_id
+            meta.terminal_launch_args = launch_args
+
+        run_write_transaction(self._session_immediate, "restore_engine_launch_state", restore)
 
     def set_task_summary(self, conversation_id: str, task_summary: str) -> Conversation | None:
         """Set a human-readable task summary on a sub-agent conversation."""
@@ -6030,16 +6178,19 @@ class SqlAlchemyConversationStore(ConversationStore):
             source_workspace_missing = (
                 source_labels.get("omnigent.last_task_error_code") == ErrorCode.WORKSPACE_MISSING
             )
+            # On an agent switch, the harness-presentation labels
+            # (omnigent.ui / omnigent.wrapper) must reflect the TARGET
+            # harness, not the source's: copying the source's would leave an
+            # SDK clone of a claude-native session wrongly in terminal-first
+            # mode (a stale interactive terminal + the source's transcript).
             fork_labels = {
                 key: value
-                for key, value in source_labels.items()
+                for key, value in labels_after_agent_switch(
+                    source_labels,
+                    dropped_label_keys=_FORK_ONLY_DROPPED_LABEL_KEYS | dropped_label_keys,
+                    presentation_labels=presentation_labels,
+                ).items()
                 if not key.startswith(PROFILE_LABEL_PREFIX)
-                if key
-                not in (
-                    _INSTANCE_SCOPED_LABEL_KEYS
-                    | _FORK_ONLY_DROPPED_LABEL_KEYS
-                    | dropped_label_keys
-                )
                 and not key.startswith(f"{PINNED_LABEL_KEY}.")
                 and not key.startswith(f"{_SANDBOX_REPO_LABEL_KEY}.")
                 and not (source_workspace_missing and key.startswith("omnigent.last_task_error_"))
@@ -6099,16 +6250,6 @@ class SqlAlchemyConversationStore(ConversationStore):
             # FORK_CARRY_HISTORY_LABEL_KEY).
             if carry_history_into_native:
                 fork_labels[FORK_CARRY_HISTORY_LABEL_KEY] = "1"
-            # On an agent switch, the harness-presentation labels
-            # (omnigent.ui / omnigent.wrapper) must reflect the TARGET
-            # harness, not the source's: copying the source's would leave an
-            # SDK clone of a claude-native session wrongly in terminal-first
-            # mode (a stale interactive terminal + the source's transcript).
-            # Drop the source's and apply the route-computed target labels.
-            if presentation_labels is not None:
-                for _pkey in (UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY):
-                    fork_labels.pop(_pkey, None)
-                fork_labels.update(presentation_labels)
             # Caller-supplied labels stamped LAST so a deliberate opt-in beats
             # both the copy and the always-drop rules — e.g. the fork dialog
             # re-arming the DANGEROUS codex bypass. The source's own bypass

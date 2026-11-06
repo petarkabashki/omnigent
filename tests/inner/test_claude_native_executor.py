@@ -735,6 +735,26 @@ async def test_resize_notice_uses_hidden_hook_context(
 
 
 @pytest.mark.asyncio
+async def test_engine_handoff_reaches_the_first_turn_as_hidden_hook_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The handoff stays out of the pane and reaches Claude through the prompt hook."""
+    from omnigent.inner.native_attachments import with_engine_handoff
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", _stub_inject(sent))
+    executor = ClaudeNativeExecutor(tmp_path)
+    content = with_engine_handoff("carry on", "the handoff", harness="claude-native")
+
+    async for _ in executor.run_turn([{"role": "user", "content": content}], [], ""):
+        pass
+
+    assert sent[0]["content"] == "carry on"
+    assert (tmp_path / "pending_framework_context.txt").read_text() == "the handoff"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error", [RuntimeError("injection failed"), ClaudePromptTimeout("timeout")]
 )

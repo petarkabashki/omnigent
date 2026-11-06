@@ -4178,7 +4178,7 @@ class SessionResetEvent(_SSEEventBase):
     :param epoch: The new context epoch, e.g. ``2``.
     :param boundary_item_id: Id of the ``context_reset`` item.
     :param summary_present: Whether a carry-over summary was kept.
-    :param engine_changed: Whether the harness/model/host changed (phase 3).
+    :param engine_changed: Whether the reset moved the session to another engine.
     """
 
     type: Literal["session.reset"]
@@ -4197,6 +4197,23 @@ class ResetSummaryText(BaseModel):
     text: str = Field(min_length=1, max_length=64_000)
 
 
+class ResetEngine(BaseModel):
+    """
+    The engine a reset moves the session onto.
+
+    :param agent_id: Agent to rebind to; it names the harness, as on fork.
+    :param model: Model for the new engine. Omitted keeps the old override only
+        within one provider family; ``"default"`` clears it either way.
+    :param reasoning_effort: Effort for the new engine, with the same rule.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1)
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
 class ResetSessionRequest(BaseModel):
     """
     Body of ``POST /v1/sessions/{id}/reset`` and of the ``reset`` session event.
@@ -4213,6 +4230,8 @@ class ResetSessionRequest(BaseModel):
         No agent tool sets this; it is the caller's override for a stale count.
     :param children: Only ``"keep"``; closing children is not supported yet.
     :param idempotency_key: Repeating a key returns the first result.
+    :param engine: Switch the session onto this engine. ``summary`` is ignored:
+        a mechanical handoff note replaces it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -4223,6 +4242,7 @@ class ResetSessionRequest(BaseModel):
     acknowledge_running_work: bool = False
     children: Literal["keep"] = "keep"
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    engine: ResetEngine | None = None
 
 
 class ResetSessionResponse(BaseModel):
@@ -4232,6 +4252,7 @@ class ResetSessionResponse(BaseModel):
     epoch: int
     boundary_item_id: str
     relaunched: bool = False
+    engine_changed: bool = False
 
 
 class SessionBtwSidechatEvent(_SSEEventBase):

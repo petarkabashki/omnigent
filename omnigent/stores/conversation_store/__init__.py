@@ -2,12 +2,14 @@
 
 import hashlib
 import math
+import re
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from omnigent._wrapper_labels import UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY
 from omnigent.entities import (
     Agent,
     ContextResetData,
@@ -254,6 +256,13 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     }
 )
+
+#: Claude's permission mode, as a label.
+CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY = "omnigent.claude_native.permission_mode"
+#: Per-harness runtime state: ``omnigent.claude_native.*``, ``omnigent.pi_native.*``.
+_PER_HARNESS_LABEL_PATTERN = re.compile(r"omnigent\.[a-z_]+_native\.")
+#: The old engine's failure must not read as the new engine's.
+_LAST_TASK_ERROR_LABEL_PREFIX = "omnigent.last_task_error_"
 
 # Source identity belongs only to the original imported session, and a fork is
 # born unarchived so it must not inherit its parent's archive time. The sandbox
@@ -534,6 +543,92 @@ class ProfileHostBinding:
     runner_id: str | None
     profile_snapshot: bytes | None
     profile_host_id: str | None
+
+
+@dataclass(frozen=True)
+class EngineBinding:
+    """
+    What an engine switch writes onto a session.
+
+    :param agent_id: The agent to bind.
+    :param model_override: Model override to store, ``None`` for the agent default.
+    :param reasoning_effort: Effort to store, ``None`` for the agent default.
+    :param presentation_labels: The target harness's presentation labels.
+    """
+
+    agent_id: str
+    model_override: str | None
+    reasoning_effort: str | None
+    presentation_labels: Mapping[str, str]
+
+
+def agent_switch_dropped_label_keys(labels: Mapping[str, str]) -> frozenset[str]:
+    """
+    Return the labels that only make sense for the agent a session is leaving.
+
+    The claude-native permission mode would hydrate a wrong mode in generic
+    native-wrapper UI state, and an MCP selection names the old bundle's servers.
+
+    :param labels: The session's current labels.
+    :returns: Keys to drop, on top of :data:`_INSTANCE_SCOPED_LABEL_KEYS`.
+    """
+    from omnigent.mcp_selection import MCP_SELECTION_PREFIX
+
+    selections = {key for key in labels if key.startswith(MCP_SELECTION_PREFIX)}
+    return frozenset({CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY} | selections)
+
+
+def labels_after_agent_switch(
+    labels: Mapping[str, str],
+    *,
+    dropped_label_keys: Iterable[str] = (),
+    presentation_labels: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """
+    Return ``labels`` without the running instance's state, presented for the target.
+
+    :param labels: The labels being carried, e.g. a fork source's.
+    :param dropped_label_keys: Extra exact keys to drop.
+    :param presentation_labels: The target harness's ``omnigent.ui`` and
+        ``omnigent.wrapper``, replacing the source's. ``None`` keeps them, for a
+        fork that stays on the same agent.
+    :returns: The carried labels.
+    """
+    dropped = _INSTANCE_SCOPED_LABEL_KEYS | frozenset(dropped_label_keys)
+    carried = {key: value for key, value in labels.items() if key not in dropped}
+    if presentation_labels is not None:
+        carried.pop(UI_MODE_LABEL_KEY, None)
+        carried.pop(WRAPPER_LABEL_KEY, None)
+        carried.update(presentation_labels)
+    return carried
+
+
+def labels_after_engine_switch(
+    labels: Mapping[str, str], *, presentation_labels: Mapping[str, str]
+) -> dict[str, str]:
+    """
+    Return the labels a session keeps when it moves to another engine in place.
+
+    On top of a fork's agent switch, nothing of the old harness may survive: the
+    session stays the same row, so its per-harness labels, resume labels and last
+    error would otherwise reach the new harness. Aliases and roles stay.
+
+    :param labels: The session's current labels.
+    :param presentation_labels: The target harness's presentation labels.
+    :returns: The labels the session should hold after the switch.
+    """
+    carried = labels_after_agent_switch(
+        labels,
+        dropped_label_keys=agent_switch_dropped_label_keys(labels)
+        | {FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY, FORK_CARRY_HISTORY_LABEL_KEY},
+        presentation_labels=presentation_labels,
+    )
+    return {
+        key: value
+        for key, value in carried.items()
+        if not _PER_HARNESS_LABEL_PATTERN.match(key)
+        and not key.startswith(_LAST_TASK_ERROR_LABEL_PREFIX)
+    }
 
 
 class ConversationStore(ABC):
@@ -1377,6 +1472,42 @@ class ConversationStore(ABC):
         [item] = self.append(conversation_id, [boundary])
         self.advance_context_epoch(conversation_id, epoch)
         return item
+
+    @abstractmethod
+    def apply_engine_switch(
+        self,
+        conversation_id: str,
+        *,
+        target: EngineBinding,
+        expected_external_session_id: str | None,
+        response_id: str,
+        summary: str,
+        engine_change: dict[str, Any],
+        reason: str = "api",
+        stable_id: str | None = None,
+        created_by: str | None = None,
+    ) -> ConversationItem:
+        """Rebind a session to another engine and write its ``context_reset`` boundary.
+
+        The boundary, agent, overrides and labels change in one transaction.
+        The vendor session id and launch args live in the other database, so
+        they are cleared first and restored if that transaction fails. The
+        epoch counter is the caller's: see :meth:`advance_context_epoch`.
+
+        :param conversation_id: Conversation to switch.
+        :param target: The binding to apply.
+        :param expected_external_session_id: The vendor id the caller read.
+        :param response_id: Response id recorded on the item, e.g. ``"reset_ab12"``.
+        :param summary: The handoff note stored as the boundary's summary.
+        :param engine_change: The audit record stored on the boundary.
+        :param reason: ``"user"``, ``"agent"`` or ``"api"``.
+        :param stable_id: Deterministic item id derived from an idempotency key.
+        :param created_by: Human actor who asked for the switch.
+        :returns: The boundary item, ``deduplicated`` when it already existed,
+            in which case nothing else changed.
+        :raises OmnigentError: ``CONFLICT`` when the vendor id changed.
+        :raises ConversationNotFoundError: If the conversation does not exist.
+        """
 
     @abstractmethod
     def set_task_summary(

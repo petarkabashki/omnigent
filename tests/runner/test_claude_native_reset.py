@@ -117,6 +117,19 @@ def _recording_reset(
 
 
 @pytest.mark.asyncio
+async def test_engine_switch_commit_wipes_and_leaves_the_pane_down(tmp_path: Path) -> None:
+    calls: list[str] = []
+    reset, ensure_lock = _recording_reset(tmp_path, calls)
+
+    await reset.prepare("conv_a")
+    await reset.commit("conv_a", relaunch=False)
+
+    assert not any(call.startswith("relaunch") for call in calls)
+    assert not (tmp_path / "state.json").exists()
+    assert not ensure_lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_prepare_holds_launches_off_until_commit_relaunches(tmp_path: Path) -> None:
     calls: list[str] = []
     reset, ensure_lock = _recording_reset(tmp_path, calls)

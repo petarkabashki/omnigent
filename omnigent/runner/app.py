@@ -70,6 +70,7 @@ from omnigent.harness_plugins import (
     model_env_keys,
     spawn_env_builders,
 )
+from omnigent.inner.native_attachments import with_engine_handoff
 from omnigent.llms.errors import detect_request_size_overflow
 from omnigent.native.failure_telemetry import failure_log_attributes, normalize_failure_context
 from omnigent.native.input_diagnostics import input_attributes
@@ -4143,6 +4144,7 @@ def create_runner_app(
     _extract_last_assistant_text = _session_history.extract_last_assistant_text
     _handle_harness_compaction = _session_history.handle_harness_compaction
     _load_history_as_input = _session_history.load_history_as_input
+    _load_engine_handoff = _session_history.load_engine_handoff
     _seed_last_server_item_id = _session_history.seed_last_server_item_id
 
     _sign_in_watch = build_sign_in_watch(
@@ -7334,6 +7336,16 @@ def create_runner_app(
                         },
                     )
 
+                if conversation_id not in _session_histories:
+                    engine_handoff = await _load_engine_handoff(
+                        conversation_id, drop_item_id=message_body.get("persisted_item_id")
+                    )
+                    if engine_handoff is not None:
+                        message_body["content"] = with_engine_handoff(
+                            message_body.get("content"),
+                            engine_handoff.summary,
+                            harness=engine_handoff.harness,
+                        )
                 if _session_harness_name(conversation_id) == "claude-native":
                     pending_bridge_dir = None
                     has_queued_messages = bool(_session_message_buffers.get(conversation_id))
@@ -8296,9 +8308,18 @@ def create_runner_app(
         body without ``phase`` does both. A claude-native or codex-native session also
         stops its pane in ``prepare`` and relaunches it fresh in ``commit``; other
         native terminal harnesses are refused.
+
+        A ``commit`` with ``engine_switch`` skips that relaunch: the session is
+        already rebound, so the next message cold-launches the new engine. It
+        trusts only the named old harness, since a spec lookup would find the new one.
         """
         fields = body if isinstance(body, dict) else {}
-        harness = await _context_reset_harness_name(conversation_id, fields)
+        engine_switch = fields.get("phase") == "commit" and fields.get("engine_switch") is True
+        harness = (
+            canonicalize_harness(str(fields.get("harness") or "")) or ""
+            if engine_switch
+            else await _context_reset_harness_name(conversation_id, fields)
+        )
         native_reset = {
             "claude-native": _native_controls.claude_native_reset,
             "codex-native": _native_controls.codex_native_reset,
@@ -8317,8 +8338,13 @@ def create_runner_app(
             async with lock:
                 _drop_session_context_caches(conversation_id)
                 await _invalidate_session_agent_state(conversation_id)
+                if engine_switch:
+                    _session_reasoning_effort.pop(conversation_id, None)
                 if native_reset is not None:
-                    await native_reset.commit(conversation_id)
+                    if engine_switch:
+                        await native_reset.commit(conversation_id, relaunch=False)
+                    else:
+                        await native_reset.commit(conversation_id)
             return JSONResponse(status_code=200, content={"reset": True, "phase": "commit"})
         if lock.locked():
             return JSONResponse(

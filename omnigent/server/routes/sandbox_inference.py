@@ -47,6 +47,13 @@ def actual_harness(spec: Any, override: str | None = None) -> str:
     return normalize_inference_harness(override or declared)
 
 
+#: Refusal for leaving a session's harness while its inference account is frozen.
+CONFIGURED_SESSION_HARNESS_LOCKED = (
+    "A configured session can only fork into the same harness. "
+    "Start a new session to choose another harness and provider."
+)
+
+
 def configured_snapshot(snapshot: dict[str, Any] | None) -> bool:
     """Whether the session's own harness has an inference binding."""
     return (

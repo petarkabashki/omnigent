@@ -5483,6 +5483,47 @@
         "title": "ReasoningTextDeltaEvent",
         "type": "object"
       },
+      "ResetEngine": {
+        "additionalProperties": false,
+        "description": "The engine a reset moves the session onto.",
+        "properties": {
+          "agent_id": {
+            "description": "Agent to rebind to; it names the harness, as on fork.",
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model for the new engine. Omitted keeps the old override only within one provider family; `\"default\"` clears it either way.",
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Effort for the new engine, with the same rule.",
+            "title": "Reasoning Effort"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "ResetEngine",
+        "type": "object"
+      },
       "ResetSessionModelOverrideRequest": {
         "additionalProperties": false,
         "description": "Reset a launch-time model selection only while that selection is current.",
@@ -5529,6 +5570,17 @@
             "description": "Only `\"keep\"`; closing children is not supported yet.",
             "title": "Children",
             "type": "string"
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResetEngine"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Switch the session onto this engine. `summary` is ignored: a mechanical handoff note replaces it."
           },
           "idempotency_key": {
             "anyOf": [
@@ -5588,6 +5640,11 @@
           "boundary_item_id": {
             "title": "Boundary Item Id",
             "type": "string"
+          },
+          "engine_changed": {
+            "default": false,
+            "title": "Engine Changed",
+            "type": "boolean"
           },
           "epoch": {
             "format": "int64",
@@ -15777,7 +15834,7 @@
     },
     "/v1/sessions/{session_id}/alias": {
       "delete": {
-        "description": "Release the session's role; a failed release is an error, never a silent success.",
+        "description": "Release the session's role; a failed release is an error, never a silent success.\n\nAn agent call (orchestration header) parks on an owner approval first.",
         "operationId": "delete_session_alias_v1_sessions__session_id__alias_delete",
         "parameters": [
           {
@@ -15811,7 +15868,7 @@
         ]
       },
       "put": {
-        "description": "Take or create the named role in the session's own namespace.",
+        "description": "Take or create the named role in the session's own namespace.\n\nAn agent call (orchestration header) parks on an owner approval first.",
         "operationId": "put_session_alias_v1_sessions__session_id__alias_put",
         "parameters": [
           {

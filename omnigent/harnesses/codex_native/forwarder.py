@@ -73,6 +73,7 @@ from omnigent.harnesses.codex_native.elicitation import (
 from omnigent.harnesses.codex_native.elicitation import (
     is_codex_request_id as _is_codex_request_id,
 )
+from omnigent.inner.native_attachments import strip_engine_handoff
 from omnigent.native._native_forwarder_health import (
     note_post_success as note_native_post_success,
 )
@@ -9162,8 +9163,8 @@ def _user_message_text(item: _JsonObject) -> str:
             continue
         text = block.get("text")
         if isinstance(text, str) and text:
-            parts.append(text)
-    return "\n\n".join(parts)
+            parts.append(strip_engine_handoff(text))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _user_message_has_file_content(item: _JsonObject) -> bool:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -17,12 +19,19 @@ from omnigent.harnesses.codex_native.bridge import (
     record_child_usage_baseline,
 )
 from omnigent.runner import app as runner_app
+from omnigent.runner.app import create_runner_app
 from omnigent.runner.native import claude_reset, orchestration
 from omnigent.runner.native.claude_reset import ClaudeNativeReset
 from omnigent.runner.turn_routing import read_pending_replay, write_pending_replay
 from omnigent.spec.types import AgentSpec, ExecutorSpec
 from omnigent.terminals import TerminalRegistry
-from tests.runner.conftest import _build_app_for_spec, _runner_client
+from tests.runner.conftest import (
+    _build_app_for_spec,
+    _FakeProcessManager,
+    _runner_client,
+    _ScriptedHarnessClient,
+    _sse,
+)
 from tests.runner.helpers import NullServerClient
 from tests.runner.native_helpers import _harness_spec
 
@@ -511,3 +520,216 @@ async def test_codex_native_reset_of_a_rotated_session_stops_the_launching_sessi
             app.state.native_terminal_ensure_locks["codex"][rotated_id].release()
     finally:
         forwarder.cancel()
+
+
+_NEW_AGENT_ID = "9a0b5afda28ad55ff74cbeb9b5fc67fb"
+_HANDOFF_NOTE = "handoff-note-from-the-old-engine"
+_HANDOFF_BOUNDARY = {
+    "id": "reset_1",
+    "type": "context_reset",
+    "summary": _HANDOFF_NOTE,
+    "engine_change": {"to": {"harness": "codex-native"}},
+}
+
+
+class _RebindingServerClient(_SnapshotServerClient):
+    """Server whose session row follows a rebind, and whose items are scripted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.agent_id = _AGENT_ID
+        self.items: list[dict[str, Any]] = []
+
+    async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+        del kwargs
+        session = {"id": url.rsplit("/", 1)[-1], "agent_id": self.agent_id, "labels": {}}
+        payload = {"data": self.items, "has_more": False} if url.endswith("/items") else session
+
+        class _Scripted(NullServerClient._Response):
+            def json(self) -> dict[str, Any]:
+                return payload
+
+        return _Scripted()
+
+
+def _switch_runner(
+    server_client: _RebindingServerClient,
+) -> tuple[Any, _FakeProcessManager, _ScriptedHarnessClient, list[str]]:
+    """Build a runner that resolves each agent to its own spec, recording lookups."""
+    specs = {_AGENT_ID: _harness_spec("claude-native"), _NEW_AGENT_ID: _IN_PROCESS_SPEC}
+    resolved: list[str] = []
+
+    async def resolve(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del session_id
+        resolved.append(agent_id)
+        return specs[agent_id]
+
+    harness_client = _ScriptedHarnessClient([_sse({"type": "response.completed"})])
+    process_manager = _FakeProcessManager(harness_client)
+    app = create_runner_app(
+        process_manager=process_manager,  # type: ignore[arg-type]
+        spec_resolver=resolve,
+        server_client=server_client,  # type: ignore[arg-type]
+    )
+    return app, process_manager, harness_client, resolved
+
+
+@pytest.mark.asyncio
+async def test_engine_switch_commit_stays_down_and_the_next_lookup_finds_the_new_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "8a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    phases: list[str] = []
+
+    async def record_prepare(self: ClaudeNativeReset, sid: str) -> None:
+        phases.append("prepare")
+
+    async def record_commit(self: ClaudeNativeReset, sid: str, *, relaunch: bool = True) -> None:
+        phases.append(f"commit relaunch={relaunch}")
+
+    monkeypatch.setattr(ClaudeNativeReset, "prepare", record_prepare)
+    monkeypatch.setattr(ClaudeNativeReset, "commit", record_commit)
+    server_client = _RebindingServerClient()
+    app, process_manager, _, resolved = _switch_runner(server_client)
+    events = f"/v1/sessions/{session_id}/events"
+    async with _runner_client(app) as client:
+        created = await client.post(
+            "/v1/sessions", json={"session_id": session_id, "agent_id": _AGENT_ID}
+        )
+        assert created.status_code == 201, created.text
+        app.state.session_init_envelopes[session_id] = (0.0, object())
+        prepared = await client.post(
+            events,
+            json={
+                "type": "reset",
+                "phase": "prepare",
+                "pending": "reject",
+                "harness": "claude-native",
+            },
+        )
+        assert prepared.status_code == 200, prepared.text
+
+        server_client.agent_id = _NEW_AGENT_ID
+        committed = await client.post(
+            events,
+            json={
+                "type": "reset",
+                "phase": "commit",
+                "harness": "claude-native",
+                "engine_switch": True,
+            },
+        )
+        assert committed.status_code == 200, committed.text
+        assert phases == ["prepare", "commit relaunch=False"]
+        assert session_id in process_manager.released
+        assert session_id not in app.state.session_init_envelopes
+
+        # A body naming no harness makes the runner look the session up: stale
+        # spec state would route this through the old harness's native reset.
+        looked_up = await client.post(
+            events, json={"type": "reset", "phase": "prepare", "pending": "reject"}
+        )
+    assert looked_up.status_code == 200, looked_up.text
+    assert resolved[-1] == _NEW_AGENT_ID
+    assert phases == ["prepare", "commit relaunch=False"]
+
+
+@pytest.mark.asyncio
+async def test_failed_switch_commit_still_relaunches_the_named_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "9a1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a"
+    commits: list[bool] = []
+
+    async def record_commit(self: ClaudeNativeReset, sid: str, *, relaunch: bool = True) -> None:
+        commits.append(relaunch)
+
+    monkeypatch.setattr(ClaudeNativeReset, "commit", record_commit)
+    app, _, _, _ = _switch_runner(_RebindingServerClient())
+    async with _runner_client(app) as client:
+        resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={"type": "reset", "phase": "commit", "harness": "claude-native"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert commits == [True]
+
+
+@pytest.mark.parametrize(
+    ("items", "noticed"),
+    [
+        pytest.param(
+            [{"id": "item_turn", "type": "message"}, _HANDOFF_BOUNDARY], True, id="first-turn"
+        ),
+        pytest.param(
+            [
+                {"id": "item_turn", "type": "message"},
+                {"id": "item_prior", "type": "message"},
+                _HANDOFF_BOUNDARY,
+            ],
+            False,
+            id="later-turn",
+        ),
+        pytest.param(
+            [
+                {"id": "item_turn", "type": "message"},
+                {**_HANDOFF_BOUNDARY, "engine_change": {"to": {"harness": "goose"}}},
+            ],
+            False,
+            id="sdk-target",
+        ),
+        pytest.param(
+            [{"id": "item_turn", "type": "message"}, {"id": "r", "type": "context_reset"}],
+            False,
+            id="plain-reset",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_first_message_after_a_switch_carries_the_handoff_to_the_harness(
+    items: list[dict[str, Any]], noticed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary row names the target, so no real native CLI needs launching here."""
+    session_id = uuid4().hex
+
+    async def skip_commit(self: ClaudeNativeReset, sid: str, *, relaunch: bool = True) -> None:
+        del self, sid, relaunch
+
+    monkeypatch.setattr(ClaudeNativeReset, "commit", skip_commit)
+    server_client = _RebindingServerClient()
+    server_client.agent_id = _NEW_AGENT_ID
+    server_client.items = items
+    app, _, harness_client, _ = _switch_runner(server_client)
+    async with _runner_client(app) as client:
+        created = await client.post(
+            "/v1/sessions", json={"session_id": session_id, "agent_id": _NEW_AGENT_ID}
+        )
+        assert created.status_code == 201, created.text
+        committed = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "reset",
+                "phase": "commit",
+                "harness": "claude-native",
+                "engine_switch": True,
+            },
+        )
+        assert committed.status_code == 200, committed.text
+        resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "carry on"}],
+                "persisted_item_id": "item_turn",
+            },
+        )
+        assert resp.status_code < 300, resp.text
+        for _ in range(200):
+            if harness_client.posted_bodies:
+                break
+            await asyncio.sleep(0.01)
+    body = json.dumps(harness_client.posted_bodies)
+    assert "carry on" in body
+    assert ('"engine_handoff"' in body) is noticed

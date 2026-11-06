@@ -77,6 +77,25 @@ async def test_post_user_message_text_posts_input_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_user_message_leaves_the_engine_handoff_out_of_the_transcript() -> None:
+    from omnigent.inner.native_attachments import wrap_engine_handoff
+
+    client = _RecordingClient()
+    item = {
+        "type": "userMessage",
+        "content": [
+            {"type": "text", "text": wrap_engine_handoff("the handoff")},
+            {"type": "text", "text": "carry on"},
+        ],
+    }
+
+    await fwd._post_user_message(client, "conv_x", {"turnId": "t1"}, item)
+
+    _url, body = client.posts[0]
+    assert body["data"]["item_data"]["content"] == [{"type": "input_text", "text": "carry on"}]
+
+
+@pytest.mark.asyncio
 async def test_post_user_message_truly_empty_is_skipped() -> None:
     """
     A ``userMessage`` with neither text nor a file block is not posted.

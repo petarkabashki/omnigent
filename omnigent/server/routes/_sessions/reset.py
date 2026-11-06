@@ -7,6 +7,10 @@ generated summary over the boundary. The runner checks and drops its caches
 history cached meanwhile and releases the harness (``commit``), and the server
 publishes ``session.reset``. A native session also loses its vendor session id,
 so the relaunch starts a new vendor conversation.
+
+A reset with ``engine`` also rebinds the session to another agent's harness. It
+carries a mechanical handoff in place of a summary, since the source account may
+be at its limit, and the new engine starts on the next message.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from omnigent.entities import Conversation
+from omnigent.entities import Conversation, ConversationItem
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime import pending_inputs
 from omnigent.server.schemas import (
@@ -33,6 +37,8 @@ from omnigent.stores import ConversationStore
 from omnigent.stores.conversation_store import (
     FORK_CARRY_HISTORY_LABEL_KEY,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
+    ConversationNotFoundError,
+    EngineBinding,
 )
 
 _logger = logging.getLogger(__name__)
@@ -93,6 +99,22 @@ class _ChildLookup(Protocol):
 
     def get_conversations(self, conversation_ids: list[str]) -> Mapping[str, Conversation]:
         """Return the conversations that exist for ``conversation_ids``."""
+
+
+@dataclass(frozen=True)
+class EngineTarget:
+    """A validated engine switch: where the session is and where it is going."""
+
+    agent_id: str
+    harness: str
+    #: The model the target will run; ``model_override`` is what gets stored.
+    model: str | None
+    model_override: str | None
+    reasoning_effort: str | None
+    presentation_labels: Mapping[str, str]
+    source_agent_id: str | None
+    source_harness: str | None
+    source_model: str | None
 
 
 @dataclass(frozen=True)
@@ -318,6 +340,7 @@ async def run_context_reset(
     generate_summary: Callable[[], Awaitable[str]] | None = None,
     on_gates_passed: Callable[[], None] | None = None,
     compact: bool = False,
+    resolve_engine: Callable[[], Awaitable[EngineTarget]] | None = None,
 ) -> ResetSessionResponse:
     """
     Reset a session's model context in place.
@@ -340,11 +363,18 @@ async def run_context_reset(
     :param on_gates_passed: Called once the session is known to be resettable.
     :param compact: The caller is ``/compact``, whose refusals can't name
         request fields the command does not have.
+    :param resolve_engine: Validates ``reset.engine``, ahead of every other
+        step, so a refusal stops nothing. Required when ``engine`` is set.
     :returns: The new epoch and boundary item id.
     :raises OmnigentError: 409 for a busy turn, pending input, live
         sub-agents or background work, an unsupported harness, or a
         concurrent reset; 503 when no runner is reachable.
     """
+    if reset.engine is not None:
+        if resolve_engine is None:
+            raise _unsupported("engine is not supported on this path")
+        # The handoff replaces any summary the request named.
+        reset = reset.model_copy(update={"summary": "none"})
     if reset.summary == "auto" and generate_summary is None:
         raise _unsupported(
             "summary 'auto' is not supported for this session's harness; "
@@ -362,6 +392,7 @@ async def run_context_reset(
                 session_id=session_id,
                 epoch=existing.data.epoch,  # type: ignore[union-attr]
                 boundary_item_id=existing.id,
+                engine_changed=existing.data.engine_change is not None,  # type: ignore[union-attr]
             )
     if native_harness is not None and native_harness not in IN_PLACE_RESET_NATIVE_HARNESSES:
         raise OmnigentError(
@@ -402,6 +433,7 @@ async def run_context_reset(
             generate_summary=generate_summary,
             on_gates_passed=on_gates_passed,
             compact=compact,
+            resolve_engine=resolve_engine if reset.engine is not None else None,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -438,7 +470,9 @@ async def _reset_in_place(
     generate_summary: Callable[[], Awaitable[str]] | None,
     on_gates_passed: Callable[[], None] | None,
     compact: bool,
+    resolve_engine: Callable[[], Awaitable[EngineTarget]] | None,
 ) -> ResetSessionResponse:
+    engine = await resolve_engine() if resolve_engine is not None else None
     # A message that passed the input gate before the reset registered may
     # still be on its way to the runner; let it land so the busy check sees it.
     await _wait_until(lambda: not dispatching(), "A message is still being delivered")
@@ -449,7 +483,11 @@ async def _reset_in_place(
     )
     if on_gates_passed is not None:
         on_gates_passed()
-    summary = await _resolve_summary(reset, generate_summary)
+    summary = (
+        await asyncio.to_thread(engine_handoff_summary, session_id, conversation_store, engine)
+        if engine is not None
+        else await _resolve_summary(reset, generate_summary)
+    )
     # A summary can take minutes. ``commit`` would kill a turn begun meanwhile,
     # and its items would land in neither the summary nor the next context.
     if status_of() in _BUSY_STATUSES:
@@ -462,6 +500,19 @@ async def _reset_in_place(
         reset, session_id, has_server_pending, drop_server_pending, compact=compact
     )
     runner_reached = await _forward_reset(reset, forward, wake, conv, native_harness)
+    if engine is not None:
+        return await _finish_engine_switch(
+            session_id=session_id,
+            engine=engine,
+            summary=summary or "",
+            stable_id=stable_id,
+            conversation_store=conversation_store,
+            forward=forward,
+            publish=publish,
+            runner_reached=runner_reached,
+            native_harness=native_harness,
+            created_by=created_by,
+        )
     # Ahead of the boundary, so a conflict leaves no epoch that resumes the old chat.
     if native_harness is not None and not await asyncio.to_thread(
         _clear_native_session_id, conversation_store, session_id
@@ -500,6 +551,105 @@ async def _reset_in_place(
         ).model_dump()
     )
     return ResetSessionResponse(session_id=session_id, epoch=epoch, boundary_item_id=item.id)
+
+
+async def _finish_engine_switch(
+    *,
+    session_id: str,
+    engine: EngineTarget,
+    summary: str,
+    stable_id: str | None,
+    conversation_store: ConversationStore,
+    forward: RunnerForward,
+    publish: Callable[[dict[str, Any]], object],
+    runner_reached: bool,
+    native_harness: str | None,
+    created_by: str | None,
+) -> ResetSessionResponse:
+    """Rebind after ``prepare``; a failure relaunches the old harness, unchanged."""
+    try:
+        item = await asyncio.to_thread(
+            _apply_engine_switch,
+            conversation_store,
+            session_id,
+            engine,
+            summary=summary,
+            stable_id=stable_id,
+            created_by=created_by,
+        )
+    except BaseException:
+        if runner_reached:
+            await _commit_reset(session_id, forward, native_harness)
+        raise
+    if runner_reached:
+        await _commit_reset(session_id, forward, native_harness, engine_switch=True)
+    epoch = item.data.epoch  # type: ignore[union-attr]
+    publish(
+        SessionResetEvent(
+            type="session.reset",
+            conversation_id=session_id,
+            epoch=epoch,
+            boundary_item_id=item.id,
+            summary_present=True,
+            engine_changed=True,
+        ).model_dump()
+    )
+    return ResetSessionResponse(
+        session_id=session_id, epoch=epoch, boundary_item_id=item.id, engine_changed=True
+    )
+
+
+def _apply_engine_switch(
+    conversation_store: ConversationStore,
+    session_id: str,
+    engine: EngineTarget,
+    *,
+    summary: str,
+    stable_id: str | None,
+    created_by: str | None,
+) -> ConversationItem:
+    """Write the switch, reading the vendor id and usage now that the pane is stopped."""
+    current = conversation_store.get_conversation(session_id)
+    if current is None:
+        raise ConversationNotFoundError(session_id)
+    item = conversation_store.apply_engine_switch(
+        session_id,
+        target=EngineBinding(
+            agent_id=engine.agent_id,
+            model_override=engine.model_override,
+            reasoning_effort=engine.reasoning_effort,
+            presentation_labels=engine.presentation_labels,
+        ),
+        expected_external_session_id=current.external_session_id,
+        response_id=f"reset_{int(time.time() * 1000)}",
+        summary=summary,
+        engine_change=_engine_change(engine, current.session_usage),
+        stable_id=stable_id,
+        created_by=created_by,
+    )
+    if not item.deduplicated:
+        try:
+            conversation_store.advance_context_epoch(
+                session_id,
+                item.data.epoch,  # type: ignore[union-attr]
+            )
+        except Exception:
+            # The switch is committed. The next reset numbers past this boundary.
+            _logger.exception("Could not advance the context epoch for %s", session_id)
+    return item
+
+
+def _engine_change(engine: EngineTarget, usage_before: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the boundary's record of the switch."""
+    return {
+        "from": {
+            "agent_id": engine.source_agent_id,
+            "harness": engine.source_harness,
+            "model": engine.source_model,
+        },
+        "to": {"agent_id": engine.agent_id, "harness": engine.harness, "model": engine.model},
+        "usage_before": dict(usage_before),
+    }
 
 
 async def _settle_pending_inputs(
@@ -544,14 +694,21 @@ async def _resolve_summary(
     return summary[:_RESET_SUMMARY_LIMIT]
 
 
+def _epoch_messages(
+    conversation_store: ConversationStore, session_id: str
+) -> list[dict[str, Any]]:
+    """Return the current epoch as input items."""
+    from omnigent.runtime.prompt import history_to_input_items
+    from omnigent.runtime.workflow import _load_initial_history
+
+    return history_to_input_items(_load_initial_history(conversation_store, session_id).items)
+
+
 def _load_epoch_messages(
     conversation_store: ConversationStore, session_id: str
 ) -> list[dict[str, Any]]:
     """Return the current epoch as input items, or refuse when there is none."""
-    from omnigent.runtime.prompt import history_to_input_items
-    from omnigent.runtime.workflow import _load_initial_history
-
-    messages = history_to_input_items(_load_initial_history(conversation_store, session_id).items)
+    messages = _epoch_messages(conversation_store, session_id)
     if not messages:
         raise OmnigentError("There is nothing to compact yet.", code=ErrorCode.INVALID_INPUT)
     return messages
@@ -684,21 +841,43 @@ def truncation_summary(session_id: str, conversation_store: ConversationStore) -
     :returns: The omission marker followed by the most recent text turns, within
         the boundary's summary limit.
     """
-    messages = [
-        (message["role"], text)
-        for message in _load_epoch_messages(conversation_store, session_id)
-        if (text := _message_text(message))
-    ]
-    budget = _RESET_SUMMARY_LIMIT - len(_omission_marker(len(messages))) - 2
+    return _carry_over(_load_epoch_messages(conversation_store, session_id), _omission_marker)
+
+
+def engine_handoff_summary(
+    session_id: str, conversation_store: ConversationStore, engine: EngineTarget
+) -> str:
+    """
+    Build the note a new engine starts from. No LLM runs, on either account.
+
+    :returns: A header naming both harnesses and the omitted count, then the
+        most recent text turns, within the boundary's summary limit.
+    """
+
+    def header(omitted: int) -> str:
+        return (
+            f"[Engine handoff: this session moved from {engine.source_harness} to "
+            f"{engine.harness} and keeps its id, {session_id}. {omitted} earlier messages are "
+            "not shown here; read them on demand with sys_session_get_history on this "
+            "session id. The most recent turns follow.]"
+        )
+
+    return _carry_over(_epoch_messages(conversation_store, session_id), header)
+
+
+def _carry_over(messages: list[dict[str, Any]], header_of: Callable[[int], str]) -> str:
+    """Return a header for the omitted count, then the turns that fit the summary limit."""
+    turns = [(message["role"], text) for message in messages if (text := _message_text(message))]
+    budget = _RESET_SUMMARY_LIMIT - len(header_of(len(turns))) - 2
     line_limit = budget // 2 - 2
     kept: list[str] = []
-    for role, text in reversed(messages[-_TRUNCATE_TAIL_MESSAGES:]):
+    for role, text in reversed(turns[-_TRUNCATE_TAIL_MESSAGES:]):
         line = _shorten_middle(f"{role}: {text}", line_limit)
         budget -= len(line) + 2
         if budget < 0:
             break
         kept.insert(0, line)
-    return "\n\n".join([_omission_marker(len(messages) - len(kept)), *kept])
+    return "\n\n".join([header_of(len(turns) - len(kept)), *kept])
 
 
 def _shorten_middle(text: str, limit: int) -> str:
@@ -892,14 +1071,21 @@ def _reset_event(phase: str, native_harness: str | None) -> dict[str, Any]:
 
 
 async def _commit_reset(
-    session_id: str, forward: RunnerForward, native_harness: str | None = None
+    session_id: str,
+    forward: RunnerForward,
+    native_harness: str | None = None,
+    *,
+    engine_switch: bool = False,
 ) -> None:
     """Drop history a turn cached before the boundary landed, and release the harness.
 
     A failure here is logged, not raised: the caller's outcome is already settled,
     the ``prepare`` step dropped the caches and new input stayed gated since.
     """
-    result = await forward(_reset_event("commit", native_harness))
+    event = _reset_event("commit", native_harness)
+    if engine_switch:
+        event["engine_switch"] = True
+    result = await forward(event)
     if result is None or result.status_code != 200:
         _logger.warning(
             "Runner did not confirm the context reset commit for %s (status %s)",
