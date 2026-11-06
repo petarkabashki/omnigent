@@ -55,6 +55,7 @@ from omnigent.inner.executor import (
 from omnigent.inner.model_auth import ProviderAuthRequired
 from omnigent.inner.model_egress import FrozenModelRoute
 from omnigent.inner.model_signer import SignerLaunchConfig, SubprocessModelSigner
+from omnigent.inner.native_attachments import framework_notice_block
 from omnigent.models.codex_model_vocabulary import codex_spawn_model
 from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
 from omnigent.native import _native_forwarder_health as native_forwarder_health
@@ -451,6 +452,15 @@ class TestCodexExecutor(unittest.TestCase):
                 [{"type": "input_text", "text": "/goal Finish from the web"}]
             ),
             "Finish from the web",
+        )
+        self.assertEqual(
+            _goal_objective_from_content(
+                [
+                    {"type": "input_text", "text": "/goal Finish after a switch"},
+                    framework_notice_block({"engine_handoff": "the handoff"}),
+                ]
+            ),
+            "Finish after a switch",
         )
         self.assertIsNone(
             _goal_objective_from_content(

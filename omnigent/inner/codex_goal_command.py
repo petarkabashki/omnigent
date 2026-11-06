@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from omnigent.inner.native_attachments import FRAMEWORK_NOTICE_BLOCK_TYPE
+
 # Codex app-server rejects longer goal objectives with a raw JSON-RPC -32600
 # error; the ``PUT /v1/sessions/{id}/codex_goal`` route enforces the same cap.
 GOAL_OBJECTIVE_MAX_CHARS = 4000
@@ -29,6 +31,8 @@ def goal_objective_from_content(content: object) -> str | None:
         for block in content:
             if not isinstance(block, dict):
                 return None
+            if block.get("type") == FRAMEWORK_NOTICE_BLOCK_TYPE:
+                continue
             if block.get("type") not in {"input_text", "text"}:
                 return None
             text = block.get("text")

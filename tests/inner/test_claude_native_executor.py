@@ -741,17 +741,32 @@ async def test_engine_handoff_reaches_the_first_turn_as_hidden_hook_context(
 ) -> None:
     """The handoff stays out of the pane and reaches Claude through the prompt hook."""
     from omnigent.inner.native_attachments import with_engine_handoff
+    from omnigent.runtime.harnesses._executor_adapter import _translate_input_to_messages
 
     sent: list[dict[str, Any]] = []
     monkeypatch.setattr(claude_native_executor, "inject_user_message", _stub_inject(sent))
     executor = ClaudeNativeExecutor(tmp_path)
     content = with_engine_handoff("carry on", "the handoff", harness="claude-native")
+    messages = _translate_input_to_messages(
+        [{"type": "message", "role": "user", "content": content}],
+        preserve_content_blocks=executor.preserves_message_content_blocks(),
+    )
 
-    async for _ in executor.run_turn([{"role": "user", "content": content}], [], ""):
+    async for _ in executor.run_turn(messages, [], ""):
         pass
 
     assert sent[0]["content"] == "carry on"
     assert (tmp_path / "pending_framework_context.txt").read_text() == "the handoff"
+
+
+def test_plain_text_blocks_keep_their_text(tmp_path: Path) -> None:
+    """Preserved history can carry the ``text`` block shape as well as ``input_text``."""
+    content = [
+        {"type": "text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
+
+    assert claude_native_executor._content_to_text(content, tmp_path) == "first\n\nsecond"
 
 
 @pytest.mark.asyncio

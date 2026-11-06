@@ -524,6 +524,7 @@ async def test_codex_native_reset_of_a_rotated_session_stops_the_launching_sessi
 
 _NEW_AGENT_ID = "9a0b5afda28ad55ff74cbeb9b5fc67fb"
 _HANDOFF_NOTE = "handoff-note-from-the-old-engine"
+_TURN_ROW = {"id": "item_turn", "type": "message", "role": "user"}
 _HANDOFF_BOUNDARY = {
     "id": "reset_1",
     "type": "context_reset",
@@ -659,28 +660,41 @@ async def test_failed_switch_commit_still_relaunches_the_named_harness(
 @pytest.mark.parametrize(
     ("items", "noticed"),
     [
+        pytest.param([_TURN_ROW, _HANDOFF_BOUNDARY], True, id="first-turn"),
         pytest.param(
-            [{"id": "item_turn", "type": "message"}, _HANDOFF_BOUNDARY], True, id="first-turn"
+            [
+                _TURN_ROW,
+                {"id": "item_failed", "type": "error"},
+                {"id": "item_lost", "type": "message", "role": "user"},
+                _HANDOFF_BOUNDARY,
+            ],
+            True,
+            id="after-a-failed-turn",
         ),
         pytest.param(
             [
-                {"id": "item_turn", "type": "message"},
-                {"id": "item_prior", "type": "message"},
+                _TURN_ROW,
+                {"id": "item_prior", "type": "message", "role": "assistant"},
                 _HANDOFF_BOUNDARY,
             ],
             False,
             id="later-turn",
         ),
         pytest.param(
+            [_TURN_ROW, {"id": "item_tool", "type": "function_call"}, _HANDOFF_BOUNDARY],
+            False,
+            id="tool-call-proves-delivery",
+        ),
+        pytest.param(
             [
-                {"id": "item_turn", "type": "message"},
+                _TURN_ROW,
                 {**_HANDOFF_BOUNDARY, "engine_change": {"to": {"harness": "goose"}}},
             ],
             False,
             id="sdk-target",
         ),
         pytest.param(
-            [{"id": "item_turn", "type": "message"}, {"id": "r", "type": "context_reset"}],
+            [_TURN_ROW, {"id": "r", "type": "context_reset"}],
             False,
             id="plain-reset",
         ),

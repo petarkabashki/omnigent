@@ -51,6 +51,10 @@ class SessionHistory:
 
 
 _HISTORY_BOUNDARY_TYPES = frozenset({"compaction", "context_reset"})
+#: Rows only a model that received the turn can produce.
+_MODEL_OUTPUT_ITEM_TYPES = frozenset(
+    {"function_call", "function_call_output", "reasoning", "native_tool"}
+)
 #: A first turn's message sits right after its boundary, so few rows settle it.
 _ENGINE_HANDOFF_ITEM_WINDOW = 20
 
@@ -107,23 +111,25 @@ def split_history_at_boundary(
     return _summary_pair(str(boundary.get("summary", ""))), remaining
 
 
-def pending_engine_handoff(
-    items_newest_first: list[_JsonObject], *, drop_item_id: str | None = None
-) -> EngineHandoff | None:
-    """Return the handoff for the first turn of an engine switch to a native harness.
+def pending_engine_handoff(items_newest_first: list[_JsonObject]) -> EngineHandoff | None:
+    """Return the handoff a native harness still owes the model after an engine switch.
 
-    The boundary is the only state: once a message follows it, the handoff was
-    delivered. SDK targets replay the boundary's summary, so they owe nothing.
+    The boundary is the only state: model output after it proves delivery. A user
+    message doesn't, since a failed first turn persists one that never reached the
+    model. SDK targets replay the boundary's summary, so they owe nothing.
 
     :param items_newest_first: Raw ``/items`` rows, newest first.
-    :param drop_item_id: The turn's own persisted message, which doesn't count.
     :returns: The target harness and note, or ``None``.
     """
     for item in items_newest_first:
-        if drop_item_id is not None and item.get("id") == drop_item_id:
-            continue
         item_type = item.get("type")
-        if item_type == "message" or item_type in _HISTORY_BOUNDARY_TYPES - {"context_reset"}:
+        if item_type == "message":
+            if item.get("role") == "user":
+                continue
+            return None
+        if item_type in _MODEL_OUTPUT_ITEM_TYPES or item_type in (
+            _HISTORY_BOUNDARY_TYPES - {"context_reset"}
+        ):
             return None
         if item_type != "context_reset":
             continue
@@ -152,9 +158,7 @@ def build_session_history(
     The keyword arguments are the runner app's shared session state and helpers.
     """
 
-    async def _load_engine_handoff(
-        session_id: str, *, drop_item_id: str | None = None
-    ) -> EngineHandoff | None:
+    async def _load_engine_handoff(session_id: str) -> EngineHandoff | None:
         """Fetch the session's newest items and return a handoff still owed, if any."""
         try:
             resp = await server_client.get(
@@ -173,7 +177,7 @@ def build_session_history(
         if not isinstance(rows, list):
             return None
         items = [row for row in rows if isinstance(row, dict)]
-        return pending_engine_handoff(items, drop_item_id=drop_item_id)
+        return pending_engine_handoff(items)
 
     async def _seed_last_server_item_id(session_id: str) -> None:
         """

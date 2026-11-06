@@ -39,7 +39,7 @@ from omnigent.inner.executor import (
     InjectionDeliveryAmbiguous,
     TurnComplete,
 )
-from omnigent.inner.native_attachments import attachment_cache_dir
+from omnigent.inner.native_attachments import attachment_cache_dir, framework_notice_block
 from omnigent.native.input_diagnostics import input_delivery_scope
 
 # A 1x1 transparent PNG, base64-encoded — a real decodable image small
@@ -1474,6 +1474,18 @@ def test_shell_command_keeps_its_body(text: str, command: str) -> None:
     assert (
         codex_native_executor._shell_command_from_content([{"type": "input_text", "text": text}])
         == command
+    )
+
+
+def test_shell_command_survives_a_framework_notice() -> None:
+    assert (
+        codex_native_executor._shell_command_from_content(
+            [
+                {"type": "input_text", "text": "!ls"},
+                framework_notice_block({"engine_handoff": "the handoff"}),
+            ]
+        )
+        == "ls"
     )
 
 

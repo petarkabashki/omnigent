@@ -6,6 +6,8 @@ import contextlib
 from collections.abc import Iterator
 from contextvars import ContextVar
 
+from omnigent.inner.native_attachments import FRAMEWORK_NOTICE_BLOCK_TYPE
+
 CODEX_SHELL_AUTHORIZED_HEADER = "X-Omnigent-Codex-Shell-Authorized"
 
 _authorized_shell_command: ContextVar[str | None] = ContextVar(
@@ -46,9 +48,14 @@ def shell_command_from_content(content: object) -> str | None:
     Attachments, multiple blocks, ``!!`` and empty commands remain model input.
     """
     if isinstance(content, list):
-        if len(content) != 1:
+        blocks = [
+            block
+            for block in content
+            if not (isinstance(block, dict) and block.get("type") == FRAMEWORK_NOTICE_BLOCK_TYPE)
+        ]
+        if len(blocks) != 1:
             return None
-        block = content[0]
+        block = blocks[0]
         if not isinstance(block, dict) or not all(isinstance(key, str) for key in block):
             return None
         if block.get("type") not in {"input_text", "text"}:

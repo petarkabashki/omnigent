@@ -69,6 +69,8 @@ _STOP_POLL_S = 0.2
 RESET_FORWARD_TIMEOUT_S = 50.0
 #: A boundary's carried summary, matching ``ResetSummaryText.text``.
 _RESET_SUMMARY_LIMIT = 64_000
+# Claude Code spills hook context over about 10k characters into a file.
+_ENGINE_HANDOFF_LIMIT = 9_000
 #: Share of the model's context window the summariser input may fill.
 _SUMMARY_INPUT_WINDOW_SHARE = 0.7
 #: Recent turns kept verbatim by ``/compact --truncate``.
@@ -388,12 +390,7 @@ async def run_context_reset(
     if stable_id is not None:
         existing = await asyncio.to_thread(conversation_store.get_item, session_id, stable_id)
         if existing is not None and existing.type == "context_reset":
-            return ResetSessionResponse(
-                session_id=session_id,
-                epoch=existing.data.epoch,  # type: ignore[union-attr]
-                boundary_item_id=existing.id,
-                engine_changed=existing.data.engine_change is not None,  # type: ignore[union-attr]
-            )
+            return _replayed_reset(session_id, existing, reset, publish)
     if native_harness is not None and native_harness not in IN_PLACE_RESET_NATIVE_HARNESSES:
         raise OmnigentError(
             "Reset in place is SDK-only for now; native support is planned.",
@@ -612,7 +609,7 @@ def _apply_engine_switch(
     current = conversation_store.get_conversation(session_id)
     if current is None:
         raise ConversationNotFoundError(session_id)
-    item = conversation_store.apply_engine_switch(
+    return conversation_store.apply_engine_switch(
         session_id,
         target=EngineBinding(
             agent_id=engine.agent_id,
@@ -627,16 +624,42 @@ def _apply_engine_switch(
         stable_id=stable_id,
         created_by=created_by,
     )
-    if not item.deduplicated:
-        try:
-            conversation_store.advance_context_epoch(
-                session_id,
-                item.data.epoch,  # type: ignore[union-attr]
-            )
-        except Exception:
-            # The switch is committed. The next reset numbers past this boundary.
-            _logger.exception("Could not advance the context epoch for %s", session_id)
-    return item
+
+
+def _replayed_reset(
+    session_id: str,
+    existing: ConversationItem,
+    reset: ResetSessionRequest,
+    publish: Callable[[dict[str, Any]], object],
+) -> ResetSessionResponse:
+    """Answer a retry, refusing a key reused for a different target."""
+    change = existing.data.engine_change  # type: ignore[union-attr]
+    applied_agent = change["to"]["agent_id"] if change else None
+    requested_agent = reset.engine.agent_id if reset.engine else None
+    if applied_agent != requested_agent:
+        raise OmnigentError(
+            "This idempotency key was already used for a different reset.",
+            code=ErrorCode.CONFLICT,
+        )
+    epoch = existing.data.epoch  # type: ignore[union-attr]
+    if change:
+        # The first attempt may have died before publishing; clients ignore a repeat.
+        publish(
+            SessionResetEvent(
+                type="session.reset",
+                conversation_id=session_id,
+                epoch=epoch,
+                boundary_item_id=existing.id,
+                summary_present=True,
+                engine_changed=True,
+            ).model_dump()
+        )
+    return ResetSessionResponse(
+        session_id=session_id,
+        epoch=epoch,
+        boundary_item_id=existing.id,
+        engine_changed=change is not None,
+    )
 
 
 def _engine_change(engine: EngineTarget, usage_before: Mapping[str, Any]) -> dict[str, Any]:
@@ -859,16 +882,23 @@ def engine_handoff_summary(
             f"[Engine handoff: this session moved from {engine.source_harness} to "
             f"{engine.harness} and keeps its id, {session_id}. {omitted} earlier messages are "
             "not shown here; read them on demand with sys_session_get_history on this "
-            "session id. The most recent turns follow.]"
+            "session id, paging back with older_items_cursor. The most recent turns follow.]"
         )
 
-    return _carry_over(_epoch_messages(conversation_store, session_id), header)
+    return _carry_over(
+        _epoch_messages(conversation_store, session_id), header, limit=_ENGINE_HANDOFF_LIMIT
+    )
 
 
-def _carry_over(messages: list[dict[str, Any]], header_of: Callable[[int], str]) -> str:
+def _carry_over(
+    messages: list[dict[str, Any]],
+    header_of: Callable[[int], str],
+    *,
+    limit: int = _RESET_SUMMARY_LIMIT,
+) -> str:
     """Return a header for the omitted count, then the turns that fit the summary limit."""
     turns = [(message["role"], text) for message in messages if (text := _message_text(message))]
-    budget = _RESET_SUMMARY_LIMIT - len(header_of(len(turns))) - 2
+    budget = limit - len(header_of(len(turns))) - 2
     line_limit = budget // 2 - 2
     kept: list[str] = []
     for role, text in reversed(turns[-_TRUNCATE_TAIL_MESSAGES:]):

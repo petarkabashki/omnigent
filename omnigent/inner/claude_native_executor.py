@@ -133,6 +133,10 @@ class ClaudeNativeExecutor(Executor):
         """:returns: ``False`` because output is emitted by the transcript forwarder."""
         return False
 
+    def preserves_message_content_blocks(self) -> bool:
+        """:returns: ``True`` so framework notices reach text-only turns."""
+        return True
+
     def supports_live_message_queue(self) -> bool:
         """:returns: ``True`` because messages can be injected mid-turn."""
         return True
@@ -782,7 +786,7 @@ def _content_to_text(content: EnqueuedContent, bridge_dir: Path) -> str:
             block_type = block.get("type", "")
             if block_type == FRAMEWORK_NOTICE_BLOCK_TYPE:
                 continue
-            if block_type == "input_text":
+            if block_type in ("input_text", "text"):
                 text = block.get("text")
                 if isinstance(text, str):
                     text_parts.append(text)

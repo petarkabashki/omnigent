@@ -1634,6 +1634,8 @@ def create_runner_app(
     _stranded_wake_retry_task: list[asyncio.Task[None]] = []
 
     _session_histories = _session_histories_ref
+    # Sessions whose engine handoff was attached to a turn not yet known to have reached the model.
+    _unconfirmed_engine_handoffs: set[str] = set()
     _last_server_item_id: dict[str, str] = {}
     _session_event_queues = _session_event_queues_ref
     app.state.session_event_queues = _session_event_queues
@@ -3761,6 +3763,7 @@ def create_runner_app(
         if _binding := _session_comment_relays.pop(session_id, None):
             _binding.relay.close()
         _session_histories.pop(session_id, None)
+        _unconfirmed_engine_handoffs.discard(session_id)
         _last_server_item_id.pop(session_id, None)
         _session_event_queues.pop(session_id, None)
         _session_inboxes.pop(session_id, None)
@@ -7336,11 +7339,15 @@ def create_runner_app(
                         },
                     )
 
-                if conversation_id not in _session_histories:
-                    engine_handoff = await _load_engine_handoff(
-                        conversation_id, drop_item_id=message_body.get("persisted_item_id")
-                    )
+                if (
+                    conversation_id not in _session_histories
+                    or conversation_id in _unconfirmed_engine_handoffs
+                ):
+                    engine_handoff = await _load_engine_handoff(conversation_id)
+                    _unconfirmed_engine_handoffs.discard(conversation_id)
                     if engine_handoff is not None:
+                        # Checked again next turn: this one may fail before the model.
+                        _unconfirmed_engine_handoffs.add(conversation_id)
                         message_body["content"] = with_engine_handoff(
                             message_body.get("content"),
                             engine_handoff.summary,

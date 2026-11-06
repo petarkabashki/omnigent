@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import PureWindowsPath
 from typing import Any, Protocol, cast
 
@@ -231,6 +232,16 @@ _WORKSPACE_SHARER_SCAN_LIMIT = 32
 
 class _RowCountResult(Protocol):
     rowcount: int
+
+
+@dataclass(frozen=True)
+class _EngineLaunchState:
+    """What an engine switch replaced, kept to undo a rebind that fails."""
+
+    external_session_id: str | None
+    terminal_launch_args: str | None
+    context_epoch: int
+    session_usage: str | None
 
 
 def _to_conversation(
@@ -4328,13 +4339,14 @@ class SqlAlchemyConversationStore(ConversationStore):
         if conversation is None:
             raise ConversationNotFoundError(conversation_id)
         latest = self.list_items(conversation_id, order="desc", limit=1).data
+        epoch = conversation.context_epoch + 1
         boundary = NewConversationItem(
             type="context_reset",
             response_id=response_id,
             created_by=created_by,
             stable_id=stable_id,
             data=ContextResetData(
-                epoch=conversation.context_epoch + 1,
+                epoch=epoch,
                 last_item_id=latest[0].id if latest else None,
                 summary=summary,
                 reason=reason,  # type: ignore[arg-type]
@@ -4377,17 +4389,15 @@ class SqlAlchemyConversationStore(ConversationStore):
                 _upsert_labels(session, conversation_id, changed, now)
             return item
 
-        launch_args = self._clear_engine_launch_state(
-            conversation_id, expected_external_session_id
+        previous = self._retire_engine_launch_state(
+            conversation_id, expected_external_session_id, epoch
         )
         try:
             return run_write_transaction(
                 self._conv_session_immediate, "apply_engine_switch", rebind
             )
         except BaseException:
-            self._restore_engine_launch_state(
-                conversation_id, expected_external_session_id, launch_args
-            )
+            self._restore_engine_launch_state(conversation_id, previous)
             raise
 
     def _engine_metadata_row(
@@ -4405,37 +4415,49 @@ class SqlAlchemyConversationStore(ConversationStore):
             raise ConversationNotFoundError(conversation_id)
         return meta
 
-    def _clear_engine_launch_state(
-        self, conversation_id: str, expected_external_session_id: str | None
-    ) -> str | None:
-        """Compare and clear the vendor id and launch args; return the stored args."""
+    def _retire_engine_launch_state(
+        self, conversation_id: str, expected_external_session_id: str | None, epoch: int
+    ) -> _EngineLaunchState:
+        """Compare and clear the vendor id, and enter ``epoch``, in one transaction."""
+        import json
 
-        def clear(session: Session) -> str | None:
+        from omnigent.stores.conversation_store import capture_context_reset_base
+
+        def retire(session: Session) -> _EngineLaunchState:
             meta = self._engine_metadata_row(session, conversation_id)
             if meta.external_session_id != expected_external_session_id:
                 raise OmnigentError(
                     "The session's native session id changed during the switch; retry.",
                     code=ErrorCode.CONFLICT,
                 )
-            launch_args = meta.terminal_launch_args
+            previous = _EngineLaunchState(
+                external_session_id=meta.external_session_id,
+                terminal_launch_args=meta.terminal_launch_args,
+                context_epoch=meta.context_epoch,
+                session_usage=meta.session_usage,
+            )
             meta.external_session_id = None
             meta.terminal_launch_args = None
-            return launch_args
+            meta.context_epoch = epoch
+            if meta.session_usage:
+                usage = dict(json.loads(meta.session_usage))
+                capture_context_reset_base(usage, epoch)
+                meta.session_usage = json.dumps(usage)
+            return previous
 
-        return run_write_transaction(self._session_immediate, "clear_engine_launch_state", clear)
+        return run_write_transaction(self._session_immediate, "retire_engine_launch_state", retire)
 
     def _restore_engine_launch_state(
-        self,
-        conversation_id: str,
-        external_session_id: str | None,
-        launch_args: str | None,
+        self, conversation_id: str, previous: _EngineLaunchState
     ) -> None:
-        """Put back what :meth:`_clear_engine_launch_state` took, so the old engine resumes."""
+        """Undo :meth:`_retire_engine_launch_state`, so the old engine resumes its session."""
 
         def restore(session: Session) -> None:
             meta = self._engine_metadata_row(session, conversation_id)
-            meta.external_session_id = external_session_id
-            meta.terminal_launch_args = launch_args
+            meta.external_session_id = previous.external_session_id
+            meta.terminal_launch_args = previous.terminal_launch_args
+            meta.context_epoch = previous.context_epoch
+            meta.session_usage = previous.session_usage
 
         run_write_transaction(self._session_immediate, "restore_engine_launch_state", restore)
 

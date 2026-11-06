@@ -642,7 +642,6 @@ async def test_engine_switch_rebinds_between_prepare_and_commit(stub_handoff: No
         "to": {"agent_id": "ag_new", "harness": "codex-native", "model": "gpt-5.4"},
         "usage_before": {"cost_usd": 1.5},
     }
-    assert harness.store.advanced_epochs == [1]
     assert harness.published[0]["engine_changed"] is True
     assert harness.published[0]["summary_present"] is True
 
@@ -708,6 +707,40 @@ async def test_engine_key_replay_reports_the_switch_and_writes_nothing(stub_hand
     assert again.engine_changed is True
     assert len(harness.forwarded) == forwarded
     assert len(harness.store.engine_writes) == 1
+    assert [event["boundary_item_id"] for event in harness.published] == [
+        first.boundary_item_id,
+        first.boundary_item_id,
+    ]
+
+
+@pytest.mark.parametrize(
+    "replay",
+    [
+        pytest.param({"engine": {"agent_id": "ag_other"}}, id="other-target"),
+        pytest.param({}, id="plain-reset"),
+    ],
+)
+async def test_engine_key_reused_for_another_reset_conflicts(
+    replay: dict[str, Any], stub_handoff: None
+) -> None:
+    harness = _Harness(resolve_engine=_resolved_engine)
+    await harness.run(**_ENGINE_REQUEST, idempotency_key="k1")
+
+    assert await _error_code(harness, **replay, idempotency_key="k1") == ErrorCode.CONFLICT
+    assert len(harness.store.engine_writes) == 1
+
+
+def test_engine_handoff_stays_within_the_hook_context_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns = [{"role": "user", "content": "word " * 2_000} for _ in range(12)]
+    monkeypatch.setattr(reset_module, "_epoch_messages", lambda *_: turns)
+
+    note = reset_module.engine_handoff_summary("sess", _Store(), _ENGINE_TARGET)
+
+    assert note.startswith("[Engine handoff:")
+    assert "word" in note
+    assert len(note) <= reset_module._ENGINE_HANDOFF_LIMIT
 
 
 @pytest.mark.parametrize(

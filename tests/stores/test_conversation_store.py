@@ -9452,6 +9452,9 @@ def test_engine_switch_failure_restores_the_old_engines_launch_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conversation_id = _engine_source(conversation_store)
+    conversation_store.set_session_usage(conversation_id, {"total_cost_usd": 2.0})
+    before = conversation_store.get_conversation(conversation_id)
+    assert before is not None
 
     def fail(*_args: object, **_kwargs: object) -> dict[str, str]:
         raise RuntimeError("rebind failed")
@@ -9462,6 +9465,27 @@ def test_engine_switch_failure_restores_the_old_engines_launch_state(
         _switch_engine(conversation_store, conversation_id)
 
     _assert_engine_unchanged(conversation_store, conversation_id)
+    after = conversation_store.get_conversation(conversation_id)
+    assert after is not None
+    assert after.context_epoch == before.context_epoch
+    assert after.session_usage == before.session_usage
+
+
+def test_engine_switch_enters_the_epoch_with_its_cost_base(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    conversation_id = _engine_source(conversation_store)
+    conversation_store.set_session_usage(conversation_id, {"total_cost_usd": 2.0})
+
+    item = _switch_engine(conversation_store, conversation_id)
+
+    conversation = conversation_store.get_conversation(conversation_id)
+    assert conversation is not None
+    assert isinstance(item.data, ContextResetData)
+    assert conversation.context_epoch == item.data.epoch == 1
+    assert conversation.session_usage is not None
+    assert conversation.session_usage["total_cost_usd"] == 2.0
+    assert conversation.session_usage != {"total_cost_usd": 2.0}
 
 
 def test_engine_switch_stable_id_applies_once(
