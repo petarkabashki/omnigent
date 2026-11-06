@@ -205,6 +205,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _is_native_terminal_session,
     _labels_for_viewer,
     _persist_model_change_note,
+    _publish_and_wait_for_harness_elicitation,
     _publish_runner_recovered_status,
     _run_managed_launch,
     _validate_session_model_selection,
@@ -215,6 +216,7 @@ from omnigent.server.schemas import (
     AutomaticSessionRenameRequest,
     AutomaticSessionRenameResponse,
     CreatedSessionResponse,
+    ElicitationRequestParams,
     PaginatedList,
     ProjectSessionCreateRequest,
     ReadStatePutRequest,
@@ -234,6 +236,7 @@ from omnigent.server.schemas import (
 from omnigent.server.session_aliases import Namespace, release_role_after_lifecycle
 from omnigent.server.session_orchestration import require_orchestration_source
 from omnigent.server.shadow_routing import shadow_route_created_session
+from omnigent.spec.types import DEFAULT_ASK_TIMEOUT, Phase
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -2043,18 +2046,75 @@ def register_core_routes(
         return entries[0] if entries else {"session_id": session.id, "alias": None}
 
     @router.put("/sessions/{session_id}/alias")
+    async def _approve_agent_alias_change(
+        request: Request, user_id: str | None, session_id: str, question: str
+    ) -> Conversation:
+        """Park on an owner approval for one agent-initiated role change on its own session.
+
+        Raises unless the owner accepts, so the caller changes nothing on a
+        denial, a timeout or a closed prompt.
+        """
+        source = require_orchestration_source(
+            request, user_id, conversation_store, permission_store
+        )
+        if source.id != session_id:
+            raise OmnigentError("A session can only change its own role", code=ErrorCode.FORBIDDEN)
+        verdict = await _publish_and_wait_for_harness_elicitation(
+            request,
+            session_id=session_id,
+            params=ElicitationRequestParams(
+                mode="form",
+                message=question,
+                requestedSchema={},
+                phase=Phase.TOOL_CALL.value,
+                policy_name="role_change",
+                content_preview=question,
+            ),
+            timeout_s=float(DEFAULT_ASK_TIMEOUT),
+            conversation_store=conversation_store,
+        )
+        if verdict is None or verdict.action != "accept":
+            raise OmnigentError(
+                "The owner did not approve the role change; nothing was changed",
+                code=ErrorCode.FORBIDDEN,
+            )
+        return source
+
     async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
-        """Take or create the named role in the session's own namespace."""
-        from omnigent.server.session_aliases import set_session_alias
+        """Take or create the named role in the session's own namespace.
+
+        An agent call (orchestration header) parks on an owner approval first.
+        """
+        from omnigent.server.session_aliases import (
+            namespace_for_session,
+            role_handle,
+            set_session_alias,
+            validate_alias,
+        )
+
+        payload = await request.json()
 
         user_id = _require_user(request, auth_provider)
-        if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
-            raise OmnigentError("Agents cannot set session aliases", code=ErrorCode.FORBIDDEN)
-        await _require_access_and_level(
-            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
-        )
-        payload = await request.json()
+        by_agent = request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None
         alias = payload.get("alias") if isinstance(payload, dict) else None
+
+        if by_agent:
+            name = validate_alias(alias)
+            source = require_orchestration_source(
+                request, user_id, conversation_store, permission_store
+            )
+            handle = role_handle(namespace_for_session(source, project_store, user_id).path, name)
+            await _approve_agent_alias_change(
+                request,
+                user_id,
+                session_id,
+                f"Session '{source.title or source.id}' ({source.id}) asks to take the "
+                f"role handle '{handle}'. Approve?",
+            )
+        else:
+            await _require_access_and_level(
+                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+            )
 
         def _set() -> dict[str, Any]:
             session = conversation_store.get_conversation(session_id)
@@ -2069,14 +2129,32 @@ def register_core_routes(
 
     @router.delete("/sessions/{session_id}/alias", status_code=204)
     async def delete_session_alias(request: Request, session_id: str) -> Response:
-        """Release the session's role; a failed release is an error, never a silent success."""
+        """Release the session's role; a failed release is an error, never a silent success.
+
+        An agent call (orchestration header) parks on an owner approval first.
+        """
+        from omnigent.server.session_aliases import clear_session_alias, session_handle
+
         user_id = _require_user(request, auth_provider)
         if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
-            raise OmnigentError("Agents cannot change session aliases", code=ErrorCode.FORBIDDEN)
-        await _require_access_and_level(
-            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
-        )
-        from omnigent.server.session_aliases import clear_session_alias
+            source = require_orchestration_source(
+                request, user_id, conversation_store, permission_store
+            )
+            current = conversation_store.get_conversation(source.id) or source
+            handle = session_handle(current, project_store, user_id)
+            if source.id == session_id and handle is None:
+                raise OmnigentError("This session holds no role", code=ErrorCode.INVALID_INPUT)
+            await _approve_agent_alias_change(
+                request,
+                user_id,
+                session_id,
+                f"Session '{source.title or source.id}' ({source.id}) asks to release the "
+                f"role handle '{handle}'. Approve?",
+            )
+        else:
+            await _require_access_and_level(
+                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+            )
 
         await asyncio.to_thread(clear_session_alias, conversation_store, project_store, session_id)
         return Response(status_code=204)

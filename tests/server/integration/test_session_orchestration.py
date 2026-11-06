@@ -1770,3 +1770,123 @@ async def test_create_executor_supplies_agent_id_and_label_is_reserved(
         json={"agent_id": source["agent_id"], "labels": {EXECUTOR_LABEL_KEY: "bundled"}},
     )
     assert forged.status_code == 400, forged.text
+
+
+# ── sys_role_take / sys_role_release: server-enforced owner approval ─────
+
+
+@pytest.fixture
+def owner_verdicts(monkeypatch):
+    """Stand in for the owner's answer; records every question the server parks on."""
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.schemas import ElicitationResult
+
+    state = {"action": "accept", "asked": []}
+
+    async def answer(request, *, params, **kwargs):
+        state["asked"].append((kwargs["session_id"], params.message))
+        if state["action"] == "timeout":
+            return None
+        return ElicitationResult(action=state["action"])
+
+    monkeypatch.setattr(routes_core, "_publish_and_wait_for_harness_elicitation", answer)
+    return state
+
+
+async def _role_tool(client, session, name, **arguments):
+    return json.loads(
+        await execute_tool(
+            tool_name=name,
+            arguments=json.dumps(arguments),
+            server_client=client,
+            conversation_id=session["id"],
+        )
+    )
+
+
+def _alias_of(db_uri, session):
+    return (
+        SqlAlchemyConversationStore(db_uri)
+        .get_conversation(session["id"])
+        .labels.get(ALIAS_LABEL_KEY)
+    )
+
+
+async def test_role_take_and_release_apply_after_one_approval_each(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, _, _ = peers
+    taken = await _role_tool(auth_client, source, "sys_role_take", role="Architect")
+    assert taken == {"taken": True, "role": "Architect"}
+    assert _alias_of(db_uri, source) == "Architect"
+    (asked_session, question), *rest = owner_verdicts["asked"]
+    assert not rest and asked_session == source["id"]
+    assert source["id"] in question and "'/Architect'" in question
+
+    assert await _role_tool(auth_client, source, "sys_role_release") == {"released": True}
+    assert _alias_of(db_uri, source) is None
+    assert len(owner_verdicts["asked"]) == 2  # approval is per call, not remembered
+
+
+@pytest.mark.parametrize("action", ["decline", "cancel", "timeout"])
+async def test_role_take_and_release_change_nothing_without_approval(
+    auth_client, peers, db_uri, owner_verdicts, action
+):
+    source, _, _ = peers
+    owner_verdicts["action"] = "accept"
+    await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    owner_verdicts["action"] = action
+
+    refused_release = await _role_tool(auth_client, source, "sys_role_release")
+    assert refused_release["error"].endswith("returned 403")
+    assert "did not approve" in refused_release["detail"]
+    assert _alias_of(db_uri, source) == "Keeper"
+
+    owner_verdicts["action"] = "accept"
+    await _role_tool(auth_client, source, "sys_role_release")
+    owner_verdicts["action"] = action
+    refused_take = await _role_tool(auth_client, source, "sys_role_take", role="Other")
+    assert refused_take["error"].endswith("returned 403")
+    assert _alias_of(db_uri, source) is None
+
+
+async def test_role_take_conflicts_and_one_role_rules_hold_after_approval(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, target, _ = peers
+    assert (
+        await auth_client.put(f"/v1/sessions/{target['id']}/alias", json={"alias": "Held"})
+    ).status_code == 200
+    held = await _role_tool(auth_client, source, "sys_role_take", role="Held")
+    assert held["error"].endswith("returned 409") and _alias_of(db_uri, source) is None
+
+    assert (await _role_tool(auth_client, source, "sys_role_take", role="First"))["taken"]
+    second = await _role_tool(auth_client, source, "sys_role_take", role="Second")
+    assert second["error"].endswith("returned 409") and "release it first" in second["detail"]
+    assert _alias_of(db_uri, source) == "First"
+
+
+async def test_role_release_without_a_role_is_refused_before_asking(
+    auth_client, peers, owner_verdicts
+):
+    source, _, _ = peers
+    result = await _role_tool(auth_client, source, "sys_role_release")
+    assert result["error"].endswith("returned 400") and "holds no role" in result["detail"]
+    assert owner_verdicts["asked"] == []
+
+
+async def test_forged_agent_call_cannot_skip_approval_or_touch_another_session(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, target, _ = peers
+    owner_verdicts["action"] = "decline"
+    forged = {ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    own = await auth_client.put(
+        f"/v1/sessions/{source['id']}/alias", json={"alias": "Sneaky"}, headers=forged
+    )
+    other = await auth_client.put(
+        f"/v1/sessions/{target['id']}/alias", json={"alias": "Sneaky"}, headers=forged
+    )
+    assert (own.status_code, other.status_code) == (403, 403)
+    assert _alias_of(db_uri, source) is None and _alias_of(db_uri, target) is None
+    assert [asked[0] for asked in owner_verdicts["asked"]] == [source["id"]]

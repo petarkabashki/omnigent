@@ -321,6 +321,8 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_session_get_info",
         "sys_session_share",
         "sys_role_list",
+        "sys_role_take",
+        "sys_role_release",
     }
 )
 
@@ -564,6 +566,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     )
     from omnigent.tools.builtins.list_comments import ListCommentsTool
     from omnigent.tools.builtins.role_list import SysRoleListTool
+    from omnigent.tools.builtins.role_take import SysRoleReleaseTool, SysRoleTakeTool
     from omnigent.tools.builtins.spawn import (
         SysSessionGetHistoryTool,
         SysSessionGetInfoTool,
@@ -607,6 +610,8 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionGetHistoryTool,
             SysSessionGetInfoTool,
             SysRoleListTool,
+            SysRoleTakeTool,
+            SysRoleReleaseTool,
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
@@ -5323,6 +5328,8 @@ async def _execute_session_query_tool(
         return await _session_share_via_rest(args, conversation_id, server_client, agent_spec)
     if tool_name == "sys_role_list":
         return await _role_list_via_rest(args, conversation_id, server_client)
+    if tool_name in ("sys_role_take", "sys_role_release"):
+        return await _role_change_via_rest(tool_name, args, conversation_id, server_client)
     return await _session_close_via_rest(args, conversation_id, server_client)
 
 
@@ -5348,6 +5355,35 @@ async def _role_list_via_rest(
         )
     payload = resp.json()
     return json.dumps({"namespace": payload.get("namespace"), "roles": payload.get("data", [])})
+
+
+async def _role_change_via_rest(
+    tool_name: str, args: _JsonObject, conversation_id: str, server_client: httpx.AsyncClient
+) -> str:
+    """Take or release the calling session's own role; the server asks the owner first."""
+    url = f"{_session_url(conversation_id)}/alias"
+    headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    try:
+        if tool_name == "sys_role_take":
+            role = args.get("role")
+            if not isinstance(role, str) or not role.strip():
+                return json.dumps({"error": "sys_role_take: role must be a non-empty string"})
+            resp = await server_client.put(
+                url, json={"alias": role}, headers=headers, timeout=_ASK_GATE_DELIVERY_TIMEOUT
+            )
+        else:
+            resp = await server_client.delete(
+                url, headers=headers, timeout=_ASK_GATE_DELIVERY_TIMEOUT
+            )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if resp.status_code not in (200, 204):
+        return json.dumps(
+            {"error": f"{tool_name} returned {resp.status_code}", "detail": resp.text[:300]}
+        )
+    if tool_name == "sys_role_release":
+        return json.dumps({"released": True})
+    return json.dumps({"taken": True, "role": resp.json().get("alias")})
 
 
 async def _runner_online_or_none(
