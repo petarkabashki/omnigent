@@ -24,6 +24,7 @@ from starlette.datastructures import Headers
 from starlette.types import Message, Receive, Scope, Send
 
 from omnigent.cli_invocation import cli_invocation
+from omnigent.db.utils import generate_task_id
 from omnigent.db.workspace_cache import WorkspaceScopedCache
 from omnigent.debug_logging import (
     add_audit_attrs,
@@ -40,7 +41,8 @@ from omnigent.entities.conversation import (
     parse_item_data,
 )
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.harness_plugins import NativeCodingAgent
+from omnigent.harness_capabilities import CompactionMode
+from omnigent.harness_plugins import NativeCodingAgent, compaction_mode_for
 from omnigent.harnesses.codex_native.shell_input import shell_command_from_input
 from omnigent.harnesses.codex_native.side_chat import is_side_chat_child
 from omnigent.host.frames import (
@@ -227,6 +229,7 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_elicitation_request_to_ancestors,
     _publish_elicitation_resolved,
     _publish_elicitation_resolved_to_ancestors,
+    _publish_error_event,
     _publish_external_output_reasoning_delta,
     _publish_external_output_text_delta,
     _publish_external_tool_output_delta,
@@ -241,6 +244,7 @@ from omnigent.server.routes._sessions.helpers import (
     _require_external_status_forward,
     _require_filesystem_attachment_harness,
     _resolve_harness,
+    _resolve_llm_model,
     _response_agent_name_from_store,
     _session_status_from_cache,
     _signal_harness_elicitation_resolved_by_id,
@@ -293,6 +297,9 @@ from omnigent.server.routes._sessions.reset import (
     is_reset_in_flight,
     run_context_reset,
     running_work_snapshot,
+    start_compact_reset,
+    summarize_for_reset,
+    truncation_summary,
 )
 from omnigent.server.routing_outcomes import (
     ACTOR_UNKNOWN,
@@ -394,7 +401,48 @@ _METADATA_OBSERVATION_EVENT_TYPES = frozenset(
 
 # A host that confirmed the spawn has a runner process that may still be
 # booting (slow imports on a busy machine), so it earns a longer connect wait.
+#: Events that start a turn, which a context reset must hold off.
+_TURN_INPUT_TYPES = frozenset({"message", "session_message", _SLASH_COMMAND_TYPE})
+
 _ACKNOWLEDGED_RELAUNCH_CONNECT_FACTOR = 2.0
+
+
+def _compaction_model_for(
+    conv: Any, *, agent_store: AgentStore, agent_cache: AgentCache | None
+) -> str | None:
+    """Return the provider-prefixed model that writes a session's ``/compact`` summary."""
+    configured: str | None = None
+    agent = agent_store.get(conv.agent_id) if conv.agent_id else None
+    if agent is not None and agent_cache is not None:
+        spec = agent_cache.load(
+            agent.id, agent.bundle_location, expand_env=agent.operator_authored
+        ).spec
+        configured = spec.compaction.model if spec.compaction is not None else None
+    model = (
+        configured
+        or conv.model_override
+        or conv.reported_model
+        or _resolve_llm_model(conv, agent_store=agent_store, agent_cache=agent_cache)
+    )
+    if not model:
+        return None
+    from omnigent.runtime.workflow import _route_bare_model_for_compaction
+    from omnigent.spec.types import LLMConfig
+
+    return _route_bare_model_for_compaction(LLMConfig(model=model)).model
+
+
+async def _record_compact_failure(
+    session_id: str, conversation_store: ConversationStore, message: str
+) -> None:
+    """Put a compaction failure in the transcript, for a POST that already acked."""
+    error = ErrorData(source="execution", code="compaction_failed", message=message)
+    item = NewConversationItem(type="error", response_id=generate_task_id(), data=error)
+    try:
+        await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except Exception:  # The live event still reaches connected clients.
+        _logger.warning("Failed to persist a compaction failure", exc_info=True)
+    _publish_error_event(session_id, error)
 
 
 def _relaunch_connect_timeout_s(*, acknowledged: bool) -> float:
@@ -990,7 +1038,7 @@ def register_events_routes(
         entries succeed. Batch execution is not atomic: if an entry fails,
         earlier entries remain applied, later entries are not attempted, and
         the error response does not include acknowledgements from earlier
-        entries. Messages count as in flight for the whole request, including
+        entries. Turn input counts as in flight for the whole request, including
         runner launch.
         """
         with contextlib.ExitStack() as in_flight:
@@ -1020,7 +1068,7 @@ def register_events_routes(
                                     session_id,
                                     event,
                                     in_flight=in_flight
-                                    if event.type in {"message", "session_message"}
+                                    if event.type in _TURN_INPUT_TYPES
                                     else None,
                                 )
                             )
@@ -1036,7 +1084,7 @@ def register_events_routes(
                 request,
                 session_id,
                 body,
-                in_flight=in_flight if body.type in {"message", "session_message"} else None,
+                in_flight=in_flight if body.type in _TURN_INPUT_TYPES else None,
             )
 
     router.include_router(event_router)
@@ -1442,7 +1490,7 @@ def register_events_routes(
                     f"Invalid data payload for event type {body.type!r}: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
-        if body.type in ("message", "session_message") and is_reset_in_flight(session_id):
+        if body.type in _TURN_INPUT_TYPES and is_reset_in_flight(session_id):
             raise OmnigentError(
                 "The session's context is being reset; retry shortly",
                 code=ErrorCode.RESET_IN_PROGRESS,
@@ -2180,87 +2228,15 @@ def register_events_routes(
                 _mcp_elicit_payload,
             )
             return {"queued": False, "elicitation_id": elicit_id}
-        if body.type == _COMPACT_TYPE:
-            # Unified control dispatch (designs/CLAUDE_NATIVE.md
-            # "Control events dispatch on the runner"): forward /compact
-            # to the bound runner first, regardless of harness. The
-            # runner dispatches by harness — native harnesses inject
-            # /compact into the vendor TUI and return 200 on success or
-            # 5xx on failure. SDK harnesses return 204 (no-op) because
-            # their context is controlled entirely by the vendor harness.
-            # A 4xx/5xx from the runner is surfaced as an error.
-            # TUI budget, not the 5s default: the claude-native handler
-            # drives a delivery-verified slash-command inject, and a timeout
-            # here would surface as an error mid-TUI-compact.
-            runner_result = await _forward_session_change_to_runner(
-                session_id,
-                runner_router,
-                {"type": _COMPACT_TYPE},
-                timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
-            )
-            if runner_result is not None and runner_result.status_code == 200:
-                return {"queued": False}
-            if runner_result is not None and runner_result.status_code != 204:
-                raise OmnigentError(
-                    f"Compaction failed: runner returned {runner_result.status_code}",
-                    code=ErrorCode.INTERNAL_ERROR,
-                )
-            # ``runner_result is None`` means no runner was reachable. For a
-            # native-terminal session /compact MUST run in the vendor TUI —
-            # falling through to server-side in-process compaction is wrong
-            # (it wouldn't compact the terminal's own context) and errors for
-            # a harness that declares no LLM model. A disconnected-but-wakeable
-            # session (runner_asleep / host_asleep) should wake and compact
-            # just like sending a message does, so relaunch the runner the same
-            # way the message-dispatch path does, then retry the forward once.
-            if runner_result is None and _is_native_terminal_session(conv):
-                conv, woke_client = await _wake_bound_runner_for_control(conv)
-                if woke_client is not None:
-                    # Same TUI-inject budget as the initial forward: a
-                    # just-relaunched runner is the slow case (cold pane, just
-                    # advertised), and the claude-native injector's worst case
-                    # (~16s) exceeds the 5s default — a timeout there returns
-                    # None and would wrongly fall through to the "reconnect"
-                    # 503 while Claude Code is actually compacting.
-                    runner_result = await _forward_session_change_to_runner(
-                        session_id,
-                        runner_router,
-                        {"type": _COMPACT_TYPE},
-                        timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
-                    )
-                    if runner_result is not None and runner_result.status_code == 200:
-                        return {"queued": False}
-                    if runner_result is not None and runner_result.status_code != 204:
-                        raise OmnigentError(
-                            f"Compaction failed: runner returned {runner_result.status_code}",
-                            code=ErrorCode.INTERNAL_ERROR,
-                        )
-                # Native session that couldn't be woken (host offline) — the
-                # runner is the only thing that can compact it, so surface a
-                # clear "reconnect first" error rather than falling through to
-                # in-process compaction (which fails with a confusing
-                # no-LLM-model message).
-                raise OmnigentError(
-                    "Can't compact this session while its runner is offline. "
-                    "Reconnect the session (send a message to wake it), then "
-                    "run /compact again.",
-                    code=ErrorCode.RUNNER_UNAVAILABLE,
-                )
-            raise OmnigentError(
-                "/compact is not available for this session type.",
-                code=ErrorCode.INVALID_INPUT,
-            )
-        if body.type == _RESET_TYPE:
-            await _require_access(
-                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
-            )
-            try:
-                reset_request = ResetSessionRequest.model_validate(body.data)
-            except ValueError as exc:
-                raise OmnigentError(
-                    f"Invalid reset payload: {exc}", code=ErrorCode.INVALID_INPUT
-                ) from exc
-            reset_conv = conv
+
+        async def _run_reset(
+            reset_conv: Any,
+            reset_request: ResetSessionRequest,
+            generate_summary: Callable[[], Awaitable[str]] | None = None,
+            on_gates_passed: Callable[[], None] | None = None,
+            compact: bool = False,
+        ) -> Any:
+            """Run an in-place context reset with this request's session callbacks."""
             startup_inputs = getattr(request.app.state, "startup_inputs", None)
 
             async def _has_server_pending() -> bool:
@@ -2325,8 +2301,192 @@ def register_events_routes(
                 dispatching=lambda: _dispatch_in_flight.get(session_id, 0) > 0,
                 created_by=created_by,
                 running_work_of=_running_work,
+                generate_summary=generate_summary,
+                on_gates_passed=on_gates_passed,
+                compact=compact,
             )
             await asyncio.to_thread(record_override, session_id, "reset", "owner")
+            return reset_result
+
+        async def _reset_summary_generator(
+            summary_conv: Any,
+        ) -> tuple[Any, Callable[[], Awaitable[str]]]:
+            """Resolve the model and pinned runner a summary needs, before any gate."""
+            model = await asyncio.to_thread(
+                _compaction_model_for,
+                summary_conv,
+                agent_store=agent_store,
+                agent_cache=agent_cache,
+            )
+            if model is None:
+                raise OmnigentError(
+                    "Can't summarise this session: it has no model. Set compaction.model "
+                    "in the agent spec, or run /compact --truncate.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            from omnigent.runtime import get_runner_client
+
+            runner_client = await _get_runner_client(session_id, runner_router)
+            if runner_client is None:
+                runner_client = get_runner_client()
+            if runner_client is None:
+                summary_conv, runner_client = await _wake_bound_runner_for_control(summary_conv)
+            if runner_client is None:
+                raise OmnigentError(
+                    "Can't compact this session while its runner is offline. Reconnect the "
+                    "session (send a message to wake it), then run /compact again.",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
+            bound_client = runner_client
+
+            async def _summarize() -> str:
+                return await summarize_for_reset(
+                    session_id=session_id,
+                    conversation_store=conversation_store,
+                    model=model,
+                    runner_client=bound_client,
+                )
+
+            return summary_conv, _summarize
+
+        if body.type == _COMPACT_TYPE:
+            compact_harness = await asyncio.to_thread(
+                _resolve_harness, conv, agent_store=agent_store
+            )
+            compact_mode = compaction_mode_for(compact_harness)
+            compact_truncate = (body.data or {}).get("truncate") is True
+            if compact_mode is CompactionMode.RESET_REPLAY:
+                await _require_access(
+                    user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+                )
+                compact_conv = conv
+                if compact_truncate:
+
+                    async def compact_summary() -> str:
+                        return await asyncio.to_thread(
+                            truncation_summary, session_id, conversation_store
+                        )
+
+                else:
+                    compact_conv, compact_summary = await _reset_summary_generator(conv)
+                compact_request = ResetSessionRequest(summary="auto", pending="reject")
+                await start_compact_reset(
+                    run_reset=lambda gates_passed: _run_reset(
+                        compact_conv, compact_request, compact_summary, gates_passed, compact=True
+                    ),
+                    on_started=lambda: _publish_compaction_in_progress(session_id),
+                    on_completed=lambda: _publish_compaction_completed(session_id, None),
+                    on_failed=lambda: _publish_compaction_failed(session_id),
+                    on_failed_after_ack=lambda message: _record_compact_failure(
+                        session_id, conversation_store, message
+                    ),
+                )
+                return {"queued": False}
+            if compact_truncate:
+                raise OmnigentError(
+                    f"/compact --truncate is not available for the {compact_harness} harness.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            # Unified control dispatch (designs/CLAUDE_NATIVE.md
+            # "Control events dispatch on the runner"): forward /compact
+            # to the bound runner first, regardless of harness. The
+            # runner dispatches by harness — native harnesses inject
+            # /compact into the vendor TUI and return 200 on success or
+            # 5xx on failure. SDK harnesses return 204 (no-op) because
+            # their context is controlled entirely by the vendor harness.
+            # A 4xx/5xx from the runner is surfaced as an error.
+            # TUI budget, not the 5s default: the claude-native handler
+            # drives a delivery-verified slash-command inject, and a timeout
+            # here would surface as an error mid-TUI-compact.
+            runner_result = await _forward_session_change_to_runner(
+                session_id,
+                runner_router,
+                {"type": _COMPACT_TYPE},
+                timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
+            )
+            if runner_result is not None and runner_result.status_code == 200:
+                return {"queued": False}
+            if runner_result is not None and runner_result.status_code != 204:
+                raise OmnigentError(
+                    f"Compaction failed: runner returned {runner_result.status_code}",
+                    code=ErrorCode.INTERNAL_ERROR,
+                )
+            # ``runner_result is None`` means no runner was reachable. For a
+            # native-terminal session /compact MUST run in the vendor TUI —
+            # falling through to server-side in-process compaction is wrong
+            # (it wouldn't compact the terminal's own context) and errors for
+            # a harness that declares no LLM model. A disconnected-but-wakeable
+            # session (runner_asleep / host_asleep) should wake and compact
+            # just like sending a message does, so relaunch the runner the same
+            # way the message-dispatch path does, then retry the forward once.
+            if runner_result is None and (
+                compact_mode is CompactionMode.NATIVE or _is_native_terminal_session(conv)
+            ):
+                conv, woke_client = await _wake_bound_runner_for_control(conv)
+                if woke_client is not None:
+                    # Same TUI-inject budget as the initial forward: a
+                    # just-relaunched runner is the slow case (cold pane, just
+                    # advertised), and the claude-native injector's worst case
+                    # (~16s) exceeds the 5s default — a timeout there returns
+                    # None and would wrongly fall through to the "reconnect"
+                    # 503 while Claude Code is actually compacting.
+                    runner_result = await _forward_session_change_to_runner(
+                        session_id,
+                        runner_router,
+                        {"type": _COMPACT_TYPE},
+                        timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
+                    )
+                    if runner_result is not None and runner_result.status_code == 200:
+                        return {"queued": False}
+                    if runner_result is not None and runner_result.status_code != 204:
+                        raise OmnigentError(
+                            f"Compaction failed: runner returned {runner_result.status_code}",
+                            code=ErrorCode.INTERNAL_ERROR,
+                        )
+                # Native session that couldn't be woken (host offline) — the
+                # runner is the only thing that can compact it, so surface a
+                # clear "reconnect first" error rather than falling through to
+                # in-process compaction (which fails with a confusing
+                # no-LLM-model message).
+                raise OmnigentError(
+                    "Can't compact this session while its runner is offline. "
+                    "Reconnect the session (send a message to wake it), then "
+                    "run /compact again.",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
+            # A 204 from a native harness means the runner has not loaded the
+            # session, which is not the same as the harness lacking /compact.
+            if compact_mode is CompactionMode.NATIVE:
+                raise OmnigentError(
+                    f"The runner did not run /compact for this {compact_harness} session. "
+                    "Send a message to reattach it, then run /compact again.",
+                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                )
+            raise OmnigentError(
+                f"/compact is not available for the {compact_harness} harness."
+                if compact_harness
+                else "/compact is not available for this session type.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if body.type == _RESET_TYPE:
+            await _require_access(
+                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+            )
+            try:
+                reset_request = ResetSessionRequest.model_validate(body.data)
+            except ValueError as exc:
+                raise OmnigentError(
+                    f"Invalid reset payload: {exc}", code=ErrorCode.INVALID_INPUT
+                ) from exc
+            reset_conv = conv
+            reset_summary: Callable[[], Awaitable[str]] | None = None
+            if reset_request.summary == "auto":
+                reset_harness = await asyncio.to_thread(
+                    _resolve_harness, conv, agent_store=agent_store
+                )
+                if compaction_mode_for(reset_harness) is CompactionMode.RESET_REPLAY:
+                    reset_conv, reset_summary = await _reset_summary_generator(conv)
+            reset_result = await _run_reset(reset_conv, reset_request, reset_summary)
             return {
                 "queued": False,
                 "epoch": str(reset_result.epoch),

@@ -41,6 +41,10 @@ function resetWorkspaceMock() {
   ws.rootLoading = false;
   ws.dirLoading = false;
 }
+// The catalog lookup behind /compact needs a QueryClient these renders omit.
+vi.mock("@/lib/harnessCompaction", () => ({
+  useHarnessCompactionMode: () => undefined,
+}));
 vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => {
   const actual = await importOriginal<typeof UseWorkspaceChangedFilesModule>();
   return {

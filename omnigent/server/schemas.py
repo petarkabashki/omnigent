@@ -4201,9 +4201,9 @@ class ResetSessionRequest(BaseModel):
     """
     Body of ``POST /v1/sessions/{id}/reset`` and of the ``reset`` session event.
 
-    :param summary: ``"none"`` for a clean reset, or ``{"text": ...}`` to
-        carry a summary. ``"auto"`` is accepted by the schema but refused
-        until generated summaries are supported.
+    :param summary: ``"none"`` for a clean reset, ``{"text": ...}`` to carry a
+        summary, or ``"auto"`` to generate one. ``"auto"`` is refused for a
+        harness that cannot replay a summary.
     :param stop_running: Interrupt a running turn first instead of returning 409.
     :param pending: ``"reject"`` returns 409 while input is queued;
         ``"drop"`` discards it. ``"carry"`` is not supported yet.

@@ -11,8 +11,11 @@ The runner's dispatch contract (verified in
 
 * Native harnesses inject ``/compact`` into the vendor TUI and return
   **200** on success or **5xx** on failure.
-* SDK harnesses return **204** (no-op) because their context is controlled
-  entirely by the vendor harness; the server surfaces a 400 error.
+* Harnesses outside the runner's native dispatch return **204** (no-op). The
+  server refuses that with a 400 for ``compaction_mode="none"``; from a native
+  mode it means the runner lost the session, and surfaces as a 503.
+* ``compaction_mode="reset_replay"`` never reaches this control: the server
+  summarises through the reset path instead.
 * A failed injection (pane not attached) returns **503**.
 
 These tests pin the Omnigent side of that contract by stubbing the runner's
@@ -21,6 +24,7 @@ HTTP response and asserting the correct server behaviour.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -28,8 +32,17 @@ from typing import Any
 import httpx
 import pytest
 
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.runtime.compaction import CompactionResult
+from omnigent.server.routes._sessions import reset as reset_module
+from omnigent.server.routes.sessions import routes_events
 from tests.server.helpers import create_test_agent
+from tests.server.integration.test_sessions_reset import (
+    SUMMARY_TEXT,
+    _fake_runner,
+    _session_status_cache,
+    create_replay_session,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -173,8 +186,8 @@ async def test_compact_returns_error_when_runner_noops(
         await runner.aclose()
         set_runner_client(None)
 
-    assert resp.status_code == 400, resp.text
-    assert "/compact is not available" in resp.text
+    assert resp.status_code == 503, resp.text
+    assert "not available" not in resp.text
     # Control was still forwarded before the error.
     assert captured == [{"type": "compact"}], (
         f"AP server must forward compact to the runner before returning the error; "
@@ -542,3 +555,237 @@ async def test_compaction_snapshot_persists_without_base64_payloads(
     assert source["media_type"] == "image/png"
     assert source["data"] == "[image/png content omitted from the compaction snapshot]"
     assert messages[1]["content"][0]["text"] == "I can see the screenshot."
+
+
+@pytest.fixture
+def compaction_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the compaction events the route publishes."""
+    seen: list[str] = []
+    for name, kind in (
+        ("_publish_compaction_in_progress", "in_progress"),
+        ("_publish_compaction_completed", "completed"),
+        ("_publish_compaction_failed", "failed"),
+    ):
+        monkeypatch.setattr(
+            routes_events, name, lambda *args, _kind=kind, **kwargs: seen.append(_kind)
+        )
+    return seen
+
+
+async def _compact_replay_session(
+    client: httpx.AsyncClient,
+    *,
+    data: dict[str, Any],
+    summarize_status: int = 200,
+    messages: tuple[str, ...] = ("hello",),
+    status: str | None = None,
+) -> tuple[str, httpx.Response, list[dict[str, Any]]]:
+    """POST compact for a reset_replay session with a fake runner bound."""
+    from omnigent.runtime import set_runner_client
+
+    runner, captured = _fake_runner(200, summarize_status=summarize_status)
+    set_runner_client(runner)
+    try:
+        sid = await create_replay_session(client, messages)
+        if status is not None:
+            _session_status_cache[sid] = status
+        resp = await client.post(
+            f"/v1/sessions/{sid}/events", json={"type": "compact", "data": data}
+        )
+    finally:
+        await runner.aclose()
+        set_runner_client(None)
+        if status is not None:
+            _session_status_cache.pop(sid, None)
+    return sid, resp, captured
+
+
+async def _items_of_type(client: httpx.AsyncClient, sid: str, kind: str) -> list[dict[str, Any]]:
+    items = await client.get(f"/v1/sessions/{sid}/items")
+    assert items.status_code == 200, items.text
+    return [item for item in items.json()["data"] if item["type"] == kind]
+
+
+async def _boundaries(client: httpx.AsyncClient, sid: str) -> list[dict[str, Any]]:
+    return await _items_of_type(client, sid, "context_reset")
+
+
+async def test_compact_reset_replay_summarises_through_the_reset_path(
+    client: httpx.AsyncClient, compaction_events: list[str]
+) -> None:
+    sid, resp, captured = await _compact_replay_session(client, data={})
+
+    assert resp.status_code == 202, resp.text
+    assert [event.get("phase") for event in captured] == ["prepare", "commit"]
+    assert captured[0]["pending"] == "reject"
+    (boundary,) = await _boundaries(client, sid)
+    assert boundary["summary"] == SUMMARY_TEXT
+    assert compaction_events == ["in_progress", "completed"]
+
+
+async def test_compact_reset_replay_failure_leaves_the_conversation_unchanged(
+    client: httpx.AsyncClient, compaction_events: list[str]
+) -> None:
+    sid, resp, captured = await _compact_replay_session(client, data={}, summarize_status=500)
+
+    assert resp.status_code >= 400, resp.text
+    assert captured == []
+    assert await _boundaries(client, sid) == []
+    assert compaction_events == ["in_progress", "failed"]
+    # The POST carried the error, so the transcript does not repeat it.
+    assert await _items_of_type(client, sid, "error") == []
+
+
+async def test_compact_failure_after_the_ack_reaches_the_transcript(
+    client: httpx.AsyncClient,
+    compaction_events: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+    published: list[str] = []
+
+    async def slow_failure(**kwargs: Any) -> str:
+        await release.wait()
+        raise OmnigentError("Set compaction.model", code=ErrorCode.INTERNAL_ERROR)
+
+    monkeypatch.setattr(routes_events, "summarize_for_reset", slow_failure)
+    monkeypatch.setattr(reset_module, "_COMPACT_ACK_GRACE_S", 0.0)
+    monkeypatch.setattr(
+        routes_events, "_publish_error_event", lambda _sid, error: published.append(error.message)
+    )
+
+    sid, resp, captured = await _compact_replay_session(client, data={})
+    assert resp.status_code == 202, resp.text
+    assert compaction_events == ["in_progress"]
+
+    release.set()
+    await asyncio.gather(*reset_module._compact_tasks, return_exceptions=True)
+
+    assert compaction_events == ["in_progress", "failed"]
+    assert published == ["Set compaction.model"]
+    (error,) = await _items_of_type(client, sid, "error")
+    assert error["message"] == "Set compaction.model"
+    assert captured == []
+
+
+async def test_compact_truncate_shortens_an_oversized_message_and_keeps_the_rest(
+    client: httpx.AsyncClient, compaction_events: list[str]
+) -> None:
+    oversized = "HEAD" + "x" * 70_000 + "TAIL"
+
+    sid, resp, _ = await _compact_replay_session(
+        client,
+        data={"truncate": True},
+        summarize_status=500,
+        messages=("first question", "useful answer", oversized),
+    )
+
+    assert resp.status_code == 202, resp.text
+    (boundary,) = await _boundaries(client, sid)
+    summary = boundary["summary"]
+    assert summary.startswith("[0 earlier messages omitted to fit the context window]")
+    assert "user: first question" in summary
+    assert "user: useful answer" in summary
+    assert "user: HEAD" in summary
+    assert summary.endswith("TAIL")
+    assert "characters omitted]" in summary
+    assert len(summary) <= reset_module._RESET_SUMMARY_LIMIT
+
+
+async def test_compact_truncate_needs_no_summariser(
+    client: httpx.AsyncClient, compaction_events: list[str]
+) -> None:
+    sid, resp, _ = await _compact_replay_session(
+        client, data={"truncate": True}, summarize_status=500
+    )
+
+    assert resp.status_code == 202, resp.text
+    (boundary,) = await _boundaries(client, sid)
+    assert boundary["summary"] == (
+        "[0 earlier messages omitted to fit the context window]\n\nuser: hello"
+    )
+    assert compaction_events == ["in_progress", "completed"]
+
+
+async def test_compact_reset_replay_without_a_runner_is_unavailable(
+    client: httpx.AsyncClient,
+) -> None:
+    sid = await create_replay_session(client)
+
+    resp = await client.post(f"/v1/sessions/{sid}/events", json={"type": "compact", "data": {}})
+
+    assert resp.status_code == 503, resp.text
+    assert "runner_unavailable" in resp.text
+    assert await _boundaries(client, sid) == []
+
+
+async def test_compact_of_a_running_session_says_to_wait(
+    client: httpx.AsyncClient, compaction_events: list[str]
+) -> None:
+    sid, resp, captured = await _compact_replay_session(client, data={}, status="running")
+
+    assert resp.status_code == 409, resp.text
+    assert "then run /compact again" in resp.text
+    assert "stop_running" not in resp.text
+    assert captured == []
+    assert await _boundaries(client, sid) == []
+
+
+async def test_compact_with_only_a_tool_pair_left_writes_no_boundary(
+    client: httpx.AsyncClient,
+    compaction_events: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "x" * 4_000}
+    output = {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+    older = {"role": "user", "content": "older"}
+    monkeypatch.setattr(
+        reset_module, "_load_epoch_messages", lambda store, session: [older, call, output]
+    )
+    monkeypatch.setattr(reset_module, "_SUMMARY_INPUT_WINDOW_SHARE", 0.0)
+
+    sid, resp, captured = await _compact_replay_session(client, data={})
+
+    assert resp.status_code == 400, resp.text
+    assert "/compact --truncate" in resp.text
+    assert await _boundaries(client, sid) == []
+    assert not any(event.get("phase") == "commit" for event in captured)
+
+
+async def test_compact_refuses_a_harness_without_compaction_by_name(
+    client: httpx.AsyncClient,
+) -> None:
+    from omnigent.runtime import set_runner_client
+
+    runner, _ = _fake_runner_returning(204)
+    set_runner_client(runner)
+    try:
+        agent = await create_test_agent(
+            client, executor={"type": "omnigent", "config": {"harness": "kimi"}}
+        )
+        sid = await _create_session(client, agent["id"])
+        resp = await client.post(
+            f"/v1/sessions/{sid}/events", json={"type": "compact", "data": {}}
+        )
+    finally:
+        await runner.aclose()
+        set_runner_client(None)
+
+    assert resp.status_code == 400, resp.text
+    assert "/compact is not available for the kimi harness" in resp.text
+
+
+async def test_compact_truncate_is_refused_for_a_native_harness(
+    client: httpx.AsyncClient,
+) -> None:
+    agent = await create_test_agent(
+        client, executor={"type": "omnigent", "config": {"harness": "claude-sdk"}}
+    )
+    sid = await _create_session(client, agent["id"])
+
+    resp = await client.post(
+        f"/v1/sessions/{sid}/events", json={"type": "compact", "data": {"truncate": True}}
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert "--truncate is not available" in resp.text

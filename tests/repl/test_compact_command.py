@@ -82,8 +82,8 @@ async def test_compact_refuses_while_streaming() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_blocked_for_sdk_harness() -> None:
-    """The command is blocked for non-native harnesses with a clear message."""
+async def test_compact_runs_for_a_harness_that_compacts_natively() -> None:
+    """``claude-sdk`` declares native compaction, so the command reaches the session."""
     host = CapturingHost()
     session = _CompactSession(harness="claude-sdk")
 
@@ -95,9 +95,25 @@ async def test_compact_blocked_for_sdk_harness() -> None:
         RichBlockFormatter(),  # type: ignore[arg-type]
     )
 
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_refused_by_name_for_a_harness_without_compaction() -> None:
+    """A mode-none harness is refused with a message that names it."""
+    host = CapturingHost()
+    session = _CompactSession(harness="kimi")
+
+    await handle_slash_command(
+        "/compact",
+        session,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        host,
+        RichBlockFormatter(),  # type: ignore[arg-type]
+    )
+
     assert session.calls == 0
-    assert "only available for native-TUI sessions" in host.text
-    assert "claude-sdk" in host.text
+    assert "/compact is not available for the kimi harness" in host.text
 
 
 @pytest.mark.asyncio

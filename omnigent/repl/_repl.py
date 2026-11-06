@@ -1719,14 +1719,20 @@ class _SessionsChatReplAdapter:
         )
         self._reasoning_effort = session.reasoning_effort
 
-    async def compact(self) -> None:
+    async def compact(self, *, truncate: bool = False) -> None:
         """
         Request explicit context compaction for the current session.
 
+        :param truncate: Keep only recent turns instead of summarising.
         :raises RuntimeError: If no session exists yet.
         """
         if self._session_id is None:
             raise RuntimeError("No active conversation to compact")
+        if truncate:
+            await self._client.sessions.post_event(
+                self._session_id, {"type": "compact", "data": {"truncate": True}}
+            )
+            return
         await self._client.sessions.compact(self._session_id)
 
     def _hydrate_from_session_snapshot(self, session: _SessionSnapshot) -> None:
@@ -6282,7 +6288,7 @@ def _render_context_tree(
 
 @_cmd("/compact", "Compact conversation context now")
 async def _cmd_compact(
-    arg: str,  # noqa: ARG001 — dispatch-contract params
+    arg: str,
     session: _ReplSession,
     client: OmnigentClient,  # noqa: ARG001 — dispatch-contract params
     host: TerminalHost,
@@ -6291,16 +6297,28 @@ async def _cmd_compact(
     """Request proactive context compaction for the current conversation."""
     from rich.text import Text
 
-    from omnigent.harness_aliases import is_native_harness
+    from omnigent.harness_capabilities import CompactionMode
+    from omnigent.harness_plugins import compaction_mode_for
 
     _harness = getattr(session, "harness", None)
-    if _harness is not None and not is_native_harness(_harness):
+    _mode = compaction_mode_for(_harness)
+    if _harness is not None and _mode in (None, CompactionMode.NONE):
         host.output(
             Text.from_markup(
-                f"  [{fmt.muted}]/compact is only available for native-TUI sessions "
-                f"(claude, codex, cursor, …). This session uses the "
-                f"{_harness} harness, which manages its own "
-                f"context window.[/{fmt.muted}]"
+                f"  [{fmt.muted}]/compact is not available for the {_harness} "
+                f"harness, which manages its own context window.[/{fmt.muted}]"
+            )
+        )
+        return
+    _option = arg.strip()
+    if _option not in ("", "--truncate"):
+        host.output(Text.from_markup(f"  [{fmt.muted}]Usage: /compact [--truncate][/{fmt.muted}]"))
+        return
+    if _option and _mode is not CompactionMode.RESET_REPLAY:
+        host.output(
+            Text.from_markup(
+                f"  [{fmt.muted}]/compact --truncate is not available for the {_harness} "
+                f"harness.[/{fmt.muted}]"
             )
         )
         return
@@ -6325,7 +6343,7 @@ async def _cmd_compact(
     # response.compaction.completed events, so we don't output them here
     # — doing so would duplicate them for explicit /compact calls.
     try:
-        result = compact()
+        result = compact(truncate=True) if _option else compact()
         if inspect.isawaitable(result):
             await result
     except Exception as exc:  # noqa: BLE001 — REPL boundary: keep prompt alive

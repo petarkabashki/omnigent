@@ -34,6 +34,7 @@ from omnigent._wrapper_labels import (
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.harness_capabilities import (
     AuthModel,
+    CompactionMode,
     EffortFamily,
     Elicitation,
     ForkHistory,
@@ -339,6 +340,7 @@ _RS = Resume
 _EF = EffortFamily
 _MF = ModelFamily
 _AU = AuthModel
+_CM = CompactionMode
 _FH = ForkHistory
 _ID = InstructionDelivery
 
@@ -369,6 +371,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="Bash",
         shell_tool_prompt=_BASH_PROMPT,
         instruction_delivery=_ID.AGENT_STARTUP_ADDITIVE,
+        compaction_mode=_CM.NATIVE,
     ),
     "codex-native": _C(
         _IM.NATIVE_TUI,
@@ -384,6 +387,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="shell",
         shell_tool_prompt=_SHELL_PROMPT,
         instruction_delivery=_ID.AGENT_STARTUP_ADDITIVE,
+        compaction_mode=_CM.NATIVE,
     ),
     # streaming is declared True unless a live bench run proves a harness does
     # NOT emit token-level deltas. Only kiro-native is so proven (0 deltas over
@@ -405,6 +409,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="Bash",
         shell_tool_prompt=_BASH_PROMPT,
         instruction_delivery=_ID.AGENT_STARTUP_ADDITIVE,
+        compaction_mode=_CM.NATIVE,
     ),
     # streaming=False is LIVE-VERIFIED: a bench run observed 0 text deltas.
     "cursor-native": _C(
@@ -421,6 +426,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         # No shell-tool provocation: cursor-native was intentionally absent from
         # the bench's table (its tool probe is skipped), so leave shell_tool_* None.
         instruction_delivery=_ID.NOT_DELIVERED,
+        compaction_mode=_CM.NATIVE,
     ),
     # kiro_native_permissions.py: "TUI ACP recorder -> web elicitation".
     # streaming=False is LIVE-VERIFIED: a full SSE capture recorded 0 text
@@ -485,6 +491,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="run_shell_command",
         shell_tool_prompt=_SHELL_PROMPT,
         instruction_delivery=_ID.NOT_DELIVERED,
+        compaction_mode=_CM.NATIVE,
     ),
     "kimi-native": _C(
         _IM.NATIVE_TUI,
@@ -523,6 +530,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         # shell_tool_* stay None.
         # The composed prompt is written once per launch to the per-session AGENTS.md.
         instruction_delivery=_ID.COMPOSED_SESSION_SNAPSHOT,
+        compaction_mode=_CM.NATIVE,
     ),
     # devin-native wraps the resident `devin` TUI. Every axis below was
     # live-verified against devin 3000.10.21:
@@ -570,6 +578,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         # Windsurf rule in the workspace (Devin's only per-turn system-prompt
         # channel; it has no --append-system-prompt). See write_devin_agent_rule.
         instruction_delivery=_ID.AGENT_STARTUP_ADDITIVE,
+        compaction_mode=_CM.NATIVE,
     ),
     "hermes-native": _C(
         _IM.NATIVE_TUI,
@@ -585,6 +594,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="terminal",
         shell_tool_prompt=_SHELL_PROMPT,
         instruction_delivery=_ID.NOT_DELIVERED,
+        compaction_mode=_CM.NATIVE,
     ),
     # SDK / subprocess harnesses (run the vendor model directly). The first four
     # are bench-verified interrupt=streaming=True.
@@ -599,6 +609,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.COMPOSED_SESSION_SNAPSHOT,
+        compaction_mode=_CM.NATIVE,
     ),
     "codex": _C(
         _IM.CLI_SUBPROCESS,
@@ -611,6 +622,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "pi": _C(
         _IM.CLI_SUBPROCESS,
@@ -623,6 +635,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "openai-agents": _C(
         _IM.SDK_IN_PROCESS,
@@ -647,6 +660,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "antigravity": _C(
         _IM.SDK_IN_PROCESS,
@@ -676,6 +690,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "goose": _C(
         _IM.ACP_SUBPROCESS,
@@ -688,6 +703,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "qwen": _C(
         _IM.ACP_SUBPROCESS,
@@ -700,6 +716,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     "kimi": _C(
         _IM.CLI_SUBPROCESS,
@@ -736,6 +753,7 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,
+        compaction_mode=_CM.RESET_REPLAY,
     ),
     # open-responses is resolved via an alternate path, but its executor
     # (omnigent/inner/open_responses_sdk.py) is concrete: interrupt_session()
@@ -1250,6 +1268,19 @@ def harness_capabilities() -> dict[str, HarnessCapabilities]:
     harness do?".
     """
     return _merge_dict(lambda contribution: contribution.capabilities)
+
+
+def compaction_mode_for(harness: str | None) -> CompactionMode | None:
+    """Return how ``/compact`` runs for ``harness``; ``None`` when it declares nothing.
+
+    :param harness: A harness id or alias, e.g. ``"claude"`` or ``"acp:grok"``.
+    :returns: The declared mode, or ``None`` for an unset or undeclared harness.
+    """
+    if not harness:
+        return None
+    base = "acp" if harness.startswith("acp:") else harness
+    capabilities = harness_capabilities().get(harness_aliases().get(base, base))
+    return capabilities.compaction_mode if capabilities is not None else None
 
 
 def harness_catalog() -> list[dict[str, object]]:

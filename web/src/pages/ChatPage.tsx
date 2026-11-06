@@ -86,7 +86,8 @@ import {
 } from "@/lib/permissionsApi";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { toast } from "sonner";
-import { ApiError, createSideChat, retrySession } from "@/lib/sessionsApi";
+import { useHarnessCompactionMode } from "@/lib/harnessCompaction";
+import { ApiError, createSideChat, postEvent, retrySession } from "@/lib/sessionsApi";
 import { getProject } from "@/lib/projectsApi";
 import { PROJECT_LABEL_KEY } from "@/lib/sessionListCache";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
@@ -2893,7 +2894,11 @@ function ComposerImpl(
   // codex-native), which inject the slash command into the terminal, and
   // for claude-sdk, whose runner sends /compact to the live SDK client to
   // trigger native compaction. Other SDK harnesses don't support it yet.
-  const showCompact = isNativeWrapper || sessionHarness === "claude-sdk";
+  const compactionMode = useHarnessCompactionMode(sessionHarness);
+  const showCompact =
+    compactionMode !== undefined
+      ? compactionMode !== "none"
+      : isNativeWrapper || sessionHarness === "claude-sdk";
   const composerServerInfo = useServerInfo();
   // /clear runs the harness's own /clear in the session terminal, which moves
   // the terminal onto a fresh session the view then follows. Older servers
@@ -3176,6 +3181,10 @@ function ComposerImpl(
           setCommandError("/compact is not supported for this agent type");
           return true;
         }
+        if (compactionMode === "reset_replay" && arg && arg !== "--truncate") {
+          setCommandError("Usage: /compact [--truncate]");
+          return true;
+        }
         if (
           (sessionHarness === "codex-native" ||
             sessionHarness === "claude-sdk" ||
@@ -3220,12 +3229,13 @@ function ComposerImpl(
           onSend(command);
           return true;
         }
-        void useChatStore
-          .getState()
-          .compact()
-          .catch((err: unknown) => {
-            setCommandError(err instanceof Error ? err.message : "Compact failed");
-          });
+        const compactRequest =
+          arg === "--truncate" && chat.conversationId
+            ? postEvent(chat.conversationId, { type: "compact", data: { truncate: true } })
+            : useChatStore.getState().compact();
+        void compactRequest.catch((err: unknown) => {
+          setCommandError(err instanceof Error ? err.message : "Compact failed");
+        });
         return true;
       }
       case "/effort": {

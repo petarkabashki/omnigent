@@ -5575,7 +5575,7 @@
               }
             ],
             "default": "none",
-            "description": "`\"none\"` for a clean reset, or `{\"text\": ...}` to carry a summary. `\"auto\"` is accepted by the schema but refused until generated summaries are supported.",
+            "description": "`\"none\"` for a clean reset, `{\"text\": ...}` to carry a summary, or `\"auto\"` to generate one. `\"auto\"` is refused for a harness that cannot replay a summary.",
             "title": "Summary"
           }
         },

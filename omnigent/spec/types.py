@@ -672,10 +672,13 @@ class CompactionConfig:
         from compaction. Items within this window are never cleared or
         summarized — the agent always has verbatim access to its most
         recent work, e.g. ``5``.
+    :param model: Model that writes the ``/compact`` summary, e.g.
+        ``"anthropic/claude-haiku-4-5"``. ``None`` uses the session model.
     """
 
     trigger_threshold: float = 0.8
     recent_window: int = 5
+    model: str | None = None
 
 
 @dataclass

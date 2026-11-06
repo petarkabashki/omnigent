@@ -1,7 +1,8 @@
 """In-place context reset for a session (``POST /v1/sessions/{id}/reset``).
 
 The session id, items and children stay; a ``context_reset`` boundary item
-starts a new context epoch. The runner checks and drops its caches
+starts a new context epoch. Generic ``/compact`` is a reset that carries a
+generated summary over the boundary. The runner checks and drops its caches
 (``prepare``), the server persists the boundary, then the runner drops any
 history cached meanwhile and releases the harness (``commit``), and the server
 publishes ``session.reset``. A native session also loses its vendor session id,
@@ -53,11 +54,26 @@ class _InFlightReset:
 _reset_in_flight: dict[str, _InFlightReset] = {}
 
 _BUSY_STATUSES = ("running", "waiting")
+#: Room ``_shorten_middle`` leaves for its note; fits any realistic character count.
+_SHORTENED_NOTE_RESERVE = 40
 _STOP_WAIT_S = 10.0
 _STOP_POLL_S = 0.2
 #: Forward budget for reset controls; ``commit`` releases the harness process, and
 #: a codex ``prepare`` stops the app-server and reaps what survives it.
 RESET_FORWARD_TIMEOUT_S = 50.0
+#: A boundary's carried summary, matching ``ResetSummaryText.text``.
+_RESET_SUMMARY_LIMIT = 64_000
+#: Share of the model's context window the summariser input may fill.
+_SUMMARY_INPUT_WINDOW_SHARE = 0.7
+#: Recent turns kept verbatim by ``/compact --truncate``.
+_TRUNCATE_TAIL_MESSAGES = 10
+#: How long a compact POST waits to report a quick failure before it acks.
+_COMPACT_ACK_GRACE_S = 10.0
+#: ``/compact`` has no reset overrides, so its refusals only name what to wait for.
+_COMPACT_RETRY = "then run /compact again"
+#: Background compacts; the loop holds only weak references to tasks.
+# custom-lint: disable-next=workspace-scoped-cache -- task objects are globally unique
+_compact_tasks: set[asyncio.Task[None]] = set()
 
 #: Native harnesses whose runner relaunches the terminal on a fresh vendor session.
 IN_PLACE_RESET_NATIVE_HARNESSES = frozenset({"claude-native", "codex-native"})
@@ -131,8 +147,8 @@ def count_live_running_work(
     return RunningWork(subagents=subagents, background_tasks=background)
 
 
-def running_work_message(work: RunningWork) -> str:
-    """Return the refusal that names ``acknowledge_running_work=true``."""
+def running_work_message(work: RunningWork, *, compact: bool = False) -> str:
+    """Return the refusal: the override for a reset, what to wait for on ``/compact``."""
     parts: list[str] = []
     if work.subagents:
         noun = "sub-agent" if work.subagents == 1 else "sub-agents"
@@ -140,7 +156,10 @@ def running_work_message(work: RunningWork) -> str:
     if work.background_tasks:
         noun = "background task" if work.background_tasks == 1 else "background tasks"
         parts.append(f"{work.background_tasks} {noun}")
-    return f"The session has {' and '.join(parts)}; retry with acknowledge_running_work=true"
+    busy = " and ".join(parts)
+    if compact:
+        return f"The session has {busy}; wait for that work to finish, {_COMPACT_RETRY}"
+    return f"The session has {busy}; retry with acknowledge_running_work=true"
 
 
 def running_work_snapshot(
@@ -296,6 +315,9 @@ async def run_context_reset(
     dispatching: Callable[[], bool] = lambda: False,
     created_by: str | None = None,
     running_work_of: Callable[[], Awaitable[RunningWork]] | None = None,
+    generate_summary: Callable[[], Awaitable[str]] | None = None,
+    on_gates_passed: Callable[[], None] | None = None,
+    compact: bool = False,
 ) -> ResetSessionResponse:
     """
     Reset a session's model context in place.
@@ -312,13 +334,22 @@ async def run_context_reset(
     :param dispatching: Whether a message dispatch is still in flight here.
     :param running_work_of: Live sub-agent and background-task counts.
         ``None`` counts nothing, for a caller that has no children to check.
+    :param generate_summary: Writes the text for ``summary='auto'``, after the
+        gates and before the runner is touched, so a failure changes nothing.
+        ``None`` refuses ``auto``, for a harness that cannot replay a summary.
+    :param on_gates_passed: Called once the session is known to be resettable.
+    :param compact: The caller is ``/compact``, whose refusals can't name
+        request fields the command does not have.
     :returns: The new epoch and boundary item id.
     :raises OmnigentError: 409 for a busy turn, pending input, live
         sub-agents or background work, an unsupported harness, or a
         concurrent reset; 503 when no runner is reachable.
     """
-    if reset.summary == "auto":
-        raise _unsupported("summary 'auto' is not supported yet; use 'none' or {'text': ...}")
+    if reset.summary == "auto" and generate_summary is None:
+        raise _unsupported(
+            "summary 'auto' is not supported for this session's harness; "
+            "use 'none' or {'text': ...}"
+        )
     if reset.pending == "carry":
         raise _unsupported("pending 'carry' is not supported yet; use 'reject' or 'drop'")
     stable_id = (
@@ -337,9 +368,9 @@ async def run_context_reset(
             "Reset in place is SDK-only for now; native support is planned.",
             code=ErrorCode.RESET_UNSUPPORTED,
         )
-    if native_harness is not None and isinstance(reset.summary, ResetSummaryText):
+    if native_harness is not None and reset.summary != "none":
         raise _unsupported(
-            f"summary text is not supported for {native_harness} yet; use summary 'none'"
+            f"summaries are not supported for {native_harness} yet; use summary 'none'"
         )
     running = _reset_in_flight.get(session_id)
     if running is not None:
@@ -368,6 +399,9 @@ async def run_context_reset(
             created_by=created_by,
             native_harness=native_harness,
             running_work_of=running_work_of or _no_running_work,
+            generate_summary=generate_summary,
+            on_gates_passed=on_gates_passed,
+            compact=compact,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):
@@ -401,21 +435,32 @@ async def _reset_in_place(
     created_by: str | None,
     native_harness: str | None,
     running_work_of: Callable[[], Awaitable[RunningWork]],
+    generate_summary: Callable[[], Awaitable[str]] | None,
+    on_gates_passed: Callable[[], None] | None,
+    compact: bool,
 ) -> ResetSessionResponse:
     # A message that passed the input gate before the reset registered may
     # still be on its way to the runner; let it land so the busy check sees it.
     await _wait_until(lambda: not dispatching(), "A message is still being delivered")
-    await _ensure_idle(reset, status_of, interrupt)
-    await _ensure_no_running_work(reset, running_work_of)
-    if await has_server_pending() or pending_inputs.has_pending(session_id):
-        if reset.pending == "reject":
-            raise OmnigentError(
-                "The session has queued input; retry with pending='drop'",
-                code=ErrorCode.PENDING_INPUTS,
-            )
-        await drop_server_pending()
-        while pending_inputs.resolve_oldest(session_id) is not None:
-            pass
+    await _ensure_idle(reset, status_of, interrupt, compact=compact)
+    await _ensure_no_running_work(reset, running_work_of, compact=compact)
+    await _settle_pending_inputs(
+        reset, session_id, has_server_pending, drop_server_pending, compact=compact
+    )
+    if on_gates_passed is not None:
+        on_gates_passed()
+    summary = await _resolve_summary(reset, generate_summary)
+    # A summary can take minutes. ``commit`` would kill a turn begun meanwhile,
+    # and its items would land in neither the summary nor the next context.
+    if status_of() in _BUSY_STATUSES:
+        raise OmnigentError(
+            "A turn started while the summary was being written; the conversation is "
+            "unchanged. Retry when it finishes.",
+            code=ErrorCode.SESSION_BUSY,
+        )
+    await _settle_pending_inputs(
+        reset, session_id, has_server_pending, drop_server_pending, compact=compact
+    )
     runner_reached = await _forward_reset(reset, forward, wake, conv, native_harness)
     # Ahead of the boundary, so a conflict leaves no epoch that resumes the old chat.
     if native_harness is not None and not await asyncio.to_thread(
@@ -428,7 +473,6 @@ async def _reset_in_place(
             "The session's native session id changed during the reset; retry.",
             code=ErrorCode.CONFLICT,
         )
-    summary = reset.summary.text if isinstance(reset.summary, ResetSummaryText) else None
     item = await asyncio.to_thread(
         conversation_store.append_context_reset,
         session_id,
@@ -456,6 +500,286 @@ async def _reset_in_place(
         ).model_dump()
     )
     return ResetSessionResponse(session_id=session_id, epoch=epoch, boundary_item_id=item.id)
+
+
+async def _settle_pending_inputs(
+    reset: ResetSessionRequest,
+    session_id: str,
+    has_server_pending: Callable[[], Awaitable[bool]],
+    drop_server_pending: Callable[[], Awaitable[None]],
+    *,
+    compact: bool = False,
+) -> None:
+    """Refuse queued input, or drop it when the request said to."""
+    if not (await has_server_pending() or pending_inputs.has_pending(session_id)):
+        return
+    if reset.pending == "reject":
+        raise OmnigentError(
+            f"The session has queued input; wait for it to be handled, {_COMPACT_RETRY}"
+            if compact
+            else "The session has queued input; retry with pending='drop'",
+            code=ErrorCode.PENDING_INPUTS,
+        )
+    await drop_server_pending()
+    while pending_inputs.resolve_oldest(session_id) is not None:
+        pass
+
+
+async def _resolve_summary(
+    reset: ResetSessionRequest,
+    generate_summary: Callable[[], Awaitable[str]] | None,
+) -> str | None:
+    """Return the text the boundary carries, generating it for ``summary='auto'``."""
+    if isinstance(reset.summary, ResetSummaryText):
+        return reset.summary.text
+    if reset.summary != "auto" or generate_summary is None:
+        return None
+    summary = (await generate_summary()).strip()
+    if not summary:
+        raise OmnigentError(
+            "Compaction failed: the summariser returned no text; the conversation "
+            "is unchanged. Retry, or run /compact --truncate.",
+            code=ErrorCode.INTERNAL_ERROR,
+        )
+    return summary[:_RESET_SUMMARY_LIMIT]
+
+
+def _load_epoch_messages(
+    conversation_store: ConversationStore, session_id: str
+) -> list[dict[str, Any]]:
+    """Return the current epoch as input items, or refuse when there is none."""
+    from omnigent.runtime.prompt import history_to_input_items
+    from omnigent.runtime.workflow import _load_initial_history
+
+    messages = history_to_input_items(_load_initial_history(conversation_store, session_id).items)
+    if not messages:
+        raise OmnigentError("There is nothing to compact yet.", code=ErrorCode.INVALID_INPUT)
+    return messages
+
+
+def _cap_oldest_messages(
+    messages: list[dict[str, Any]], *, model: str, token_limit: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop oldest messages until ``messages`` fit; return them and the drop count."""
+    from omnigent.runtime.compaction import _pair_aware_drop_count, count_tokens
+
+    try:
+        token_counts = [count_tokens([message], model) for message in messages]
+    except Exception:
+        _logger.info("Falling back to a size estimate for the summariser input", exc_info=True)
+        token_counts = [len(json.dumps(message, default=str)) // 4 for message in messages]
+    remaining = sum(token_counts)
+    start = 0
+    while remaining > token_limit:
+        drop_count = _pair_aware_drop_count(messages[start:])
+        # The final message or tool pair stays, whatever its size.
+        if start + drop_count >= len(messages):
+            break
+        remaining -= sum(token_counts[start : start + drop_count])
+        start += drop_count
+    return messages[start:], start
+
+
+async def summarize_for_reset(
+    *,
+    session_id: str,
+    conversation_store: ConversationStore,
+    model: str,
+    runner_client: Any | None,
+) -> str:
+    """
+    Summarise the current epoch with the runner's credentials.
+
+    :param model: The provider-prefixed model that writes the summary.
+    :param runner_client: The client for the session's runner. The server's
+        own credentials are never a fallback, so ``None`` is refused.
+    :returns: The summary text.
+    :raises OmnigentError: ``RUNNER_UNAVAILABLE`` without a runner; an
+        actionable error when the summariser fails.
+    """
+    from omnigent.llms.context_window import get_model_context_window
+    from omnigent.runtime.compaction import (
+        _clear_binary_content,
+        _clear_tool_results,
+        summarize_history,
+    )
+
+    if runner_client is None:
+        raise OmnigentError(
+            "Can't summarise this session while its runner is offline. Reconnect the "
+            "session (send a message to wake it), then run /compact again.",
+            code=ErrorCode.RUNNER_UNAVAILABLE,
+        )
+    messages = await asyncio.to_thread(_load_epoch_messages, conversation_store, session_id)
+    last_index = len(messages)
+    messages = _clear_binary_content(_clear_tool_results(messages, last_index), last_index)
+    context_window = get_model_context_window(model)
+    capped, omitted = await asyncio.to_thread(
+        _cap_oldest_messages,
+        messages,
+        model=model,
+        token_limit=int(context_window * _SUMMARY_INPUT_WINDOW_SHARE),
+    )
+    if omitted:
+        if not any(_message_text(message) for message in capped):
+            raise OmnigentError(
+                "Compaction failed: only tool activity fits the summariser's input, so there "
+                "is nothing to summarise. The conversation is unchanged. Run /compact "
+                "--truncate, or set compaction.model in the agent spec to a model with a "
+                "larger context window.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        capped = [_omission_note(omitted), *capped]
+    try:
+        result = await summarize_history(
+            capped, None, model, runner_client=runner_client, conversation_id=session_id
+        )
+    except OmnigentError:
+        raise
+    except Exception as exc:
+        raise OmnigentError(
+            f"Compaction failed: the summariser could not use {model} on this runner "
+            f"({_failure_detail(exc)}). The conversation is unchanged. Set compaction.model "
+            "in the agent spec to a model the runner has credentials for, or run "
+            "/compact --truncate.",
+            code=ErrorCode.INTERNAL_ERROR,
+        ) from exc
+    return str(result.get("text") or "")
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Name a failure; timeouts and cancellations stringify to nothing."""
+    return str(exc) or type(exc).__name__
+
+
+def _omission_note(omitted: int) -> dict[str, Any]:
+    """Return the message that tells the summariser its input is incomplete."""
+    return {
+        "role": "user",
+        "content": (
+            f"[{omitted} earlier messages were omitted from this conversation to fit the "
+            "summariser's input. Say so in the summary; do not guess what they contained.]"
+        ),
+    }
+
+
+def _message_text(message: Mapping[str, Any]) -> str:
+    """Return a message's visible text; tool items and binary blocks have none."""
+    if "role" not in message:
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    parts = content if isinstance(content, list) else []
+    return "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+
+
+def truncation_summary(session_id: str, conversation_store: ConversationStore) -> str:
+    """
+    Build the carry-over for ``/compact --truncate``, which needs no LLM.
+
+    A message that would fill the summary alone is shortened, so one huge paste
+    can't push out the turns around it.
+
+    :returns: The omission marker followed by the most recent text turns, within
+        the boundary's summary limit.
+    """
+    messages = [
+        (message["role"], text)
+        for message in _load_epoch_messages(conversation_store, session_id)
+        if (text := _message_text(message))
+    ]
+    budget = _RESET_SUMMARY_LIMIT - len(_omission_marker(len(messages))) - 2
+    line_limit = budget // 2 - 2
+    kept: list[str] = []
+    for role, text in reversed(messages[-_TRUNCATE_TAIL_MESSAGES:]):
+        line = _shorten_middle(f"{role}: {text}", line_limit)
+        budget -= len(line) + 2
+        if budget < 0:
+            break
+        kept.insert(0, line)
+    return "\n\n".join([_omission_marker(len(messages) - len(kept)), *kept])
+
+
+def _shorten_middle(text: str, limit: int) -> str:
+    """Cut ``text`` to ``limit`` characters, keeping both ends and saying how much went."""
+    if len(text) <= limit:
+        return text
+    kept = limit - _SHORTENED_NOTE_RESERVE
+    head = kept // 2
+    note = f"\n[{len(text) - kept} characters omitted]\n"
+    return f"{text[:head]}{note}{text[head - kept :]}"
+
+
+def _omission_marker(omitted: int) -> str:
+    return f"[{omitted} earlier messages omitted to fit the context window]"
+
+
+async def start_compact_reset(
+    *,
+    run_reset: Callable[[Callable[[], None]], Awaitable[object]],
+    on_started: Callable[[], None],
+    on_completed: Callable[[], None],
+    on_failed: Callable[[], None],
+    on_failed_after_ack: Callable[[str], Awaitable[None]] | None = None,
+) -> None:
+    """
+    Run a compacting reset without tying its summary to the POST.
+
+    A refusal at the gates raises here, as does a failure within a short grace
+    so the caller sees why. Beyond that the POST acks, as it does for a native
+    compact, and the outcome arrives through the compaction SSE events.
+
+    :param run_reset: Runs the reset, given the gates-passed callback.
+    :param on_started: Publishes that compaction began, once the gates pass.
+    :param on_completed: Publishes success.
+    :param on_failed: Publishes failure, for any failure after ``on_started``.
+    :param on_failed_after_ack: Shows the user why, once the POST can no longer.
+    """
+    gates_passed = asyncio.Event()
+    caller_waiting = True
+
+    def _gates_passed() -> None:
+        on_started()
+        gates_passed.set()
+
+    async def _run() -> None:
+        try:
+            await run_reset(_gates_passed)
+        except BaseException as exc:
+            if gates_passed.is_set():
+                _logger.warning("Compacting reset failed", exc_info=True)
+                on_failed()
+                if on_failed_after_ack and not caller_waiting and isinstance(exc, Exception):
+                    await on_failed_after_ack(_compact_failure_message(exc))
+            raise
+        on_completed()
+
+    def _forget(finished: asyncio.Task[None]) -> None:
+        _compact_tasks.discard(finished)
+        if not finished.cancelled():
+            finished.exception()  # Reported through the event when nobody awaits it.
+
+    task = asyncio.create_task(_run())
+    _compact_tasks.add(task)
+    task.add_done_callback(_forget)
+    gate_waiter = asyncio.create_task(gates_passed.wait())
+    try:
+        await asyncio.wait({task, gate_waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if not task.done():
+            await asyncio.wait({task}, timeout=_COMPACT_ACK_GRACE_S)
+    finally:
+        gate_waiter.cancel()
+        caller_waiting = False
+    if task.done():
+        task.result()
+
+
+def _compact_failure_message(exc: Exception) -> str:
+    """Return what the user reads about a compaction the POST already acked."""
+    if isinstance(exc, OmnigentError):
+        return exc.message
+    return f"Compaction failed: {_failure_detail(exc)}"
 
 
 def _clear_native_session_id(conversation_store: ConversationStore, session_id: str) -> bool:
@@ -487,12 +811,17 @@ async def _ensure_idle(
     reset: ResetSessionRequest,
     status_of: Callable[[], str | None],
     interrupt: Callable[[], Awaitable[None]],
+    *,
+    compact: bool = False,
 ) -> None:
     if status_of() not in _BUSY_STATUSES:
         return
     if not reset.stop_running:
         raise OmnigentError(
-            "The session is running; retry with stop_running=true", code=ErrorCode.SESSION_BUSY
+            f"The session is running; wait for the turn to finish, {_COMPACT_RETRY}"
+            if compact
+            else "The session is running; retry with stop_running=true",
+            code=ErrorCode.SESSION_BUSY,
         )
     await interrupt()
     await _wait_until(
@@ -503,6 +832,8 @@ async def _ensure_idle(
 async def _ensure_no_running_work(
     reset: ResetSessionRequest,
     running_work_of: Callable[[], Awaitable[RunningWork]],
+    *,
+    compact: bool = False,
 ) -> None:
     """Refuse while sub-agents or background work are still live.
 
@@ -515,7 +846,7 @@ async def _ensure_no_running_work(
         return
     if reset.acknowledge_running_work:
         return
-    raise OmnigentError(running_work_message(work), code=ErrorCode.SESSION_BUSY)
+    raise OmnigentError(running_work_message(work, compact=compact), code=ErrorCode.SESSION_BUSY)
 
 
 async def _forward_reset(

@@ -51,6 +51,7 @@ of the agent YAML.
 | `cancellable` | Optional | Whether the session can be cancelled. Defaults to `true`. |
 | `timers` | Optional | Whether timer tools are exposed. Defaults to `false`. |
 | `tool_groups` | Optional | Opt out of framework-owned tool groups the agent cannot use. Every group defaults to `true`. |
+| `compaction` | Optional | When context is compacted, and which model writes the `/compact` summary. See [Compaction](#compaction). |
 
 ## Executor
 
@@ -826,6 +827,26 @@ tools:
 
 Use `tools.<name>: inherit` to inherit a tool from a parent agent, or
 `tools.<name>: self` / `spec: self` for a sub-agent that clones the parent spec.
+
+## Compaction
+
+```yaml
+compaction:
+  trigger_threshold: 0.8
+  recent_window: 5
+  model: anthropic/claude-haiku-4-5
+```
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `trigger_threshold` | `0.8` | Fraction of the model's context window at which proactive compaction fires. |
+| `recent_window` | `5` | Recent LLM iterations that are never cleared or summarized. |
+| `model` | Session model | Provider-prefixed model that writes the `/compact` summary. |
+
+The summary runs on the session's runner with that runner's credentials, so
+`compaction.model` must be a model the runner can reach. Set it when the session
+model is unavailable to the summariser, or to a cheaper model. A non-empty string
+is required when the field is present. `/compact --truncate` uses no model.
 
 ## Policies
 

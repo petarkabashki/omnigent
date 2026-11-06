@@ -13,6 +13,7 @@ from omnigent import harness_plugins as hp
 from omnigent.harness_availability import CODEX_CANONICAL_HARNESSES
 from omnigent.harness_capabilities import (
     AuthModel,
+    CompactionMode,
     EffortFamily,
     Elicitation,
     ForkHistory,
@@ -142,6 +143,7 @@ def test_optional_bench_capabilities_default_to_unknown() -> None:
     assert capability.shell_tool_name is None
     assert capability.shell_tool_prompt is None
     assert capability.instruction_delivery is InstructionDelivery.UNKNOWN
+    assert capability.compaction_mode is CompactionMode.NONE
     assert capability.as_dict() == {
         "integration_mode": "sdk-in-process",
         "elicitation": "none",
@@ -160,6 +162,7 @@ def test_optional_bench_capabilities_default_to_unknown() -> None:
         "shell_tool_name": None,
         "shell_tool_prompt": None,
         "instruction_delivery": "unknown",
+        "compaction_mode": "none",
     }
 
 

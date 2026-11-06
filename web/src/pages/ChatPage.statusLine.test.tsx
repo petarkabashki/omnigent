@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The catalog lookup behind /compact needs a QueryClient these renders omit.
+vi.mock("@/lib/harnessCompaction", () => ({
+  useHarnessCompactionMode: () => undefined,
+}));
 vi.mock("@/hooks/useSkills", () => ({
   useSkills: () => ({ skills: [], skillsStatus: "ready", refetch: vi.fn() }),
 }));

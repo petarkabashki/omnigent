@@ -2236,6 +2236,12 @@ def _parse_compaction(
     """
     if raw is None:
         return None
+    model = raw.get("model")
+    if model is not None and not (isinstance(model, str) and model.strip()):
+        raise OmnigentError(
+            f"compaction.model must be a non-empty string, got {model!r}",
+            code=ErrorCode.INVALID_INPUT,
+        )
     return CompactionConfig(
         trigger_threshold=_parse_float_field(
             raw.get("trigger_threshold", 0.8),
@@ -2245,6 +2251,7 @@ def _parse_compaction(
             raw.get("recent_window", 5),
             "compaction.recent_window",
         ),
+        model=model.strip() if isinstance(model, str) else None,
     )
 
 

@@ -180,6 +180,12 @@ vi.mock("@/hooks/RunnerHealthProvider", async (importOriginal) => ({
   ...(await importOriginal<typeof RunnerHealthProviderModule>()),
   useSessionHostOnline: () => undefined,
 }));
+// The catalog lookup behind /compact needs a QueryClient; bare renders report
+// an unknown mode unless a test sets one.
+const compactionModeMock = vi.hoisted(() => vi.fn((): string | undefined => undefined));
+vi.mock("@/lib/harnessCompaction", () => ({
+  useHarnessCompactionMode: compactionModeMock,
+}));
 vi.mock("@/lib/agentLabels", async (importOriginal) => ({
   ...(await importOriginal<typeof AgentLabelsModule>()),
   useBrainHarnessLabels: () => ({
@@ -918,6 +924,39 @@ describe("Composer slash-command menu", () => {
     // Built-ins are inserted first, so "/compact" tops the list and is the
     // default highlight — the crux of the fix (was -1 / nothing selected).
     expect(activeRow()?.textContent).toContain("/compact");
+  });
+
+  it.each([
+    ["reset_replay", true],
+    ["native", true],
+    ["none", false],
+  ] as const)("offers /compact by catalog mode %s", (mode, offered) => {
+    const { sessionHarness } = useChatStore.getState();
+    onTestFinished(() => {
+      useChatStore.setState({ sessionHarness });
+      compactionModeMock.mockReturnValue(undefined);
+    });
+    useChatStore.setState({ sessionHarness: "goose" });
+    compactionModeMock.mockReturnValue(mode);
+    render(<Composer {...composerProps()} />);
+    fireEvent.change(textarea(), { target: { value: "/comp" } });
+    expect((activeRow()?.textContent ?? "").includes("/compact")).toBe(offered);
+  });
+
+  it("rejects unknown /compact arguments on a reset-replay harness", () => {
+    const { sessionHarness } = useChatStore.getState();
+    onTestFinished(() => {
+      useChatStore.setState({ sessionHarness });
+      compactionModeMock.mockReturnValue(undefined);
+    });
+    useChatStore.setState({ sessionHarness: "goose" });
+    compactionModeMock.mockReturnValue("reset_replay");
+    const compact = vi.spyOn(useChatStore.getState(), "compact").mockResolvedValue();
+    render(<Composer {...composerProps()} />);
+    fireEvent.change(textarea(), { target: { value: "/compact keep todos " } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(screen.getByText("Usage: /compact [--truncate]")).toBeVisible();
+    expect(compact).not.toHaveBeenCalled();
   });
 
   it("Tab completes the highlighted skill into the textarea", () => {

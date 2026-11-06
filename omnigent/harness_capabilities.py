@@ -88,6 +88,14 @@ class ForkHistory(str, Enum):
     PREAMBLE = "preamble"  # replay prior turns as a text preamble (server-backed vendors)
 
 
+class CompactionMode(str, Enum):
+    """How ``/compact`` is carried out for a harness."""
+
+    NATIVE = "native"  # the vendor's own compaction, reached through the runner
+    RESET_REPLAY = "reset_replay"  # summarise, reset, replay the summary on the next turn
+    NONE = "none"  # no way to compact without losing or misrepresenting context
+
+
 class InstructionDelivery(str, Enum):
     """Whether and how ``AgentSpec.instructions`` reach the vendor agent.
 
@@ -128,6 +136,9 @@ class HarnessCapabilities:
         Optional capability fields use ``None`` when the harness makes no claim;
         the bench reports those declarations as ``UNKNOWN`` rather than assuming
         the capability is unsupported.
+    :param compaction_mode: How ``/compact`` is carried out. ``reset_replay`` is
+        declared only for a harness whose relaunched executor is proven to send
+        the summary and no pre-boundary text. Drives the server route and clients.
     :param fork_history: How a fork / in-place agent switch carries prior history
         into the harness — ``none`` (fresh), ``rebuild`` (rebuild the vendor's
         resumable session file from copied items), or ``preamble`` (replay prior
@@ -156,6 +167,7 @@ class HarnessCapabilities:
     live_queue: bool | None = None
     images: bool | None = None
     compaction: bool | None = None
+    compaction_mode: CompactionMode = CompactionMode.NONE
     fork_history: ForkHistory = ForkHistory.NONE
     shell_tool_name: str | None = None
     shell_tool_prompt: str | None = None
@@ -177,6 +189,7 @@ class HarnessCapabilities:
             "live_queue": self.live_queue,
             "images": self.images,
             "compaction": self.compaction,
+            "compaction_mode": self.compaction_mode.value,
             "fork_history": self.fork_history.value,
             "shell_tool_name": self.shell_tool_name,
             "shell_tool_prompt": self.shell_tool_prompt,
