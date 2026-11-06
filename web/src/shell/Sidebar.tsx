@@ -309,6 +309,12 @@ import {
   sessionReachabilityPopup,
   sessionReachabilityWord,
 } from "@/lib/sessionReachability";
+import {
+  sessionLimit,
+  sessionLimitDetail,
+  sessionLimitGlyph,
+  useSessionLimit,
+} from "@/lib/sessionLimit";
 import { usePullRequestInfo } from "@/hooks/usePullRequests";
 import {
   getPullRequestStatus,
@@ -5193,6 +5199,8 @@ function SessionTooltipFacts({
   const mark = showHarness ? harnessGlyph(agentType) : null;
   const state = sessionReachabilityPopup(conversation);
   const stateGlyph = sessionReachabilityGlyph(sessionReachability(conversation));
+  const limit = sessionLimit(conversation.labels, Date.now());
+  const limitGlyph = sessionLimitGlyph();
   return (
     <div className="mt-2 flex flex-col gap-1">
       {showHarness && (
@@ -5215,6 +5223,14 @@ function SessionTooltipFacts({
             </span>
           )}
           <span>{state}</span>
+        </SessionTooltipFact>
+      )}
+      {limit !== null && (
+        <SessionTooltipFact label="Limit" testId="session-tooltip-limit">
+          <span aria-hidden className={cn("shrink-0", limitGlyph.className)}>
+            {limitGlyph.glyph}
+          </span>
+          <span>{sessionLimitDetail(limit)}</span>
         </SessionTooltipFact>
       )}
       <SessionTooltipFact label="Machine" testId="session-tooltip-location">
@@ -5488,6 +5504,8 @@ function ConversationRowImpl({
   const reachability = sessionReachability(conversation);
   const reachWord = sessionReachabilityWord(reachability);
   const reachGlyph = sessionReachabilityGlyph(reachability);
+  const limit = useSessionLimit(conversation.labels);
+  const limitMark = limit === null ? null : sessionLimitGlyph();
   const showHarnessName = harnessMark === "name" && agentType !== "Other" && agentType !== label;
   const markGlyph = harnessGlyph(agentType);
   // The list-level map is the namespace path (`path`, else the project name).
@@ -5887,6 +5905,15 @@ function ConversationRowImpl({
               {reachGlyph.glyph}
             </span>
           )}
+          {limitMark !== null && (
+            <span
+              data-testid="session-row-limit"
+              aria-hidden
+              className={cn("shrink-0", limitMark.className)}
+            >
+              {limitMark.glyph}
+            </span>
+          )}
           <span
             data-testid="session-row-title"
             className={cn(
@@ -5899,6 +5926,7 @@ function ConversationRowImpl({
             {label}
             {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
             {reachWord !== null && <span className="sr-only">, {reachWord}</span>}
+            {limit !== null && <span className="sr-only">, {sessionLimitDetail(limit)}</span>}
           </span>
           {showMachineTag && (
             <SessionMachineTag conversation={conversation} hostsById={hostsById} />

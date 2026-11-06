@@ -102,6 +102,8 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   rate_limit_exceeded: "The model's rate limit was reached. You can retry this turn.",
   transient_upstream_error:
     "The model service hit a temporary error mid-response; retrying usually continues the turn.",
+  usage_limit_reached:
+    "The account's usage limit was reached. It has to reset before this session can continue.",
   budget_exhausted:
     "The AI gateway refused this turn because a spending budget or usage limit is exhausted. Contact an admin to raise it, or use a different budget.",
   codex_compaction_model_failed:

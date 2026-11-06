@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from omnigent.errors import ErrorCategory
@@ -15,6 +17,7 @@ from omnigent.runner.launch_failure import (
     diagnose_codex_model_rejection,
     diagnose_codex_provider_auth_failure,
     diagnose_model_unavailable,
+    parse_usage_limit_reset,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -309,7 +312,6 @@ def test_classifies_native_429_and_rate_limit_errors(code: str, message: str) ->
         "API Error: 401 Unauthorized. Previous request: rate limit exceeded.",
         "HTTP/1.1 403: See rate_limit_exceeded troubleshooting",
         "There's an issue with the selected model. It may not exist.",
-        "You've hit your usage limit.",
         "Error loading model-429",
         "Request rejected (4290)",
     ],
@@ -903,3 +905,79 @@ def test_describe_failure_code_known(code: str, expected_substring: str) -> None
 @pytest.mark.parametrize("code", [None, "", "some_unknown_code"])
 def test_describe_failure_code_unknown(code: str | None) -> None:
     assert describe_failure_code(code) is None
+
+
+@pytest.mark.parametrize("code", ["native_turn_error", "codex_turn_error"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "You've hit your weekly limit \u00b7 resets 10pm (Europe/London)",
+        "You've hit your weekly limit \u00b7 resets Oct 29, 10pm (Europe/London)",
+        "You\u2019ve hit your weekly limit \u00b7 resets Nov 5, 10pm (Europe/London)",
+        "You've hit your usage limit.",
+        "You've hit your usage credit limit \u00b7 resets 10pm (Europe/London)",
+        "You've hit your monthly spend limit.",
+        "You've hit your channel's monthly spend limit.",
+    ],
+)
+def test_account_usage_limit_text_is_classified(code: str, message: str) -> None:
+    assert classify_native_turn_error(code, message) == "usage_limit_reached"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The docs say: You've hit your weekly limit",
+        "Tool output: you've hit your usage limit.",
+        "You've hit your a b c d e limit",
+    ],
+)
+def test_quoted_usage_limit_text_is_not_classified(message: str) -> None:
+    assert classify_native_turn_error("native_turn_error", message) == "native_turn_error"
+
+
+@pytest.mark.parametrize("code", ["workspace_missing", "invalid_input"])
+def test_usage_limit_text_does_not_override_specific_failure_codes(code: str) -> None:
+    assert classify_native_turn_error(code, "You've hit your usage limit.") == code
+
+
+def test_usage_limit_text_keeps_codex_compaction_card() -> None:
+    assert (
+        classify_native_turn_error("codex_compaction_model_failed", "You've hit your usage limit.")
+        == "codex_compaction_model_failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "now", "expected"),
+    [
+        (
+            "resets Nov 5, 10pm (Europe/London)",
+            "2026-11-04T17:44:00+00:00",
+            1793916000,
+        ),
+        # Time-only form keeps today's instant, even just past it.
+        ("resets 10pm (Europe/London)", "2026-11-04T17:44:00+00:00", 1793916000 - 86400),
+        ("resets 10pm (Europe/London)", "2026-11-04T22:30:00+00:00", 1793916000),
+        ("resets 10:30pm (Europe/London)", "2026-11-04T17:44:00+00:00", 1793916000 - 86400 + 1800),
+        # A date already past this year rolls to next year.
+        ("resets Jan 2, 10pm (Europe/London)", "2026-12-30T12:00:00+00:00", 1798927200),
+        # Summer time comes from the zone, not a fixed offset.
+        ("resets Jul 1, 12am (Europe/London)", "2026-06-01T00:00:00+00:00", 1782860400),
+        ("resets 12pm (UTC)", "2026-06-01T00:00:00+00:00", 1780315200),
+        # Handled just after the stated instant: the past instant stays, no jump.
+        ("resets Nov 5, 10pm (Europe/London)", "2026-11-05T22:00:30+00:00", 1793916000),
+        ("resets 10pm (Europe/London)", "2026-11-04T22:00:30+00:00", 1793916000 - 86400),
+        # More than a day past rolls forward.
+        ("resets Nov 5, 10pm (Europe/London)", "2026-11-07T00:00:00+00:00", 1825452000),
+        # Repeated hour: 1:30am occurs at 00:30Z and 01:30Z; the next one is 01:30Z.
+        ("resets 1:30am (Europe/London)", "2026-10-25T01:15:00+00:00", 1792891800),
+        ("resets Nov 5, 10pm (Mars/Olympus)", "2026-11-04T17:44:00+00:00", None),
+        ("resets Feb 30, 10pm (UTC)", "2026-11-04T17:44:00+00:00", None),
+        ("resets 13pm (UTC)", "2026-11-04T17:44:00+00:00", None),
+        ("You've hit your usage limit.", "2026-11-04T17:44:00+00:00", None),
+        ("", "2026-11-04T17:44:00+00:00", None),
+    ],
+)
+def test_parse_usage_limit_reset(message: str, now: str, expected: int | None) -> None:
+    assert parse_usage_limit_reset(message, datetime.fromisoformat(now)) == expected

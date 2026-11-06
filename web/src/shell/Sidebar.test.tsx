@@ -1520,6 +1520,60 @@ describe("Sidebar session list", () => {
     expect(within(live).queryByTestId("session-row-reachability")).toBeNull();
   });
 
+  it("marks a usage-limited row with a future reset and leaves the row link alone", () => {
+    const future = String(Math.floor(Date.now() / 1000) + 3600);
+    const past = String(Math.floor(Date.now() / 1000) - 3600);
+    const limited = (resetsAt: string) => ({
+      labels: {
+        "omnigent.last_task_error_code": "usage_limit_reached",
+        "omnigent.last_task_error_resets_at": resetsAt,
+      },
+    });
+    mockConversations([
+      conv("conv_limited", "grok", limited(future)),
+      conv("conv_unparsed", "grok", limited("")),
+      conv("conv_lifted", "grok", limited(past)),
+      conv("conv_plain", "grok"),
+    ]);
+    renderSidebar();
+
+    const marked = screen.getByRole("link", { name: /conv_limited/ });
+    expect(within(marked).getByTestId("session-row-limit")).toHaveTextContent("◔");
+    expect(marked).toHaveAttribute("href", expect.stringContaining("conv_limited"));
+    const unparsed = screen.getByRole("link", { name: /conv_unparsed/ });
+    expect(within(unparsed).getByTestId("session-row-limit")).toBeInTheDocument();
+    for (const name of [/conv_lifted/, /conv_plain/]) {
+      expect(
+        within(screen.getByRole("link", { name })).queryByTestId("session-row-limit"),
+      ).toBeNull();
+    }
+  });
+
+  it("clears the limit marker once the reset time passes without new data", () => {
+    vi.useFakeTimers();
+    try {
+      const resetsAt = String(Math.floor(Date.now() / 1000) + 600);
+      mockConversations([
+        conv("conv_limited", "grok", {
+          labels: {
+            "omnigent.last_task_error_code": "usage_limit_reached",
+            "omnigent.last_task_error_resets_at": resetsAt,
+          },
+        }),
+      ]);
+      renderSidebar();
+      const row = () => screen.getByRole("link", { name: /conv_limited/ });
+      expect(within(row()).getByTestId("session-row-limit")).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(11 * 60 * 1000);
+      });
+      expect(within(row()).queryByTestId("session-row-limit")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows the harness name on a second line when that mark is selected", () => {
     localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ harnessMark: "name" }));
     mockConversations([conv("conv_grok", "grok", { runner_online: true, host_online: true })]);

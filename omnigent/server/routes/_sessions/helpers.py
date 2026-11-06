@@ -28,7 +28,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
@@ -99,7 +99,12 @@ from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
     token_bound_runner_id,
 )
-from omnigent.runner.launch_failure import classify_native_turn_error, diagnose_model_unavailable
+from omnigent.runner.launch_failure import (
+    USAGE_LIMIT_REACHED,
+    classify_native_turn_error,
+    diagnose_model_unavailable,
+    parse_usage_limit_reset,
+)
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runner.subagent_routing import ROUTING_DECISION_LABEL_KEY
 from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
@@ -211,6 +216,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY,
     _LAST_TASK_ERROR_MESSAGE_LABEL_KEY,
     _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY,
+    _LAST_TASK_ERROR_RESETS_AT_LABEL_KEY,
     _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY,
     _LAST_TASK_ERROR_TITLE_LABEL_KEY,
     _MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S,
@@ -2153,7 +2159,6 @@ def _utc_day(epoch_seconds: int) -> str:
     :param epoch_seconds: Unix epoch seconds, e.g. ``1749081600``.
     :returns: The UTC date as ``"YYYY-MM-DD"``, e.g. ``"2026-06-05"``.
     """
-    from datetime import datetime
 
     return datetime.fromtimestamp(epoch_seconds, tz=UTC).date().isoformat()
 
@@ -5254,6 +5259,14 @@ def _truncate_error_message_label(message: str) -> str:
     return f"{summary}{_ELIDED_LOG_LINES_MARKER}{cause_line}"
 
 
+def _usage_limit_resets_at_label(error: ErrorDetail) -> str:
+    """Epoch-seconds reset label for a usage-limit failure; empty otherwise or if unparsed."""
+    if error.code != USAGE_LIMIT_REACHED:
+        return ""
+    resets_at = parse_usage_limit_reset(error.message, datetime.now(UTC))
+    return "" if resets_at is None else str(resets_at)
+
+
 async def _persist_session_status_error_labels(
     session_id: str,
     error: ErrorDetail | None,
@@ -5297,6 +5310,7 @@ async def _persist_session_status_error_labels(
             _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: _truncate_label(error.remediation or ""),
             _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: _truncate_label(item_id or ""),
             _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: _truncate_label(owner_runner_id or ""),
+            _LAST_TASK_ERROR_RESETS_AT_LABEL_KEY: _usage_limit_resets_at_label(error),
         }
         if error is not None
         else {
@@ -5308,6 +5322,7 @@ async def _persist_session_status_error_labels(
             _LAST_TASK_ERROR_REMEDIATION_LABEL_KEY: "",
             _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: "",
             _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: "",
+            _LAST_TASK_ERROR_RESETS_AT_LABEL_KEY: "",
         }
     )
     try:

@@ -338,6 +338,10 @@ _LAST_TASK_ERROR_ITEM_ID_LABEL_KEY: str = "omnigent.last_task_error_item_id"
 # behind this stale cause. Empty when unknown (treated as the current runner's).
 _LAST_TASK_ERROR_RUNNER_ID_LABEL_KEY: str = "omnigent.last_task_error_runner_id"
 
+# Epoch seconds an account usage limit lifts, parsed from the failure text; empty when
+# the failure is not a usage limit or the text carried no readable reset.
+_LAST_TASK_ERROR_RESETS_AT_LABEL_KEY: str = "omnigent.last_task_error_resets_at"
+
 
 _LABEL_VALUE_MAX_LEN: int = LABEL_VALUE_MAX_LEN
 
@@ -1216,6 +1220,7 @@ __all__ = [
     "_LAST_TASK_ERROR_CODE_LABEL_KEY",
     "_LAST_TASK_ERROR_MESSAGE_LABEL_KEY",
     "_LAST_TASK_ERROR_REMEDIATION_LABEL_KEY",
+    "_LAST_TASK_ERROR_RESETS_AT_LABEL_KEY",
     "_LAST_TASK_ERROR_TITLE_LABEL_KEY",
     "_MANAGED_LAUNCH_FAILURE_RECORD_TIMEOUT_S",
     "_MANAGED_RESUMABLE_TUNNEL_STALE_S",

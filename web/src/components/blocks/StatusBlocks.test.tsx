@@ -1412,3 +1412,19 @@ describe("ErrorBanner — info level", () => {
     expect(screen.getByTestId("error-headline")).toHaveClass("text-destructive");
   });
 });
+
+describe("ErrorBanner — usage limit", () => {
+  it("explains the limit and does not offer a retry", () => {
+    render(
+      <ErrorBanner
+        message="You've hit your weekly limit"
+        source="harness"
+        code="usage_limit_reached"
+        onRetry={async () => {}}
+      />,
+    );
+    expect(screen.getByText(/usage limit was reached/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("error-remediation-actions")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^(retry|continue)/i })).toBeNull();
+  });
+});

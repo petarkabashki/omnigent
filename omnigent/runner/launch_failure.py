@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from omnigent.cli_invocation import cli_invocation
 from omnigent.errors import SESSION_AGENT_MISSING_MESSAGE, ErrorCategory
@@ -329,6 +331,22 @@ _BUDGET_EXHAUSTED_FRAGMENTS = (
     "has reached its limit",
     "rate limit is set to 0",
 )
+# The CLI's account-limit notice ("You've hit your weekly limit · resets ..."), anchored
+# to the start so a message that merely quotes it does not match.
+_USAGE_LIMIT_REACHED = re.compile(
+    r"^\s*you['\u2019]ve hit your (?:[\w'\u2019-]+ ){0,4}limit\b", re.IGNORECASE
+)
+_USAGE_LIMIT_RESET = re.compile(
+    r"resets\s+(?:(?P<month>[A-Za-z]{3})[A-Za-z]*\s+(?P<day>\d{1,2}),?\s+)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>[ap]m)\s*\((?P<zone>[^)\s]+)\)",
+    re.IGNORECASE,
+)
+_MONTH_NUMBERS = {
+    name: number
+    for number, name in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1
+    )
+}
 # Mid-stream upstream failures the gateway usually recovers from on its own;
 # the runner itself stays healthy, so the turn can be continued by the user.
 _TRANSIENT_UPSTREAM_FRAGMENTS = (
@@ -366,6 +384,78 @@ _SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash"})
 _LABEL_LIMIT = 256
 
 
+USAGE_LIMIT_REACHED = "usage_limit_reached"
+# A dated reset this far past has lifted. It names one day, so it can't mean a later cycle.
+_DATED_RESET_GRACE_SECONDS = 24 * 3600
+# A time-only reset already past usually means tomorrow, so only a late-handled notice stays.
+_TIME_ONLY_RESET_GRACE_SECONDS = 5 * 60
+
+
+def parse_usage_limit_reset(message: str, now: datetime) -> int | None:
+    """Read the reset instant from a usage-limit notice.
+
+    Handles ``resets 10pm (Europe/London)`` and ``resets Nov 5, 10:30pm (Europe/London)``.
+    A missing date or year resolves to the next occurrence after ``now``, except an
+    instant just past, which is returned as is: up to 24 hours for a dated reset and
+    5 minutes for a time-only one. Instants are compared in UTC; in a repeated local
+    hour the first one still ahead is used.
+
+    :param message: Native harness error text.
+    :param now: Anchor instant, timezone-aware.
+    :returns: Reset as epoch seconds, or ``None`` for unparsed text or an unknown zone.
+    """
+    match = _USAGE_LIMIT_RESET.search(message)
+    if match is None:
+        return None
+    try:
+        zone = ZoneInfo(match["zone"])
+        hour = int(match["hour"])
+        minute = int(match["minute"] or 0)
+        if not 1 <= hour <= 12 or minute > 59:
+            return None
+        hour = hour % 12 + (12 if match["meridiem"].lower() == "pm" else 0)
+        wall_time = time(hour, minute)
+        local_now = now.astimezone(zone)
+
+        now_epoch = now.timestamp()
+
+        def reset_on(day: date, grace_seconds: int) -> tuple[float, bool]:
+            # A repeated hour has two instants; prefer the first one still ahead.
+            instants = sorted(
+                {
+                    datetime.combine(day, wall_time, tzinfo=zone).replace(fold=fold).timestamp()
+                    for fold in (0, 1)
+                }
+            )
+            upcoming = [instant for instant in instants if instant >= now_epoch]
+            if upcoming:
+                return upcoming[0], True
+            # Just past the stated instant, the limit has lifted; keep it as is.
+            return instants[-1], now_epoch - instants[-1] <= grace_seconds
+
+        if match["month"] is None:
+            candidate, keep = reset_on(local_now.date(), _TIME_ONLY_RESET_GRACE_SECONDS)
+            if not keep:
+                candidate, _ = reset_on(
+                    local_now.date() + timedelta(days=1), _TIME_ONLY_RESET_GRACE_SECONDS
+                )
+        else:
+            month = _MONTH_NUMBERS.get(match["month"].lower())
+            if month is None:
+                return None
+            day = int(match["day"])
+            candidate, keep = reset_on(
+                date(local_now.year, month, day), _DATED_RESET_GRACE_SECONDS
+            )
+            if not keep:
+                candidate, _ = reset_on(
+                    date(local_now.year + 1, month, day), _DATED_RESET_GRACE_SECONDS
+                )
+        return int(candidate)
+    except (ValueError, OverflowError, LookupError, OSError):
+        return None
+
+
 def classify_native_turn_error(code: str, message: str) -> str:
     """Refine a native turn's generic code when its text identifies the cause.
 
@@ -401,6 +491,8 @@ def classify_native_turn_error(code: str, message: str) -> str:
         return "context_length_exceeded"
     status_match = _NATIVE_ERROR_HTTP_STATUS.search(message)
     status = status_match.group(1) if status_match else None
+    if _USAGE_LIMIT_REACHED.search(message):
+        return USAGE_LIMIT_REACHED
     if status in {"401", "403"}:
         return code
     if status == "429" or _RATE_LIMIT_ERROR.search(message):
@@ -692,6 +784,9 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
     "transient_upstream_error": (
         "The model service hit a temporary error mid-response; retrying usually "
         "continues the turn."
+    ),
+    USAGE_LIMIT_REACHED: (
+        "The account's usage limit was reached. It has to reset before this session can continue."
     ),
     "budget_exhausted": (
         "The AI gateway refused this turn because a spending budget or usage limit is "

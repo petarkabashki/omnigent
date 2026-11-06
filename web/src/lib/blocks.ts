@@ -530,6 +530,7 @@ const SPECIFIC_ERROR_CODES = new Set([
   "connection_error",
   "context_length_exceeded",
   "rate_limit_exceeded",
+  "usage_limit_reached",
   "codex_thread_reset",
   "session_agent_missing",
   "harness_not_configured",
