@@ -1,6 +1,6 @@
 import { arrayMove } from "@dnd-kit/sortable";
 import type { Conversation, SessionSortBy } from "@/hooks/useConversations";
-import { nativeCodingAgentForWrapper, WRAPPER_LABEL_KEY } from "@/lib/nativeCodingAgents";
+import { nativeCodingAgentForSession } from "@/lib/nativeCodingAgents";
 import { getOptimisticTitle } from "@/lib/optimisticTitles";
 import { PROJECT_LABEL_KEY, PINNED_LABEL_KEY } from "@/lib/sessionListCache";
 import type { SidebarCustomOrder } from "@/lib/sidebarViewPreferences";
@@ -133,26 +133,16 @@ export type ConversationIconKind =
 // shown in the sidebar row and as the browser tab title fallback.
 export const UNTITLED_CONVERSATION_LABEL = "New session";
 
-function wrapperLabel(conversation: Conversation): string | undefined {
-  return conversation.labels?.[WRAPPER_LABEL_KEY];
-}
-
-function nativeWrapperLabel(conversation: Conversation): string | null {
-  const wrapper = wrapperLabel(conversation);
-  return nativeCodingAgentForWrapper(wrapper)?.displayName ?? null;
-}
-
 export function getConversationIconKind(conversation: Conversation): ConversationIconKind {
-  const wrapper = wrapperLabel(conversation);
-  const nativeAgent = nativeCodingAgentForWrapper(wrapper);
+  const nativeAgent = nativeCodingAgentForSession(conversation);
   if (nativeAgent != null) return nativeAgent.iconKind;
   if (conversation.agent_name === "nessie") return "nessie";
   return null;
 }
 
 export function getConversationAgentType(conversation: Conversation): string {
-  const label = nativeWrapperLabel(conversation);
-  if (label !== null) return label;
+  const nativeAgent = nativeCodingAgentForSession(conversation);
+  if (nativeAgent != null) return nativeAgent.displayName;
   if (conversation.agent_name) {
     return conversation.agent_name;
   }
@@ -196,8 +186,8 @@ export function conversationDisplayLabel(conversation: Conversation): string {
   // Just-created session: its first prompt stands in until a real title lands.
   const optimistic = getOptimisticTitle(conversation.id);
   if (optimistic !== undefined) return optimistic;
-  const label = nativeWrapperLabel(conversation);
-  if (label !== null) return label;
+  const nativeAgent = nativeCodingAgentForSession(conversation);
+  if (nativeAgent != null) return nativeAgent.displayName;
   return UNTITLED_CONVERSATION_LABEL;
 }
 

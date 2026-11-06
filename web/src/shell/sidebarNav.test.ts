@@ -381,6 +381,16 @@ describe("getConversationAgentType", () => {
     expect(getConversationAgentType(piConv)).toBe("Pi");
   });
 
+  it("names a native harness when the session has no wrapper label", () => {
+    const conv: Conversation = {
+      ...conversation("conv_harness", "Custom agent", new Date(2026, 4, 14, 9)),
+      agent_name: "custom",
+      harness: "claude-native",
+    };
+    expect(getConversationAgentType(conv)).toBe("Claude Code");
+    expect(getConversationIconKind(conv)).toBe("claude");
+  });
+
   it("returns 'Other' when agent_name is null", () => {
     const conv: Conversation = {
       ...conversation("conv_null_name", "Chat", new Date(2026, 4, 14, 9)),
@@ -468,6 +478,12 @@ describe("conversationDisplayLabel", () => {
           labels: { "omnigent.wrapper": "claude-code-native-ui" },
         }),
       ),
+    ).toBe("Claude Code");
+    expect(
+      conversationDisplayLabel({
+        ...conversation("conv_abcdefghijklmnopqrstuvwxyz", null, new Date(2026, 4, 14, 9)),
+        harness: "claude-native",
+      }),
     ).toBe("Claude Code");
   });
 

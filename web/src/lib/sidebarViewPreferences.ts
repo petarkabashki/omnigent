@@ -5,6 +5,8 @@ const STORAGE_KEY = "omnigent:sidebar-view";
 export type SidebarGrouping = "default" | "status" | "harness" | "host" | "created" | "updated";
 export type SidebarOrdering = "updated" | "created" | "custom";
 export type SidebarShowField = "updated" | "environment" | "repo" | "branch";
+/** How a row names its harness. Color is a character. Name adds a second line. */
+export type SidebarHarnessMark = "color" | "name";
 
 /** Saved positions on top of the automatic order Custom started from. */
 export interface SidebarCustomOrder {
@@ -19,6 +21,10 @@ export interface SidebarViewPreferences {
   grouping: SidebarGrouping;
   ordering: SidebarOrdering;
   show: readonly SidebarShowField[];
+  /** Color is the default so the harness does not take a second line. */
+  harnessMark: SidebarHarnessMark;
+  /** When true, the title line ends with a four-letter machine tag such as `[hub]`. */
+  machineTag: boolean;
   /** Kept while another ordering is selected, so Custom can be restored. */
   custom?: SidebarCustomOrder;
 }
@@ -38,11 +44,14 @@ export const SIDEBAR_SHOW_FIELDS: readonly SidebarShowField[] = [
   "repo",
   "branch",
 ];
+export const SIDEBAR_HARNESS_MARKS: readonly SidebarHarnessMark[] = ["color", "name"];
 
 export const DEFAULT_SIDEBAR_VIEW: SidebarViewPreferences = {
   grouping: "default",
   ordering: "updated",
   show: [],
+  harnessMark: "color",
+  machineTag: false,
 };
 
 function pick<T extends string>(allowed: readonly T[], value: unknown, fallback: T): T {
@@ -72,6 +81,8 @@ export function readSidebarViewPreferences(): SidebarViewPreferences {
     ordering: ordering === "custom" && !custom ? DEFAULT_SIDEBAR_VIEW.ordering : ordering,
     // Keep the menu's field order so equal selections compare equal.
     show: SIDEBAR_SHOW_FIELDS.filter((field) => show.includes(field)),
+    harnessMark: pick(SIDEBAR_HARNESS_MARKS, stored.harnessMark, DEFAULT_SIDEBAR_VIEW.harnessMark),
+    machineTag: stored.machineTag === true,
     ...(custom && { custom }),
   };
 }

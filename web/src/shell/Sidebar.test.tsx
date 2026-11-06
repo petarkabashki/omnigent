@@ -201,6 +201,11 @@ import * as identity from "@/lib/identity";
 
 const useConvMock = vi.mocked(useConversations);
 
+/** Title text only. The harness and reachability line shares the row link. */
+function sessionRowTitle(link: HTMLElement): string {
+  return link.querySelector("[data-testid='session-row-title']")?.textContent ?? "";
+}
+
 function conv(id: string, agentName: string, partial: Partial<Conversation> = {}): Conversation {
   return {
     id,
@@ -507,14 +512,23 @@ describe("Sidebar session list", () => {
     renderSidebar();
 
     // Before the landing form's stash lands (and for sessions born
-    // elsewhere), the row reads as the wrapper name.
-    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    // elsewhere), the row reads as the wrapper name. The harness line stays
+    // hidden while it would only repeat that title.
+    expect(screen.getByTestId("session-row-title")).toHaveTextContent("Claude Code");
+    expect(screen.queryByTestId("session-row-harness")).toBeNull();
 
     act(() => recordOptimisticTitle("conv_opt", "debug the login redirect"));
 
-    const label = screen.getByText("debug the login redirect");
+    const label = screen.getByTestId("session-row-title");
+    expect(label).toHaveTextContent("debug the login redirect");
     expect(label).toHaveClass("italic", "text-muted-foreground");
-    expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
+    // The placeholder stays muted, and the harness name stays off the row
+    // until a real title can take the color.
+    expect(screen.getByTestId("session-row-harness-mark")).toHaveAttribute(
+      "data-harness",
+      "Claude Code",
+    );
+    expect(screen.queryByTestId("session-row-harness")).toBeNull();
   });
 
   it("renders a provisional (temp:) row as a bare navigable link with no mutating actions", () => {
@@ -1462,6 +1476,115 @@ describe("Sidebar session list", () => {
     // Only the bound session reads the store signal — other rows stay bare.
     const otherRow = screen.getByRole("link", { name: /conv_other/ }).closest("li")!;
     expect(within(otherRow).queryByTestId("session-state-badge")).toBeNull();
+  });
+
+  it("marks the harness and asleep or offline with a character on the title line", () => {
+    mockConversations([
+      conv("conv_grok", "grok", { runner_online: false, host_online: true }),
+      conv("conv_claude", "custom", {
+        harness: "claude-native",
+        runner_online: false,
+        host_online: false,
+      }),
+      conv("conv_live", "grok", { runner_online: true, host_online: true }),
+    ]);
+    renderSidebar();
+
+    const grok = screen.getByRole("link", { name: /conv_grok/ });
+    const grokMark = within(grok).getByTestId("session-row-harness-mark");
+    expect(grokMark).toHaveAttribute("data-harness", "grok");
+    expect(grokMark).toHaveTextContent("◈");
+    expect(grokMark).toHaveClass("text-harness-3");
+    expect(within(grok).getByTestId("session-row-title")).not.toHaveClass("text-harness-3");
+    expect(within(grok).queryByTestId("session-row-kind")).toBeNull();
+    const asleep = within(grok).getByTestId("session-row-reachability");
+    expect(asleep).toHaveAttribute("data-reachability", "asleep");
+    expect(asleep).toHaveTextContent("☾");
+    // The turn badge stays separate: an idle asleep row has no running marker.
+    expect(within(grok).queryByTestId("session-state-badge")).toBeNull();
+
+    const claude = screen.getByRole("link", { name: /conv_claude/ });
+    expect(within(claude).getByTestId("session-row-harness-mark")).toHaveAttribute(
+      "data-harness",
+      "Claude Code",
+    );
+    expect(within(claude).queryByTestId("session-row-harness")).toBeNull();
+    expect(within(claude).getByTestId("session-row-reachability")).toHaveTextContent("⊘");
+
+    const live = screen.getByRole("link", { name: /conv_live/ });
+    expect(within(live).getByTestId("session-row-harness-mark")).toHaveAttribute(
+      "data-harness",
+      "grok",
+    );
+    expect(within(live).queryByTestId("session-row-kind")).toBeNull();
+    expect(within(live).queryByTestId("session-row-reachability")).toBeNull();
+  });
+
+  it("shows the harness name on a second line when that mark is selected", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ harnessMark: "name" }));
+    mockConversations([conv("conv_grok", "grok", { runner_online: true, host_online: true })]);
+    renderSidebar();
+
+    const row = screen.getByRole("link", { name: /conv_grok/ });
+    expect(within(row).getByTestId("session-row-harness")).toHaveTextContent("grok");
+    expect(within(row).getByTestId("session-row-harness-mark")).toHaveTextContent("◈");
+    expect(within(row).getByTestId("session-row-title")).not.toHaveClass("text-harness-3");
+  });
+
+  it("shows a four-letter machine tag on the title line when that option is on", () => {
+    localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ machineTag: true }));
+    useHostsMock.mockReturnValue({
+      data: [
+        { host_id: "host_hub", name: "hub", sandbox_provider: null, status: "online" },
+        { host_id: "host_gpu", name: "gpu26", sandbox_provider: null, status: "online" },
+      ],
+    });
+    mockConversations([
+      conv("conv_hub", "grok", { host_id: "host_hub", runner_online: true, host_online: true }),
+      conv("conv_gpu", "grok", { host_id: "host_gpu" }),
+      conv("conv_local", "grok"),
+    ]);
+    renderSidebar();
+
+    const hub = screen.getByRole("link", { name: /conv_hub/ });
+    expect(within(hub).getByTestId("session-row-machine")).toHaveTextContent("[hub]");
+    expect(within(hub).queryByTestId("session-row-kind")).toBeNull();
+    expect(
+      within(screen.getByRole("link", { name: /conv_gpu/ })).getByTestId("session-row-machine"),
+    ).toHaveTextContent("[gpu2]");
+    expect(
+      within(screen.getByRole("link", { name: /conv_local/ })).queryByTestId("session-row-machine"),
+    ).toBeNull();
+  });
+
+  it("names the harness, state, and machine on separate tooltip lines", async () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_hub", name: "hub", sandbox_provider: null, status: "online" }],
+    });
+    mockConversations([
+      conv("conv_asleep", "grok", {
+        title: "Asleep grok",
+        host_id: "host_hub",
+        runner_online: false,
+        host_online: true,
+      }),
+    ]);
+    renderSidebar();
+
+    fireEvent.pointerMove(screen.getByRole("link", { name: /Asleep grok/ }), {
+      pointerType: "mouse",
+    });
+    await waitFor(() => {
+      const tooltip = screen.getByTestId("session-tooltip-content");
+      expect(within(tooltip).getByTestId("session-tooltip-harness-name")).toHaveTextContent("grok");
+      expect(within(tooltip).getByTestId("session-tooltip-harness")).toHaveTextContent(/^Harness/);
+      expect(within(tooltip).getByTestId("session-tooltip-state")).toHaveTextContent(
+        "Asleep. A message wakes it.",
+      );
+      expect(within(tooltip).getByTestId("session-tooltip-location")).toHaveTextContent(
+        "Machinehub",
+      );
+    });
   });
 
   it("shows the full session title in a styled tooltip on hover", async () => {
@@ -3579,6 +3702,39 @@ describe("Sidebar view options", () => {
     fireEvent.keyDown(screen.getByTestId(testId), { key: "ArrowRight" });
   }
 
+  it("adds the harness name from the filter menu without dropping the character", () => {
+    mockConversations([conv("conv_grok", "grok")]);
+    renderGroupingSidebar();
+    expect(screen.getByTestId("session-row-harness-mark")).toHaveAttribute("data-harness", "grok");
+    expect(screen.queryByTestId("session-row-harness")).toBeNull();
+
+    openViewSubmenu("session-harness-menu");
+    fireEvent.click(screen.getByTestId("session-harness-name"));
+
+    expect(screen.getByTestId("session-row-harness")).toHaveTextContent("grok");
+    expect(screen.getByTestId("session-row-harness-mark")).toHaveTextContent("◈");
+    expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).harnessMark).toBe("name");
+  });
+
+  it("adds a four-letter machine tag from the filter menu", () => {
+    useHostsMock.mockReturnValue({
+      data: [{ host_id: "host_hub", name: "hub", sandbox_provider: null, status: "online" }],
+    });
+    mockConversations([conv("conv_hub", "grok", { host_id: "host_hub" })]);
+    renderGroupingSidebar();
+    expect(screen.queryByTestId("session-row-machine")).toBeNull();
+
+    fireEvent.pointerDown(screen.getByTestId("session-filter"), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(screen.getByTestId("session-machine-tag"));
+
+    expect(screen.getByTestId("session-row-machine")).toHaveTextContent("[hub]");
+    expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).machineTag).toBe(true);
+  });
+
   const GROUP_TITLES = new Set([
     "Needs attention",
     "Unread",
@@ -3610,7 +3766,9 @@ describe("Sidebar view options", () => {
       .getAllByRole("button", { expanded: true })
       .map((button) => button.textContent ?? "")
       .filter((title) => GROUP_TITLES.has(title));
-  const groupSection = (title: string) => screen.getByText(title).closest("section")!;
+  // The header button, not the row text: a harness line can repeat the group name.
+  const groupSection = (title: string) =>
+    screen.getByRole("button", { name: title }).closest("section")!;
 
   it("restores Status grouping from a saved selection and offers it in the menu", () => {
     localStorage.setItem("omnigent:sidebar-view", JSON.stringify({ grouping: "status" }));
@@ -3681,7 +3839,7 @@ describe("Sidebar view options", () => {
       expect(
         within(groupSection("Codex"))
           .getAllByRole("link", { name: /^conv_/ })
-          .map((link) => link.textContent),
+          .map(sessionRowTitle),
       ).toEqual(
         ordering === "created"
           ? ["conv_shared_sdk", "conv_custom_sdk", "conv_project_native"]
@@ -3898,7 +4056,7 @@ describe("Sidebar view options", () => {
         expect(
           within(groupSection("Updated today"))
             .getAllByRole("link", { name: /^conv_/ })
-            .map((link) => link.textContent),
+            .map(sessionRowTitle),
         ).toEqual(["conv_today", "conv_old"]);
       }
       expect(screen.queryByText("Projects")).toBeNull();
@@ -3951,11 +4109,7 @@ describe("Sidebar view options", () => {
     fireEvent.click(created);
     expect(JSON.parse(localStorage.getItem("omnigent:sidebar-view")!).ordering).toBe("created");
     const links = within(groupSection("Sessions")).getAllByRole("link", { name: /^conv_/ });
-    expect(links.map((link) => link.textContent)).toEqual([
-      "conv_done_new",
-      "conv_done_old",
-      "conv_running",
-    ]);
+    expect(links.map(sessionRowTitle)).toEqual(["conv_done_new", "conv_done_old", "conv_running"]);
 
     mockConversations([
       conv("conv_done_new", "Codex", { status: "idle", created_at: 3, updated_at: 500 }),
@@ -3969,7 +4123,7 @@ describe("Sidebar view options", () => {
     expect(
       within(groupSection("Sessions"))
         .getAllByRole("link", { name: /^conv_/ })
-        .map((link) => link.textContent),
+        .map(sessionRowTitle),
     ).toEqual(["conv_done_new", "conv_done_old", "conv_running"]);
   });
 
@@ -3998,9 +4152,12 @@ describe("Sidebar view options", () => {
       renderGroupingSidebar();
       if (grouping === "default")
         fireEvent.click(screen.getByRole("button", { name: /^Customer X/ }));
-      expect(
-        screen.getAllByRole("link", { name: /^conv_/ }).map((link) => link.textContent),
-      ).toEqual(["conv_project_new", "conv_project_old", "conv_new", "conv_old"]);
+      expect(screen.getAllByRole("link", { name: /^conv_/ }).map(sessionRowTitle)).toEqual([
+        "conv_project_new",
+        "conv_project_old",
+        "conv_new",
+        "conv_old",
+      ]);
     },
   );
 
@@ -4223,7 +4380,9 @@ describe("Sidebar view options", () => {
     fireEvent.pointerMove(screen.getByRole("link", { name: "conv_gh" }), { pointerType: "mouse" });
     await waitFor(() => {
       const tooltip = screen.getByTestId("session-tooltip-content");
-      expect(within(tooltip).getByRole("img", { name: "Claude Code harness" })).toBeTruthy();
+      expect(within(tooltip).getByTestId("session-tooltip-harness-name")).toHaveTextContent(
+        "Claude Code",
+      );
       expect(within(tooltip).getByTestId("session-tooltip-repo")).toHaveTextContent("Repoomnigent");
       expect(within(tooltip).getByTestId("session-tooltip-pr")).toHaveTextContent("PR#419 · Draft");
       expect(within(tooltip).getByTestId("session-tooltip-branch")).toHaveTextContent(
@@ -4557,7 +4716,7 @@ describe("sidebar_grouping_ui release flag", () => {
       expect(
         within(sessions)
           .getAllByRole("link", { name: /^conv_/ })
-          .map((link) => link.textContent),
+          .map(sessionRowTitle),
       ).toEqual(["conv_mine", "conv_shared"]);
       expect(screen.queryByRole("button", { name: "Shared" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
@@ -4583,7 +4742,11 @@ describe("sidebar_grouping_ui release flag", () => {
       expect(within(tooltip).getByTestId("session-tooltip-location")).toHaveTextContent(
         "Build box",
       );
-      expect(within(tooltip).queryByTestId("session-tooltip-harness")).toBeNull();
+      expect(within(tooltip).getByTestId("session-tooltip-harness")).toHaveTextContent(
+        "Claude Code",
+      );
+      expect(within(tooltip).queryByTestId("session-tooltip-state")).toBeNull();
+      expect(within(tooltip).queryByTestId("session-tooltip-repo")).toBeNull();
       expect(usePullRequestInfoMock).not.toHaveBeenCalled();
     },
   );

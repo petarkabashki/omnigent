@@ -245,11 +245,14 @@ import {
   readSessionFilter,
   writeSessionFilter,
 } from "@/lib/sessionFilterPreferences";
+import { harnessGlyph } from "@/lib/harnessColor";
 import {
   SIDEBAR_GROUPINGS,
+  SIDEBAR_HARNESS_MARKS,
   SIDEBAR_SHOW_FIELDS,
   sidebarBaseOrdering,
   type SidebarGrouping,
+  type SidebarHarnessMark,
   type SidebarOrdering,
   type SidebarShowField,
   type SidebarViewPreferences,
@@ -292,17 +295,20 @@ import {
   sessionsListAcceptsDrop,
 } from "./sidebarNav";
 import { SidebarServerPicker } from "./SidebarServerPicker";
-import { ComposerAgentIcon } from "@/components/ComposerAgentIcon";
 import { useHarnessLabels } from "@/lib/agentLabels";
+import { nativeCodingAgentForSession } from "@/lib/nativeCodingAgents";
 import {
-  nativeCodingAgentForSession,
-  nativeCodingAgentForWrapper,
-  type NativeCodingAgentIconKind,
-  WRAPPER_LABEL_KEY,
-} from "@/lib/nativeCodingAgents";
-import AntigravityColor from "@lobehub/icons/es/Antigravity/components/Color";
-import DevinColor from "@lobehub/icons/es/Devin/components/Color";
-import KiroColor from "@lobehub/icons/es/Kiro/components/Color";
+  classifySessionHost,
+  orderHostGroups,
+  sessionMachineTag,
+  type SessionHostInfo,
+} from "@/lib/sessionHostKind";
+import {
+  sessionReachability,
+  sessionReachabilityGlyph,
+  sessionReachabilityPopup,
+  sessionReachabilityWord,
+} from "@/lib/sessionReachability";
 import { usePullRequestInfo } from "@/hooks/usePullRequests";
 import {
   getPullRequestStatus,
@@ -319,7 +325,6 @@ import {
   SANDBOX_REPO_LABEL_KEY,
 } from "./NewChatDialog";
 import { useDesktopHostId } from "./RevealInFileManager";
-import { classifySessionHost, orderHostGroups, type SessionHostInfo } from "@/lib/sessionHostKind";
 import { ForkSessionDialog } from "./ForkSessionDialog";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
 import { useSessionActionRestrictions } from "@/hooks/useSessionActionRestrictions";
@@ -383,6 +388,8 @@ const ProjectIconsContext = createContext<Map<string, string>>(new Map());
 const HostsByIdContext = createContext<ReadonlyMap<string, Host>>(new Map());
 // The filter menu's "Show" toggles: which optional metadata each row renders.
 const SidebarShowContext = createContext<readonly SidebarShowField[]>([]);
+const SidebarHarnessMarkContext = createContext<SidebarHarnessMark>("color");
+const SidebarMachineTagContext = createContext(false);
 // Row-invariant values resolved once at the list owner and shared, so a row
 // doesn't run `useIsMobileViewport` (a matchMedia-on-every-render store) or
 // `useViewerId` (an identity-resolve effect) per instance.
@@ -423,6 +430,8 @@ function SidebarRowDataProvider({
   projectIconsById,
   hostsById,
   show,
+  harnessMark,
+  machineTag,
   isMobile,
   viewerId,
   serverInfo,
@@ -434,6 +443,8 @@ function SidebarRowDataProvider({
   projectIconsById: Map<string, string>;
   hostsById: ReadonlyMap<string, Host>;
   show: readonly SidebarShowField[];
+  harnessMark: SidebarHarnessMark;
+  machineTag: boolean;
   isMobile: boolean;
   viewerId: string | null;
   serverInfo: ReturnType<typeof useServerInfo>;
@@ -446,17 +457,21 @@ function SidebarRowDataProvider({
       <ProjectIconsContext.Provider value={projectIconsById}>
         <HostsByIdContext.Provider value={hostsById}>
           <SidebarShowContext.Provider value={show}>
-            <IsMobileContext.Provider value={isMobile}>
-              <ViewerIdContext.Provider value={viewerId}>
-                <ServerInfoContext.Provider value={serverInfo}>
-                  <RowActivationContext.Provider value={onActivate}>
-                    <SessionReorderContext.Provider value={onReorder}>
-                      {children}
-                    </SessionReorderContext.Provider>
-                  </RowActivationContext.Provider>
-                </ServerInfoContext.Provider>
-              </ViewerIdContext.Provider>
-            </IsMobileContext.Provider>
+            <SidebarHarnessMarkContext.Provider value={harnessMark}>
+              <SidebarMachineTagContext.Provider value={machineTag}>
+                <IsMobileContext.Provider value={isMobile}>
+                  <ViewerIdContext.Provider value={viewerId}>
+                    <ServerInfoContext.Provider value={serverInfo}>
+                      <RowActivationContext.Provider value={onActivate}>
+                        <SessionReorderContext.Provider value={onReorder}>
+                          {children}
+                        </SessionReorderContext.Provider>
+                      </RowActivationContext.Provider>
+                    </ServerInfoContext.Provider>
+                  </ViewerIdContext.Provider>
+                </IsMobileContext.Provider>
+              </SidebarMachineTagContext.Provider>
+            </SidebarHarnessMarkContext.Provider>
           </SidebarShowContext.Provider>
         </HostsByIdContext.Provider>
       </ProjectIconsContext.Provider>
@@ -2988,6 +3003,8 @@ function ConversationList({
       onChange={onActiveTabChange}
       multiUser={multiUser}
       view={groupingUi ? view : null}
+      harnessMark={view.harnessMark}
+      machineTag={view.machineTag}
       onViewChange={updateView}
     />
   );
@@ -3014,6 +3031,8 @@ function ConversationList({
       projectIconsById={projectIconsById}
       hostsById={hostsById}
       show={view.show}
+      harnessMark={view.harnessMark}
+      machineTag={view.machineTag}
       isMobile={isMobile}
       viewerId={viewerId}
       serverInfo={serverInfo}
@@ -3730,6 +3749,10 @@ const SHOW_LABELS: Record<SidebarShowField, string> = {
   repo: "Repo",
   branch: "Branch",
 };
+const HARNESS_MARK_LABELS: Record<SidebarHarnessMark, string> = {
+  color: "Color",
+  name: "Name",
+};
 
 // A filter-menu submenu whose trigger shows the current pick at its right edge.
 function FilterMenuSub({
@@ -3758,11 +3781,61 @@ function FilterMenuSub({
   );
 }
 
+function HarnessMarkMenu({
+  value,
+  onChange,
+}: {
+  value: SidebarHarnessMark;
+  onChange: (mark: SidebarHarnessMark) => void;
+}) {
+  return (
+    <FilterMenuSub label="Harness" value={HARNESS_MARK_LABELS[value]} testId="session-harness-menu">
+      <DropdownMenuRadioGroup
+        value={value}
+        onValueChange={(next) => onChange(next as SidebarHarnessMark)}
+      >
+        {SIDEBAR_HARNESS_MARKS.map((mark) => (
+          <DropdownMenuRadioItem
+            className="mobile-touch-target"
+            key={mark}
+            value={mark}
+            data-testid={`session-harness-${mark}`}
+          >
+            {HARNESS_MARK_LABELS[mark]}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+    </FilterMenuSub>
+  );
+}
+
+function MachineTagItem({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <DropdownMenuCheckboxItem
+      className="mobile-touch-target"
+      checked={checked}
+      data-testid="session-machine-tag"
+      onSelect={(event) => event.preventDefault()}
+      onCheckedChange={(next) => onChange(next === true)}
+    >
+      Machine
+    </DropdownMenuCheckboxItem>
+  );
+}
+
 function SessionFilterMenu({
   value,
   onChange,
   multiUser,
   view,
+  harnessMark,
+  machineTag,
   onViewChange,
 }: {
   value: SidebarTab;
@@ -3770,6 +3843,8 @@ function SessionFilterMenu({
   multiUser: boolean;
   /** Null while the sidebar_grouping_ui release flag is off: only Display is offered. */
   view: SidebarViewPreferences | null;
+  harnessMark: SidebarHarnessMark;
+  machineTag: boolean;
   onViewChange: (patch: Partial<SidebarViewPreferences>) => void;
 }) {
   const triggerLabel = view === null ? "Filter sessions" : "Group, sort, and filter sessions";
@@ -3822,6 +3897,15 @@ function SessionFilterMenu({
         <DropdownMenuContent align="end" className="min-w-44 [&_[role=menuitemradio]]:text-ui">
           <DropdownMenuLabel className="text-muted-foreground text-sm">Display</DropdownMenuLabel>
           {displayOptions}
+          <DropdownMenuSeparator />
+          <HarnessMarkMenu
+            value={harnessMark}
+            onChange={(mark) => onViewChange({ harnessMark: mark })}
+          />
+          <MachineTagItem
+            checked={machineTag}
+            onChange={(on) => onViewChange({ machineTag: on })}
+          />
         </DropdownMenuContent>
       ) : (
         <DropdownMenuContent align="end" className="min-w-56">
@@ -3896,6 +3980,15 @@ function SessionFilterMenu({
               </DropdownMenuCheckboxItem>
             ))}
           </FilterMenuSub>
+          <DropdownMenuSeparator />
+          <HarnessMarkMenu
+            value={harnessMark}
+            onChange={(mark) => onViewChange({ harnessMark: mark })}
+          />
+          <MachineTagItem
+            checked={machineTag}
+            onChange={(on) => onViewChange({ machineTag: on })}
+          />
         </DropdownMenuContent>
       )}
     </DropdownMenu>
@@ -4843,6 +4936,30 @@ function SessionHostIcon({
   return <Icon aria-hidden className="size-3.5 shrink-0" />;
 }
 
+// Four-letter machine tag, only while the option is on. An unbound local
+// session has no host name, so it renders nothing.
+function SessionMachineTag({
+  conversation,
+  hostsById,
+}: {
+  conversation: Conversation;
+  hostsById: ReadonlyMap<string, Host>;
+}) {
+  const desktopHostId = useDesktopHostId();
+  const info = classifySessionHost(
+    conversation,
+    hostsById,
+    resolveThisHostId(hostsById, desktopHostId),
+  );
+  const tag = sessionMachineTag(info);
+  if (tag === null) return null;
+  return (
+    <span data-testid="session-row-machine" className="shrink-0 font-mono text-muted-foreground">
+      [{tag}]
+    </span>
+  );
+}
+
 // Its own component so only rows showing Environment subscribe to the desktop host id.
 // Renders the whole meta segment: kind icon, host label, and an offline cue.
 function SessionEnvironmentLabel({
@@ -4880,6 +4997,32 @@ function SessionEnvironmentLabel({
 function SessionUpdatedLabel({ updatedAt }: { updatedAt: number }) {
   const now = useNow();
   return relativeTime(updatedAt * 1000, now.getTime());
+}
+
+// The harness name, only when the viewer picks Name. Asleep and Offline are
+// characters on the title line, so they do not add a row.
+function SessionKindLine({
+  conversation,
+  title,
+  mark,
+}: {
+  conversation: Conversation;
+  title: string;
+  mark: SidebarHarnessMark;
+}) {
+  const agentType = getConversationAgentType(conversation);
+  if (mark !== "name" || agentType === "Other" || agentType === title) return null;
+  return (
+    <span
+      data-testid="session-row-kind"
+      aria-hidden
+      className="flex w-full min-w-0 items-center gap-1.5 text-sm text-muted-foreground"
+    >
+      <span data-testid="session-row-harness" className="min-w-0 truncate">
+        {agentType}
+      </span>
+    </span>
+  );
 }
 
 // A row's second line: the "Show" environment and branch, each omitted when empty.
@@ -5017,15 +5160,74 @@ function SessionTooltipDetails({ conversation }: { conversation: Conversation })
   );
 }
 
-// Brand-color glyphs for harnesses ComposerAgentIcon draws in mono. Claude and Codex
-// are already in color there; Kimi's color mark is white-on-dark, and Cursor,
-// OpenCode, Pi and Goose have none.
-const TOOLTIP_COLOR_ICONS: Partial<
-  Record<NativeCodingAgentIconKind, ComponentType<{ size?: number; className?: string }>>
-> = { antigravity: AntigravityColor, devin: DevinColor, kiro: KiroColor };
+// One labeled line in the session popup. The value keeps its own icon.
+function SessionTooltipFact({
+  label,
+  testId,
+  children,
+}: {
+  label: string;
+  testId: string;
+  children: ReactNode;
+}) {
+  return (
+    <div data-testid={testId} className="flex items-baseline justify-between gap-3 text-sm">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className="flex min-w-0 items-center justify-end gap-1.5 text-right">{children}</span>
+    </div>
+  );
+}
+
+// Harness, reachability, and machine, each on its own line so none is truncated
+// away by the others. Shown in both tooltip variants. A missing harness or an
+// unseen poll omits that line. The machine line stays.
+function SessionTooltipFacts({
+  conversation,
+  hostsById,
+}: {
+  conversation: Conversation;
+  hostsById: ReadonlyMap<string, Host>;
+}) {
+  const agentType = getConversationAgentType(conversation);
+  const showHarness = agentType !== "Other";
+  const mark = showHarness ? harnessGlyph(agentType) : null;
+  const state = sessionReachabilityPopup(conversation);
+  const stateGlyph = sessionReachabilityGlyph(sessionReachability(conversation));
+  return (
+    <div className="mt-2 flex flex-col gap-1">
+      {showHarness && (
+        <SessionTooltipFact label="Harness" testId="session-tooltip-harness">
+          {mark !== null && (
+            <span aria-hidden className={cn("shrink-0", mark.className)}>
+              {mark.glyph}
+            </span>
+          )}
+          <span data-testid="session-tooltip-harness-name" className="truncate">
+            {agentType}
+          </span>
+        </SessionTooltipFact>
+      )}
+      {state !== null && (
+        <SessionTooltipFact label="State" testId="session-tooltip-state">
+          {stateGlyph !== null && (
+            <span aria-hidden className={cn("shrink-0", stateGlyph.className)}>
+              {stateGlyph.glyph}
+            </span>
+          )}
+          <span>{state}</span>
+        </SessionTooltipFact>
+      )}
+      <SessionTooltipFact label="Machine" testId="session-tooltip-location">
+        <SessionHostIcon conversation={conversation} hostsById={hostsById} />
+        <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
+      </SessionTooltipFact>
+    </div>
+  );
+}
 
 // The tooltip before the sidebar_grouping_ui release flag; remove with the flag
-// (review by 0.19.0).
+// (review by 0.19.0). It still names harness, state, and machine. It does not
+// look up GitHub.
 function LegacySessionTooltipContent({
   conversation,
   hostsById,
@@ -5041,9 +5243,7 @@ function LegacySessionTooltipContent({
       align="start"
       sideOffset={8}
       data-testid="session-tooltip-content"
-      // Mirror PinnedProjectFlyoutContent's compact HoverCard look: title,
-      // then muted, small-icon metadata lines.
-      className="menu-surface w-64 max-w-[calc(100vw-2rem)] flex-col items-stretch rounded-lg p-2.5 text-popover-foreground whitespace-normal shadow-menu"
+      className="menu-surface w-72 max-w-[calc(100vw-2rem)] flex-col items-stretch rounded-lg p-2.5 text-popover-foreground whitespace-normal shadow-menu"
     >
       <p className="sidebar-compact-text line-clamp-3 font-medium">
         {conversation.title ?? conversation.id}
@@ -5052,13 +5252,7 @@ function LegacySessionTooltipContent({
           {relativeTime(conversation.updated_at * 1000)}
         </span>
       </p>
-      <p
-        data-testid="session-tooltip-location"
-        className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
-      >
-        <SessionHostIcon conversation={conversation} hostsById={hostsById} />
-        <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
-      </p>
+      <SessionTooltipFacts conversation={conversation} hostsById={hostsById} />
       {conversation.git_branch && (
         <p
           data-testid="session-tooltip-branch"
@@ -5092,13 +5286,6 @@ function SessionTooltipContent({
       />
     );
   }
-  const nativeAgent = nativeCodingAgentForWrapper(conversation.labels?.[WRAPPER_LABEL_KEY]);
-  const ColorIcon = nativeAgent ? TOOLTIP_COLOR_ICONS[nativeAgent.iconKind] : undefined;
-  const harnessAgent = nativeAgent
-    ? { name: nativeAgent.agentName, harness: nativeAgent.harness }
-    : conversation.agent_name === "nessie"
-      ? { name: "nessie", harness: null }
-      : null;
 
   return (
     <TooltipContent
@@ -5106,35 +5293,15 @@ function SessionTooltipContent({
       align="start"
       sideOffset={8}
       data-testid="session-tooltip-content"
-      // Mirror PinnedProjectFlyoutContent's compact HoverCard look: title and a
-      // muted "updated · harness · environment" line, then label/value rows.
       className="menu-surface w-72 max-w-[calc(100vw-2rem)] flex-col items-stretch rounded-lg p-2.5 text-popover-foreground whitespace-normal shadow-menu"
     >
       <p className="sidebar-compact-text line-clamp-3 font-medium">
         {conversation.title ?? conversation.id}
       </p>
-      <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
-        <span className="shrink-0">{relativeTime(conversation.updated_at * 1000)}</span>
-        <span aria-hidden>·</span>
-        {harnessAgent && (
-          <span
-            role="img"
-            aria-label={`${getConversationAgentType(conversation)} harness`}
-            data-testid="session-tooltip-harness"
-            className="flex shrink-0"
-          >
-            {ColorIcon ? (
-              <ColorIcon size={16} className="shrink-0" />
-            ) : (
-              <ComposerAgentIcon agent={harnessAgent} className="size-4" />
-            )}
-          </span>
-        )}
-        <span data-testid="session-tooltip-location" className="flex min-w-0 items-center gap-1.5">
-          <SessionHostIcon conversation={conversation} hostsById={hostsById} />
-          <span className="truncate">{sessionLocationLabel(conversation, hostsById)}</span>
-        </span>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {relativeTime(conversation.updated_at * 1000)}
       </p>
+      <SessionTooltipFacts conversation={conversation} hostsById={hostsById} />
       <SessionTooltipDetails conversation={conversation} />
       {hasError && <SessionErrorHint />}
     </TooltipContent>
@@ -5315,6 +5482,14 @@ function ConversationRowImpl({
   }, [conversation.title, pendingTitle, rename.isSuccess, rename.isError]);
 
   const label = pendingTitle ?? conversationDisplayLabel(conversation);
+  const harnessMark = useContext(SidebarHarnessMarkContext);
+  const showMachineTag = useContext(SidebarMachineTagContext);
+  const agentType = getConversationAgentType(conversation);
+  const reachability = sessionReachability(conversation);
+  const reachWord = sessionReachabilityWord(reachability);
+  const reachGlyph = sessionReachabilityGlyph(reachability);
+  const showHarnessName = harnessMark === "name" && agentType !== "Other" && agentType !== label;
+  const markGlyph = harnessGlyph(agentType);
   // The list-level map is the namespace path (`path`, else the project name).
   // A filed session with no entry yet stays unlabeled rather than flashing `/Role`.
   const roleProjectPath =
@@ -5399,7 +5574,7 @@ function ConversationRowImpl({
   // Overlays (checkbox, badges, controls; each also `-translate-y-1/2`) center on
   // the row, or on the title line — padding + half its 20px box — above a meta line.
   const overlayTop =
-    metaEnvironment !== null || metaRepo !== null || metaBranch !== null
+    showHarnessName || metaEnvironment !== null || metaRepo !== null || metaBranch !== null
       ? "top-4 md:top-3.5"
       : "top-1/2";
 
@@ -5692,7 +5867,28 @@ function ConversationRowImpl({
               {roleHandleText}
             </span>
           )}
+          {markGlyph !== null && (
+            <span
+              data-testid="session-row-harness-mark"
+              data-harness={agentType}
+              aria-hidden
+              className={cn("shrink-0", markGlyph.className)}
+            >
+              {markGlyph.glyph}
+            </span>
+          )}
+          {reachGlyph !== null && (
+            <span
+              data-testid="session-row-reachability"
+              data-reachability={reachability}
+              aria-hidden
+              className={cn("shrink-0", reachGlyph.className)}
+            >
+              {reachGlyph.glyph}
+            </span>
+          )}
           <span
+            data-testid="session-row-title"
             className={cn(
               "min-w-0 truncate",
               // The optimistic first-prompt label is a placeholder until the
@@ -5702,9 +5898,14 @@ function ConversationRowImpl({
           >
             {label}
             {hasUnseenMessages && <span className="sr-only"> (unread)</span>}
+            {reachWord !== null && <span className="sr-only">, {reachWord}</span>}
           </span>
+          {showMachineTag && (
+            <SessionMachineTag conversation={conversation} hostsById={hostsById} />
+          )}
         </span>
       </div>
+      <SessionKindLine conversation={conversation} title={label} mark={harnessMark} />
       {/* Row 2: the "Show" metadata, each part omitted when it has no value. */}
       <SessionMetaLine environment={metaEnvironment} repo={metaRepo} branch={metaBranch} />
     </Link>
@@ -6253,6 +6454,10 @@ const RENDERED_CONVERSATION_FIELDS: readonly (keyof Conversation)[] = [
   "git_branch",
   "host_id",
   "runner_id",
+  "runner_online",
+  "host_online",
+  "agent_name",
+  "harness",
   "project_id",
   "owner",
   "pending_elicitations_count",

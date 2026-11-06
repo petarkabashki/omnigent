@@ -67,6 +67,14 @@
   --color-chart-3: var(--chart-3);
   --color-chart-2: var(--chart-2);
   --color-chart-1: var(--chart-1);
+  --color-harness-1: var(--harness-1);
+  --color-harness-2: var(--harness-2);
+  --color-harness-3: var(--harness-3);
+  --color-harness-4: var(--harness-4);
+  --color-harness-5: var(--harness-5);
+  --color-harness-6: var(--harness-6);
+  --color-harness-7: var(--harness-7);
+  --color-harness-8: var(--harness-8);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -284,6 +292,15 @@
   --chart-3: #2ea65c;
   --chart-4: #d4972a;
   --chart-5: #8e99a4;
+  /* Sidebar title hues for harness families. Dark enough to read on a light sidebar. */
+  --harness-1: #9a5410;
+  --harness-2: #187a45;
+  --harness-3: #1a5fad;
+  --harness-4: #6d35b0;
+  --harness-5: #0e6e78;
+  --harness-6: #a12668;
+  --harness-7: #8a3d12;
+  --harness-8: #3d4e9a;
   --radius: 0.5rem;
   --radius-otto-button: 6px;
   --radius-otto-sm: 8px;
@@ -345,6 +362,15 @@
   --chart-3: oklch(0.68 0.15 145);
   --chart-4: oklch(0.75 0.16 70);
   --chart-5: oklch(0.65 0.008 240);
+  /* Same family order as light mode, lightened for a dark sidebar. */
+  --harness-1: #e3a45a;
+  --harness-2: #62c48e;
+  --harness-3: #8cbcf5;
+  --harness-4: #c9a6f5;
+  --harness-5: #73d0da;
+  --harness-6: #f2a4cc;
+  --harness-7: #e8b07a;
+  --harness-8: #b0baf0;
   --tooltip-bg: #2a2440;
 }
 

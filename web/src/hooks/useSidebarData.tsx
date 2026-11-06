@@ -50,9 +50,21 @@ function useSidebarSources(config: SidebarConfig, identityReady: boolean) {
   const client = useQueryClient();
   const serverInfo = useServerInfo();
   const [storedView, setView] = useState(readSidebarViewPreferences);
-  const view = isFeatureEnabled(serverInfo, "sidebar_grouping_ui")
-    ? storedView
-    : DEFAULT_SIDEBAR_VIEW;
+  const groupingUi = isFeatureEnabled(serverInfo, "sidebar_grouping_ui");
+  // Grouping, ordering, and the Show lines stay on the default layout while
+  // that flag is off. The harness mark and the machine tag are independent:
+  // both sit on the title line, and the filter menu can change them anyway.
+  const view = useMemo(
+    () =>
+      groupingUi
+        ? storedView
+        : {
+            ...DEFAULT_SIDEBAR_VIEW,
+            harnessMark: storedView.harnessMark,
+            machineTag: storedView.machineTag,
+          },
+    [groupingUi, storedView],
+  );
   const sortBy: SessionSortBy = sidebarSortBy(sidebarBaseOrdering(view));
   const customOrder = useMemo(
     () => (view.ordering === "custom" && view.custom ? customSortOrder(view.custom) : null),

@@ -31,6 +31,31 @@ export function classifySessionHost(
   return { kind, name: host?.name ?? hostId, sandboxProvider: null, offline };
 }
 
+const MACHINE_TAG_MAX = 4;
+
+/**
+ * At most four letters or digits from the first word, for a row tag such as
+ * `[hub]`. `hpz4` stays `hpz4`. `optiplex` becomes `opti`. `gpu26` becomes `gpu2`.
+ */
+export function machineRowTag(name: string): string | null {
+  const word = name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .find((part) => part.length > 0);
+  if (word === undefined) return null;
+  return word.slice(0, MACHINE_TAG_MAX);
+}
+
+/**
+ * Short tag for where the session runs. Uses the host's own name, including
+ * this machine, so a host named hub reads `[hub]`. A sandbox uses its provider.
+ * An unbound local session has no name and no tag.
+ */
+export function sessionMachineTag(info: SessionHostInfo): string | null {
+  if (info.kind === "sandbox") return machineRowTag(info.sandboxProvider ?? info.name);
+  return machineRowTag(info.name);
+}
+
 const KIND_RANK: Record<SessionHostKind, number> = { local: 0, remote: 1, sandbox: 2 };
 
 /** Group titles ordered: this device, then hosts alphabetically, sandboxes last. */

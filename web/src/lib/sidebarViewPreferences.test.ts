@@ -18,7 +18,13 @@ describe("sidebarViewPreferences", () => {
   it.each(["status", "created", "updated", "harness"] as const)(
     "round-trips %s grouping",
     (grouping) => {
-      const view = { grouping, ordering: "created", show: ["updated", "branch"] } as const;
+      const view = {
+        grouping,
+        ordering: "created",
+        show: ["updated", "branch"],
+        harnessMark: "name",
+        machineTag: true,
+      } as const;
       writeSidebarViewPreferences(view);
       expect(readSidebarViewPreferences()).toEqual(view);
     },
@@ -33,6 +39,8 @@ describe("sidebarViewPreferences", () => {
       grouping: "status",
       ordering: "created",
       show: ["branch"],
+      harnessMark: "color",
+      machineTag: false,
     });
   });
 
@@ -45,6 +53,8 @@ describe("sidebarViewPreferences", () => {
       grouping: "default",
       ordering: "updated",
       show: ["branch"],
+      harnessMark: "color",
+      machineTag: false,
     });
 
     localStorage.setItem("omnigent:sidebar-view", "{not json");
@@ -53,7 +63,14 @@ describe("sidebarViewPreferences", () => {
 
   it("round-trips a Custom order and drops a malformed one", () => {
     const custom = { base: "created", since: 100, ids: ["b", "a"] } as const;
-    writeSidebarViewPreferences({ grouping: "status", ordering: "custom", show: [], custom });
+    writeSidebarViewPreferences({
+      grouping: "status",
+      ordering: "custom",
+      show: [],
+      harnessMark: "color",
+      machineTag: false,
+      custom,
+    });
     expect(readSidebarViewPreferences()).toMatchObject({ ordering: "custom", custom });
 
     localStorage.setItem(
