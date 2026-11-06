@@ -4839,6 +4839,23 @@ async function refreshSessionBinding(id: string): Promise<void> {
   setterFor(id)((s) => sessionBindingPatch(session, s, launchBeforeFetch));
 }
 
+/** Add the persisted engine-switch boundary row to the transcript without reloading history. */
+async function appendEngineSwitchBoundary(id: string, boundaryItemId: string): Promise<void> {
+  let page: SessionItemsPage;
+  try {
+    page = await fetchSessionItemsPage(id, { limit: 20 });
+  } catch {
+    return;
+  }
+  const boundary = itemsToBlocks(page.items.filter((item) => item.id === boundaryItemId));
+  if (boundary.length === 0) return;
+  setterFor(id)((s) =>
+    s.blocks.some((b) => b.ctx.itemId === boundaryItemId)
+      ? {}
+      : { blocks: [...s.blocks, ...boundary] },
+  );
+}
+
 /**
  * Start the session SSE stream, kick off the pump in the background
  * once the stream connects, then fetch metadata plus the most recent
@@ -8921,6 +8938,19 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       // runner moved to the new one — so its optimistic bubble would otherwise
       // spin forever. Drop it; resuming starts a fresh turn.
       applyToNamedConversation(event.conversationId, { pendingUserMessages: [] });
+      return;
+    case "session_reset":
+      // Only an engine switch changes what the composer and sidebar show; a
+      // plain reset leaves the binding as it was.
+      if (!event.engineChanged) return;
+      // A create-time model seed belongs to the old engine; let the session's own win.
+      applyToNamedConversation(event.conversationId, { sessionModelSeeded: false });
+      void refreshSessionBinding(event.conversationId);
+      void appendEngineSwitchBoundary(event.conversationId, event.boundaryItemId);
+      queryClient?.invalidateQueries({ queryKey: ["session-agent", event.conversationId] });
+      queryClient?.invalidateQueries({ queryKey: ["conversations"] });
+      queryClient?.setQueryData<TerminalInfo[]>(terminalsQueryKey(event.conversationId), []);
+      queryClient?.invalidateQueries({ queryKey: terminalsQueryKey(event.conversationId) });
       return;
     case "session_btw_sidechat":
       // Transient /btw sidechat overlay: show the question + answer in a

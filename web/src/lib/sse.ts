@@ -47,6 +47,7 @@ import type {
   SessionResource,
   SessionResourceCreatedEvent,
   SessionResourceDeletedEvent,
+  SessionResetEvent,
   SessionSupersededEvent,
   SessionViewer,
   SessionTerminalActivityEvent,
@@ -884,6 +885,18 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
       targetConversationId,
       reason: "clear",
     } satisfies SessionSupersededEvent;
+  }
+  if (eventType === "session.reset") {
+    const conversationId = data.conversation_id;
+    const boundaryItemId = data.boundary_item_id;
+    if (typeof conversationId !== "string" || !conversationId) return null;
+    if (typeof boundaryItemId !== "string" || !boundaryItemId) return null;
+    return {
+      type: "session_reset",
+      conversationId,
+      boundaryItemId,
+      engineChanged: data.engine_changed === true,
+    } satisfies SessionResetEvent;
   }
   if (eventType === "session.btw_sidechat") {
     const conversationId = data.conversation_id;

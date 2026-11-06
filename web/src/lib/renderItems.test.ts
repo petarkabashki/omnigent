@@ -4466,3 +4466,23 @@ describe("buildBubbles — lastActivityAtS", () => {
     expect(asst.lastActivityAtS).toBeUndefined();
   });
 });
+
+describe("buildBubbles — engine switch boundary", () => {
+  it("renders a context_reset block as its own bubble between turns", () => {
+    const bubbles = buildBubbles(
+      [
+        {
+          type: "context_reset",
+          ctx: ctx({ itemId: "reset_item", responseId: "reset_1" }),
+          from: { harness: "claude-native" },
+          to: { harness: "codex-native" },
+          summary: "handoff",
+        },
+      ],
+      null,
+    );
+    expect(bubbles).toMatchObject([
+      { kind: "context_reset", itemId: "reset_item", summary: "handoff" },
+    ]);
+  });
+});

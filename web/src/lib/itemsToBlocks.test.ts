@@ -940,3 +940,35 @@ describe("itemsToBlocks — edge cases", () => {
     expect(texts.some((t) => t.includes("continued from a previous conversation"))).toBe(false);
   });
 });
+
+describe("itemsToBlocks — context_reset", () => {
+  const resetItem = (engine_change: unknown): ConversationItem =>
+    ({
+      id: "reset_1",
+      response_id: "reset_1",
+      type: "context_reset",
+      status: "completed",
+      summary: "Handoff: finish the refactor.",
+      engine_change,
+    }) as ConversationItem;
+
+  it("turns an engine switch into a boundary block carrying the handoff note", () => {
+    const [block] = itemsToBlocks([
+      resetItem({
+        from: { agent_id: "ag_a", harness: "claude-native", model: "opus" },
+        to: { agent_id: "ag_b", harness: "codex-native", model: "gpt" },
+        usage_before: {},
+      }),
+    ]);
+    expect(block).toMatchObject({
+      type: "context_reset",
+      from: { harness: "claude-native" },
+      to: { harness: "codex-native" },
+      summary: "Handoff: finish the refactor.",
+    });
+  });
+
+  it("renders nothing for a plain reset", () => {
+    expect(itemsToBlocks([resetItem(null)])).toEqual([]);
+  });
+});

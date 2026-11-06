@@ -5,7 +5,8 @@ import { getSessionSignInLink } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
 import { ForkDialogContextProvider } from "@/shell/ForkDialogContext";
-import { ErrorBanner, RoutingDecisionCard } from "./StatusBlocks";
+import { SwitchEngineContextProvider } from "@/shell/SwitchEngineContext";
+import { EngineSwitchMarker, ErrorBanner, RoutingDecisionCard } from "./StatusBlocks";
 
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(() => Promise.resolve()) }));
 vi.mock("@/lib/sessionsApi", () => ({ getSessionSignInLink: vi.fn() }));
@@ -1426,5 +1427,51 @@ describe("ErrorBanner — usage limit", () => {
     expect(screen.getByText(/usage limit was reached/i)).toBeInTheDocument();
     expect(screen.queryByTestId("error-remediation-actions")).toBeNull();
     expect(screen.queryByRole("button", { name: /^(retry|continue)/i })).toBeNull();
+  });
+});
+
+describe("EngineSwitchMarker", () => {
+  it("names both engines and keeps the handoff note collapsed until asked", () => {
+    render(
+      <EngineSwitchMarker
+        from={{ harness: "claude-native" }}
+        to={{ harness: "codex-native", model: "gpt-6" }}
+        summary="Pick up at the failing test."
+      />,
+    );
+    expect(screen.getByTestId("engine-switch-marker")).toHaveTextContent(
+      "Switched from Claude Code to Codex (gpt-6)",
+    );
+    expect(screen.queryByTestId("engine-switch-summary")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show handoff note" }));
+    expect(screen.getByTestId("engine-switch-summary")).toHaveTextContent(
+      "Pick up at the failing test.",
+    );
+  });
+});
+
+describe("ErrorBanner — usage limit switch action", () => {
+  beforeEach(() => useChatStore.setState({ conversationId: "conv_1" }));
+  afterEach(() => useChatStore.setState({ conversationId: null }));
+
+  const renderLimit = (value: { canSwitchEngine: boolean; currentSessionId: string }) => {
+    const openSwitchEngine = vi.fn();
+    render(
+      <SwitchEngineContextProvider value={{ ...value, openSwitchEngine }}>
+        <ErrorBanner message="limit" source="harness" code="usage_limit_reached" />
+      </SwitchEngineContextProvider>,
+    );
+    return openSwitchEngine;
+  };
+
+  it("offers Switch engine… and opens the dialog", () => {
+    const open = renderLimit({ canSwitchEngine: true, currentSessionId: "conv_1" });
+    fireEvent.click(screen.getByRole("button", { name: "Switch engine…" }));
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("hides it when the session cannot switch", () => {
+    renderLimit({ canSwitchEngine: false, currentSessionId: "conv_1" });
+    expect(screen.queryByRole("button", { name: "Switch engine…" })).toBeNull();
   });
 });

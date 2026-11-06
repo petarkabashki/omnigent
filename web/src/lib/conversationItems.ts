@@ -130,6 +130,25 @@ export interface CompactionItem extends BaseItem {
   token_count?: number;
 }
 
+/** One side of an engine switch recorded on a `context_reset` boundary. */
+export interface EngineChangeEndpoint {
+  agent_id?: string | null;
+  harness?: string | null;
+  model?: string | null;
+}
+
+/** Boundary row written when a session is reset, optionally onto another engine. */
+export interface ContextResetItem extends BaseItem {
+  type: "context_reset";
+  summary?: string | null;
+  previous_external_session_id?: string | null;
+  engine_change?: {
+    from?: EngineChangeEndpoint;
+    to?: EngineChangeEndpoint;
+    usage_before?: Record<string, unknown>;
+  } | null;
+}
+
 /**
  * A Claude Code slash-command invocation from the embedded TUI's
  * JSONL transcript. Lives in NON_CONTENT_ITEM_TYPES server-side so
@@ -195,6 +214,7 @@ export type ConversationItem =
   | ReasoningItem
   | NativeToolItem
   | CompactionItem
+  | ContextResetItem
   | SlashCommandItem
   | RoutingDecisionItem
   | TerminalCommandItem
@@ -226,6 +246,10 @@ export function isNativeToolItem(item: ConversationItem): item is NativeToolItem
 
 export function isCompactionItem(item: ConversationItem): item is CompactionItem {
   return item.type === "compaction";
+}
+
+export function isContextResetItem(item: ConversationItem): item is ContextResetItem {
+  return item.type === "context_reset";
 }
 
 export function isSlashCommandItem(item: ConversationItem): item is SlashCommandItem {

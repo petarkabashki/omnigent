@@ -105,6 +105,7 @@ import {
   isValidSandboxWorkspaceLength,
   splitSandboxWorkspace,
 } from "@/lib/sandboxRepositories";
+import { AgentTargetSelect } from "./AgentTargetSelect";
 import { SandboxRepositoryPicker } from "./SandboxRepositoryPicker";
 import { resolveWorkspacePath, useResolvedHostHome } from "./WorkspacePicker";
 import { WorkspacePickerDialog } from "./WorkspacePickerDialog";
@@ -1875,31 +1876,28 @@ function SupportedForkSessionForm({
           <label htmlFor="fork-session-agent" className="text-sm font-medium text-muted-foreground">
             Agent
           </label>
-          <Select
+          <AgentTargetSelect
+            id="fork-session-agent"
+            testIdPrefix="fork-session-agent"
+            componentId="fork_session.agent"
             value={agentChoice}
             onValueChange={setAgentChoice}
-            componentId="fork_session.agent"
-          >
-            <SelectTrigger
-              id="fork-session-agent"
-              data-testid="fork-session-agent-select"
-              className="w-full text-sm"
-            >
-              {/* Custom value so the default reads "<agent> (same as original
-                    session)" with the parenthetical greyed, mirroring the option. */}
-              <SelectValue>
-                {switching ? (
-                  (switchableAgents.find((a) => a.id === agentChoice)?.display_name ??
-                  sourceAgentDisplay)
-                ) : (
-                  <>
-                    {sourceAgentDisplay}{" "}
-                    <span className="text-muted-foreground">(same as original session)</span>
-                  </>
-                )}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent position="popper" align="start">
+            builtins={builtinSwitchable}
+            customs={customSwitchable}
+            // Custom value so the default reads "<agent> (same as original
+            // session)" with the parenthetical greyed, mirroring the option.
+            selectedContent={
+              switching ? (
+                (switchableAgents.find((a) => a.id === agentChoice)?.display_name ??
+                sourceAgentDisplay)
+              ) : (
+                <>
+                  {sourceAgentDisplay}{" "}
+                  <span className="text-muted-foreground">(same as original session)</span>
+                </>
+              )
+            }
+            leadingItem={
               <SelectItem
                 value={SAME_AS_SOURCE}
                 data-testid="fork-session-agent-option-same"
@@ -1908,31 +1906,8 @@ function SupportedForkSessionForm({
                 {sourceAgentDisplay}{" "}
                 <span className="text-muted-foreground">(same as original session)</span>
               </SelectItem>
-              {builtinSwitchable.map((agent) => (
-                <SelectItem
-                  key={agent.id}
-                  value={agent.id}
-                  data-testid={`fork-session-agent-option-${agent.id}`}
-                  className="text-sm"
-                >
-                  {agent.display_name}
-                </SelectItem>
-              ))}
-              {/* Divider between the built-in group and the custom group,
-                  only when both are present (mirrors NewChatDialog). */}
-              {builtinSwitchable.length > 0 && customSwitchable.length > 0 && <SelectSeparator />}
-              {customSwitchable.map((agent) => (
-                <SelectItem
-                  key={agent.id}
-                  value={agent.id}
-                  data-testid={`fork-session-agent-option-${agent.id}`}
-                  className="text-sm"
-                >
-                  {agent.display_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            }
+          />
         </div>
 
         {/* Run config (native targets only): model / effort / permission mode.

@@ -550,3 +550,31 @@ describe("parseEvent — response.elicitation_resolved", () => {
     } satisfies ElicitationResolved);
   });
 });
+
+describe("parseEvent — session.reset", () => {
+  it("parses an engine switch", () => {
+    expect(
+      parseEvent("session.reset", {
+        conversation_id: "conv_1",
+        boundary_item_id: "item_9",
+        epoch: 2,
+        engine_changed: true,
+      }),
+    ).toEqual({
+      type: "session_reset",
+      conversationId: "conv_1",
+      boundaryItemId: "item_9",
+      engineChanged: true,
+    });
+  });
+
+  it("treats a missing engine_changed as a plain reset", () => {
+    expect(
+      parseEvent("session.reset", { conversation_id: "conv_1", boundary_item_id: "item_9" }),
+    ).toMatchObject({ engineChanged: false });
+  });
+
+  it("returns null without a boundary item id", () => {
+    expect(parseEvent("session.reset", { conversation_id: "conv_1" })).toBeNull();
+  });
+});

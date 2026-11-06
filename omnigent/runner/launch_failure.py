@@ -786,7 +786,8 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
         "continues the turn."
     ),
     USAGE_LIMIT_REACHED: (
-        "The account's usage limit was reached. It has to reset before this session can continue."
+        "The account's usage limit was reached. Wait for it to reset, "
+        "or switch this session to another engine."
     ),
     "budget_exhausted": (
         "The AI gateway refused this turn because a spending budget or usage limit is "

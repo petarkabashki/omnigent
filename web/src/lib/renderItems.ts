@@ -35,7 +35,7 @@ import {
   isSessionScopedDecision,
   routingExtras,
 } from "./routingDecision";
-import type { AssistantMessagePhase } from "./conversationItems";
+import type { AssistantMessagePhase, EngineChangeEndpoint } from "./conversationItems";
 import { isSystemUserContent } from "./systemMessage";
 import type { AgyPermission, CodexPersistMode, RememberScope } from "./types";
 import type { ActiveResponse } from "@/store/types";
@@ -237,6 +237,13 @@ export type Bubble =
     }
   | { kind: "compaction_loading"; itemId: string; createdAtS?: number }
   | { kind: "compaction"; itemId: string }
+  | {
+      kind: "context_reset";
+      itemId: string;
+      from: EngineChangeEndpoint;
+      to: EngineChangeEndpoint;
+      summary: string;
+    }
   | { kind: "subagent_activity"; itemId: string; data: Record<string, unknown> }
   | {
       kind: "routing_decision";
@@ -339,6 +346,7 @@ function newestAssistantTurnId(blocks: AnyBlock[]): string | null {
       b.type === "user_message" ||
       isTerminalCommandInput(b) ||
       b.type === "compaction" ||
+      b.type === "context_reset" ||
       b.type === "compaction_loading" ||
       b.type === "routing_decision"
     ) {
@@ -961,6 +969,20 @@ function walkBubbles(
       continue;
     }
 
+    if (b.type === "context_reset") {
+      lastBubbleStart = i;
+      lastBubbleCount = 1;
+      bubbles.push({
+        kind: "context_reset",
+        itemId: b.ctx.itemId ?? `context_reset_${i}`,
+        from: b.from,
+        to: b.to,
+        summary: b.summary,
+      });
+      i += 1;
+      continue;
+    }
+
     if (b.type === "routing_decision") {
       // The create-time pick the first turn immediately repeats — the turn
       // chip stands for both, so this one renders nothing.
@@ -1023,6 +1045,7 @@ function walkBubbles(
         cur.type === "user_message" ||
         isTerminalCommandInput(cur) ||
         cur.type === "compaction" ||
+        cur.type === "context_reset" ||
         cur.type === "compaction_loading" ||
         cur.type === "routing_decision"
       )
@@ -1525,6 +1548,7 @@ function isAssistantSideBlock(b: AnyBlock): boolean {
     b.type !== "user_message" &&
     !isTerminalCommandInput(b) &&
     b.type !== "compaction" &&
+    b.type !== "context_reset" &&
     // compaction_loading has its own top-level bubble slot and must not
     // end up in an assistant bubble's item list.
     b.type !== "compaction_loading" &&
@@ -1977,6 +2001,7 @@ export function bubblesEqual(a: Bubble, b: Bubble): boolean {
   ) {
     return a.itemId === b.itemId;
   }
+  if (a.kind === "context_reset" && b.kind === "context_reset") return a.itemId === b.itemId;
   if (a.kind === "routing_decision" && b.kind === "routing_decision") {
     // Verdict fields are immutable per item, so the id alone identifies it.
     return a.itemId === b.itemId;

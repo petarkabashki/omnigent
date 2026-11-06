@@ -18,6 +18,7 @@ import {
   type AnyBlock,
   type BlockContext,
   type CompactionBlock,
+  type ContextResetBlock,
   type ElicitationBlock,
   type ErrorBlock,
   type NativeToolBlock,
@@ -38,6 +39,7 @@ import {
 import { formatNativeLabel, formatToolArgsBrief } from "./blockStream";
 import {
   type CompactionItem,
+  type ContextResetItem,
   type ConversationItem,
   type ErrorItem,
   type FunctionCallItem,
@@ -50,6 +52,7 @@ import {
   type TerminalCommandItem,
   assistantMessagePhase,
   isCompactionItem,
+  isContextResetItem,
   isErrorItem,
   isFunctionCallItem,
   isFunctionCallOutputItem,
@@ -300,6 +303,10 @@ function itemToBlock(item: ConversationItem, agentName?: string | null): AnyBloc
   if (isCompactionItem(item)) {
     return compactionToBlock(item);
   }
+  if (isContextResetItem(item)) {
+    // A plain reset has no visible boundary; only an engine switch does.
+    return item.engine_change ? contextResetToBlock(item, item.engine_change) : null;
+  }
   if (isSlashCommandItem(item)) {
     return slashCommandToBlock(item);
   }
@@ -435,6 +442,19 @@ function nativeToolToBlock(item: NativeToolItem): NativeToolBlock {
     toolType: item.type,
     label: formatNativeLabel(item.type, data),
     data,
+  };
+}
+
+function contextResetToBlock(
+  item: ContextResetItem,
+  change: NonNullable<ContextResetItem["engine_change"]>,
+): ContextResetBlock {
+  return {
+    type: "context_reset",
+    ctx: ctxFor(item),
+    from: change.from ?? {},
+    to: change.to ?? {},
+    summary: item.summary ?? "",
   };
 }
 

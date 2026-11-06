@@ -11,6 +11,7 @@
 import {
   BrainCircuitIcon,
   CheckIcon,
+  ArrowRightLeftIcon,
   ChevronRightIcon,
   CopyIcon,
   ExternalLinkIcon,
@@ -40,6 +41,9 @@ import { copyText } from "@/lib/clipboard";
 import { getSessionSignInLink } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { useForkDialog } from "@/shell/ForkDialogContext";
+import { useSwitchEngine } from "@/shell/SwitchEngineContext";
+import type { EngineChangeEndpoint } from "@/lib/conversationItems";
+import { nativeCodingAgentForHarness } from "@/lib/nativeCodingAgents";
 import type { RelatedRenderError, RenderErrorDetails } from "@/lib/renderItems";
 import {
   type RoutingDecisionExtras,
@@ -103,7 +107,7 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   transient_upstream_error:
     "The model service hit a temporary error mid-response; retrying usually continues the turn.",
   usage_limit_reached:
-    "The account's usage limit was reached. It has to reset before this session can continue.",
+    "The account's usage limit was reached. Wait for it to reset, or switch this session to another engine.",
   budget_exhausted:
     "The AI gateway refused this turn because a spending budget or usage limit is exhausted. Contact an admin to raise it, or use a different budget.",
   codex_compaction_model_failed:
@@ -287,6 +291,32 @@ function ErrorForkAction({
           {label}
         </Button>
       </DisabledActionTooltip>
+    </div>
+  );
+}
+
+/** Usage-limit card action that opens the switch-engine dialog for the open session. */
+function ErrorSwitchEngineAction() {
+  const switchEngine = useSwitchEngine();
+  const conversationId = useScopedConversationId();
+  if (!switchEngine?.canSwitchEngine || !conversationId) return null;
+  if (switchEngine.currentSessionId !== conversationId) return null;
+  return (
+    <div
+      data-testid="error-usage-limit-actions"
+      className="mx-[4px] mt-[6px]"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-auto max-w-full whitespace-normal text-left"
+        onClick={switchEngine.openSwitchEngine}
+      >
+        <ArrowRightLeftIcon className="size-3.5 shrink-0" aria-hidden="true" />
+        Switch engine…
+      </Button>
     </div>
   );
 }
@@ -630,6 +660,9 @@ export function ErrorBanner({
             <ErrorForkAction label="Fork session…" icon={SplitIcon} />
           </div>
         ) : null}
+        {[{ code }, ...relatedErrors].some((error) => error.code === "usage_limit_reached") ? (
+          <ErrorSwitchEngineAction />
+        ) : null}
         {signInComplete && parsed.message ? (
           <p
             data-testid="error-notice-body"
@@ -930,6 +963,56 @@ export function RetryIndicator({
  * rendered as a `Shimmer` in `ChatPage` to match the "Working…"
  * indicator.
  */
+export function EngineSwitchMarker({
+  from,
+  to,
+  summary,
+}: {
+  from: EngineChangeEndpoint;
+  to: EngineChangeEndpoint;
+  summary: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+  return (
+    <div data-testid="engine-switch-marker" className="flex flex-col gap-1 text-sm">
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <ArrowRightLeftIcon className="size-3" aria-hidden="true" />
+        <span>
+          Switched from {engineLabel(from)} to {engineLabel(to)}
+        </span>
+        {summary ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={panelId}
+            onClick={() => setOpen((value) => !value)}
+            className="cursor-pointer text-xs underline-offset-2 hover:text-foreground hover:underline"
+          >
+            {open ? "Hide handoff note" : "Show handoff note"}
+          </button>
+        ) : null}
+      </div>
+      {summary && open ? (
+        <p
+          id={panelId}
+          data-testid="engine-switch-summary"
+          className="ml-5 whitespace-pre-wrap text-muted-foreground"
+        >
+          {summary}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Display name of one side of an engine switch: its harness, plus model when recorded. */
+function engineLabel(endpoint: EngineChangeEndpoint): string {
+  const harness = endpoint.harness ?? endpoint.agent_id ?? "the previous engine";
+  const name = nativeCodingAgentForHarness(endpoint.harness)?.displayName ?? harness;
+  return endpoint.model ? `${name} (${endpoint.model})` : name;
+}
+
 export function CompactionMarker() {
   return (
     <div className="flex items-center gap-2 text-muted-foreground text-sm italic">

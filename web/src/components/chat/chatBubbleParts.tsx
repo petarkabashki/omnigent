@@ -44,6 +44,7 @@ import {
 } from "@/components/blocks/BlockRenderer";
 import {
   CompactionMarker,
+  EngineSwitchMarker,
   CONTINUE_TURN_ERROR_CODES,
   ErrorBanner,
   RoutingDecisionCard,
@@ -360,6 +361,7 @@ export function bubbleKey(bubble: Bubble): string {
   if (bubble.kind === "user") return `user:${bubble.stableKey ?? bubble.itemId}`;
   if (bubble.kind === "compaction_loading") return `compaction_loading:${bubble.itemId}`;
   if (bubble.kind === "compaction") return `compaction:${bubble.itemId}`;
+  if (bubble.kind === "context_reset") return `context_reset:${bubble.itemId}`;
   if (bubble.kind === "routing_decision") return `routing_decision:${bubble.itemId}`;
   if (bubble.kind === "subagent_activity") return `subagent_activity:${bubble.itemId}`;
   return `assistant:${bubble.stableId}`;
@@ -601,6 +603,9 @@ export const BubbleView = memo(
       return <CompactionLoadingIndicator createdAtS={bubble.createdAtS} />;
     }
     if (bubble.kind === "compaction") return <CompactionMarker />;
+    if (bubble.kind === "context_reset") {
+      return <EngineSwitchMarker from={bubble.from} to={bubble.to} summary={bubble.summary} />;
+    }
     if (bubble.kind === "subagent_activity") {
       return <SubagentActivityMessage data={bubble.data} />;
     }

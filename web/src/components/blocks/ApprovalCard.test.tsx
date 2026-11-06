@@ -44,6 +44,26 @@ describe("ApprovalCard — binary approve/reject", () => {
     expect(screen.queryByTestId("approval-card-options")).toBeNull();
   });
 
+  it("shows the role-change question as readable text with Approve and Reject", () => {
+    const question = "Session 'Build' (conv_1) asks to take the role handle 'architect'. Approve?";
+    render(
+      <ApprovalCard
+        elicitationId="elic_role"
+        message={question}
+        phase="tool_call"
+        policyName="role_change"
+        contentPreview={question}
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+      />,
+    );
+
+    expect(screen.getAllByText(question).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /approve/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /reject/i })).toBeDefined();
+  });
+
   it("shows the harness name instead of the synthetic policy stamp on native prompts", () => {
     // Native-harness bridges stamp provenance ids ("claude_native_permission",
     // phase "pre_tool_use"). The card header must show the product name and

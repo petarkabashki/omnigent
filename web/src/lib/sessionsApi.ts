@@ -1475,6 +1475,51 @@ export async function postEvent(
   );
 }
 
+/** Target engine of a session reset; model and effort default server-side. */
+export interface SwitchEngineTarget {
+  agentId: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+/** Explicit overrides for the reset gates; each is set only after the user confirms. */
+export interface SwitchEngineOverrides {
+  stopRunning?: boolean;
+  acknowledgeRunningWork?: boolean;
+  dropPending?: boolean;
+}
+
+/**
+ * Move a session onto another engine in place (`POST /sessions/{id}/reset`
+ * with `engine`). The id and handle stay; the new engine starts from a
+ * handoff note. Rejections arrive as a typed {@link ApiError}.
+ */
+export async function switchSessionEngine(
+  sessionId: string,
+  target: SwitchEngineTarget,
+  idempotencyKey: string,
+  overrides: SwitchEngineOverrides = {},
+): Promise<{ engineChanged: boolean }> {
+  const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sessionId)}/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      engine: {
+        agent_id: target.agentId,
+        ...(target.model !== undefined && { model: target.model }),
+        ...(target.reasoningEffort !== undefined && { reasoning_effort: target.reasoningEffort }),
+      },
+      ...(overrides.stopRunning && { stop_running: true }),
+      ...(overrides.acknowledgeRunningWork && { acknowledge_running_work: true }),
+      ...(overrides.dropPending && { pending: "drop" }),
+      idempotency_key: idempotencyKey,
+    }),
+  });
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  const body = (await res.json()) as { engine_changed?: boolean };
+  return { engineChanged: body.engine_changed === true };
+}
+
 /**
  * Open the session live-tail SSE stream. Returns the raw fetch
  * `Response` so callers can pipe `res.body` through `parseSseStream`

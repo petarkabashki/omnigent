@@ -954,6 +954,20 @@ export interface SessionSupersededEvent {
 }
 
 /**
+ * `session.reset` — the session's model context was reset in place. With
+ * `engineChanged` the session also moved to another engine, so clients
+ * re-read its agent, harness, model, and terminals and show the boundary row.
+ * Same conversation id; no redirect.
+ */
+export interface SessionResetEvent {
+  type: "session_reset";
+  conversationId: string;
+  /** Id of the persisted `context_reset` item. */
+  boundaryItemId: string;
+  engineChanged: boolean;
+}
+
+/**
  * `session.btw_sidechat` — a transient side-chat answer from `/btw` command.
  *
  * Broadcast-only (never persisted, no SSE replay). The answer appears in a
@@ -1043,6 +1057,7 @@ export type StreamEvent =
   | SessionInterruptedEvent
   | SessionCreatedEvent
   | SessionSupersededEvent
+  | SessionResetEvent
   | SessionResourceCreatedEvent
   | SessionResourceDeletedEvent
   | SessionChildSessionUpdatedEvent

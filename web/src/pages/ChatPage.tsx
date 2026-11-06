@@ -26,7 +26,14 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { BotIcon, WandSparklesIcon, FileTextIcon, Loader2Icon, XIcon } from "lucide-react";
+import {
+  ArrowRightLeftIcon,
+  BotIcon,
+  WandSparklesIcon,
+  FileTextIcon,
+  Loader2Icon,
+  XIcon,
+} from "lucide-react";
 import { Tooltip, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   composerSendShortcutKeys,
@@ -76,6 +83,7 @@ import { usePromptHistory } from "@/hooks/usePromptHistory";
 import { useReplyDraft } from "@/hooks/useReplyDraft";
 import { useSessionModelLabel } from "@/hooks/useSessionModelLabel";
 import { useModelPickerHotkey } from "@/hooks/useModelPickerHotkey";
+import { useSwitchEngine } from "@/shell/SwitchEngineContext";
 import { useFocusComposerHotkey } from "@/hooks/useFocusComposerHotkey";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useDictationInsert } from "@/hooks/useDictationInsert";
@@ -4854,6 +4862,7 @@ function SessionHarnessPicker({
     [],
   );
   const appliedOpenNonce = useRef(0);
+  const switchEngine = useSwitchEngine();
   const conversationId = useChatStore((state) => state.conversationId);
   const sessionHarness = useChatStore((state) => state.sessionHarness);
   const subAgentName = useChatStore((state) => state.subAgentName);
@@ -5219,6 +5228,25 @@ function SessionHarnessPicker({
         efforts={effortSection}
         extra={fusionSections}
       />
+      {switchEngine?.canSwitchEngine && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={busy || pendingModelChange !== null}
+            onSelect={() => {
+              cancelCycle();
+              setMenuOpen(false);
+              setConfigOpen(false);
+              switchEngine.openSwitchEngine();
+            }}
+            data-testid="composer-switch-engine"
+            className="items-center text-13"
+          >
+            <ArrowRightLeftIcon className="size-4" />
+            Switch engine…
+          </DropdownMenuItem>
+        </>
+      )}
     </>
   );
   return (

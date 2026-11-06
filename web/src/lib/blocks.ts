@@ -1,4 +1,4 @@
-import type { AssistantMessagePhase } from "./conversationItems";
+import type { AssistantMessagePhase, EngineChangeEndpoint } from "./conversationItems";
 import type { NativePermissionDelivery } from "./nativePermissionDelivery";
 // Mirrors sdks/python-client/omnigent_client/_blocks.py.
 //
@@ -574,6 +574,16 @@ export interface CompactionBlock {
   ctx: BlockContext;
 }
 
+/** Boundary where a session moved to another engine, with its handoff note. */
+export interface ContextResetBlock {
+  type: "context_reset";
+  ctx: BlockContext;
+  from: EngineChangeEndpoint;
+  to: EngineChangeEndpoint;
+  /** Handoff note the new engine started from; empty when none was kept. */
+  summary: string;
+}
+
 /** A file artifact produced by the agent. */
 export interface FileBlock {
   type: "file";
@@ -752,6 +762,7 @@ export type AnyBlock =
   | RetryBlock
   | CompactionInProgressBlock
   | CompactionBlock
+  | ContextResetBlock
   | FileBlock
   | ElicitationBlock
   | PolicyDeniedBlock
