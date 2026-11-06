@@ -47,7 +47,19 @@ the host, and Electron. Killing only the script pid leaves the server up,
 because Electron still holds the group. `omnigent server stop` follows
 `~/.omnigent/local_server.pid` and can stop a different server.
 
-Find the script and its group, then signal the group:
+Prefer the two options that keep sessions running. Neither touches the host,
+so sessions, in-flight turns and Electron carry on:
+
+```bash
+scripts/local-desktop.sh --update-web              # UI only, then reload the app
+scripts/local-desktop.sh --restart-server --no-sync  # backend changes
+```
+
+Keep the server down for under about 5 minutes; the host stops retrying after
+100 refused connections, and losing the host ends every session.
+
+Only for a full restart, which ends every session, find the script and its
+group, then signal the group:
 
 ```bash
 ps -eo pid,pgid,args | grep '[s]cripts/local-desktop.sh'
