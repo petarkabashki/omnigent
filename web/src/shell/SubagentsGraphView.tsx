@@ -52,7 +52,7 @@ function NodeStatusDot({ activity }: { activity: AgentActivity }) {
   );
 }
 
-function AgentNodeComponent({ data }: NodeProps<Node<AgentNodeData>>) {
+export function AgentNodeComponent({ data }: NodeProps<Node<AgentNodeData>>) {
   const { label, activity, statusLabel, isActive, preview } = data;
   const tint = ACTIVITY_TINT[activity];
 
@@ -93,7 +93,7 @@ function AgentNodeComponent({ data }: NodeProps<Node<AgentNodeData>>) {
   );
 }
 
-function ZoomControls() {
+export function ZoomControls() {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const btnClass =
     "flex items-center justify-center size-7 rounded-md border bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-accent-foreground transition-colors";

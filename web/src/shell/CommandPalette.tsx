@@ -4,18 +4,20 @@
 
 import type React from "react";
 import { defaultFilter } from "cmdk";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClockIcon,
   InboxIcon,
   type LucideIcon,
+  NetworkIcon,
   PanelLeftIcon,
   PanelRightIcon,
   SettingsIcon,
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
-import { useNavigate } from "@/lib/routing";
+import { useSessionGraphTrigger } from "@/hooks/useSessionGraphTrigger";
+import { useLocation, useNavigate } from "@/lib/routing";
 import {
   type ConversationsPage,
   useConversations,
@@ -147,6 +149,10 @@ function paletteSessions(
   return out;
 }
 
+const SessionGraphDialog = lazy(() =>
+  import("./SessionGraphDialog").then((m) => ({ default: m.SessionGraphDialog })),
+);
+
 export function CommandPalette({
   sessionsOnly = false,
   open,
@@ -155,7 +161,10 @@ export function CommandPalette({
   onToggleRightSidebar,
 }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const isMobile = useIsMobileViewport();
+  const [sessionGraphOpen, setSessionGraphOpen] = useState(false);
+  useSessionGraphTrigger(() => setSessionGraphOpen(true));
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [pageLimit, setPageLimit] = useState(SESSION_SEARCH_PAGE_BATCH);
@@ -184,6 +193,13 @@ export function CommandPalette({
         icon: SquarePenIcon,
         keywords: ["compose", "start", "new session"],
         run: () => navigate("/"),
+      },
+      {
+        id: "session-graph",
+        label: "Show session graph",
+        icon: NetworkIcon,
+        keywords: ["relationships", "machines", "lanes", "who started", "fleet"],
+        run: () => setSessionGraphOpen(true),
       },
       {
         id: "go-inbox",
@@ -441,155 +457,170 @@ export function CommandPalette({
     );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        aria-describedby={undefined}
-        // Mobile: a top-anchored full-screen sheet sized to --omnigent-viewport-height,
-        // so the input and results sit above the soft keyboard. sm:max-w-full
-        // overrides DialogContent's sm:max-w-sm between 640px and md.
-        className={cn(
-          "overflow-hidden p-0",
-          isMobile
-            ? "inset-x-0 top-0 h-full max-h-full w-full max-w-full translate-x-0 translate-y-0 gap-0 rounded-none border-0 shadow-none sm:max-w-full"
-            : "top-1/4 translate-y-0 rounded-xl sm:max-w-2xl",
-        )}
-        style={
-          isMobile
-            ? {
-                top: 0,
-                height: "var(--omnigent-viewport-height, 100dvh)",
-                maxHeight: "var(--omnigent-viewport-height, 100dvh)",
-                // Pad both insets: the macOS title bar or safe-top clears the window
-                // controls or notch; safe-bottom keeps the last row above the home
-                // indicator when the keyboard is closed (the viewport then spans it).
-                paddingTop: "var(--mac-titlebar-height, var(--omnigent-safe-top, 0px))",
-                paddingBottom: "var(--omnigent-safe-bottom, 0px)",
-              }
-            : undefined
-        }
-        showCloseButton={false}
-      >
-        <DialogTitle className="sr-only">{paletteLabel}</DialogTitle>
-        {/* shouldFilter=false: the server filters sessions and we filter actions
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent
+          aria-describedby={undefined}
+          // Mobile: a top-anchored full-screen sheet sized to --omnigent-viewport-height,
+          // so the input and results sit above the soft keyboard. sm:max-w-full
+          // overrides DialogContent's sm:max-w-sm between 640px and md.
+          className={cn(
+            "overflow-hidden p-0",
+            isMobile
+              ? "inset-x-0 top-0 h-full max-h-full w-full max-w-full translate-x-0 translate-y-0 gap-0 rounded-none border-0 shadow-none sm:max-w-full"
+              : "top-1/4 translate-y-0 rounded-xl sm:max-w-2xl",
+          )}
+          style={
+            isMobile
+              ? {
+                  top: 0,
+                  height: "var(--omnigent-viewport-height, 100dvh)",
+                  maxHeight: "var(--omnigent-viewport-height, 100dvh)",
+                  // Pad both insets: the macOS title bar or safe-top clears the window
+                  // controls or notch; safe-bottom keeps the last row above the home
+                  // indicator when the keyboard is closed (the viewport then spans it).
+                  paddingTop: "var(--mac-titlebar-height, var(--omnigent-safe-top, 0px))",
+                  paddingBottom: "var(--omnigent-safe-bottom, 0px)",
+                }
+              : undefined
+          }
+          showCloseButton={false}
+        >
+          <DialogTitle className="sr-only">{paletteLabel}</DialogTitle>
+          {/* shouldFilter=false: the server filters sessions and we filter actions
             (see file header). vimBindings=false: keep Ctrl+K/J from doubling as
             list-nav on Win/Linux, where Ctrl+K is also the opener. */}
-        {/* Command's base class is `size-full`, so it already fills the sheet. */}
-        <Command
-          shouldFilter={false}
-          vimBindings={false}
-          label={paletteLabel}
-          value={selectedValue}
-          onValueChange={setSelectedValue}
-          onKeyDown={(event) => {
-            if (SELECTION_KEYS.has(event.key)) userMovedSelection.current = true;
-          }}
-        >
-          {isMobile ? (
-            // Search field and an explicit close button share a top row; the
-            // full-screen sheet has no ⌘K/Esc affordance the way the desktop
-            // dialog does, so the X is how touch users dismiss it.
-            <div className="flex items-center gap-1 p-1">
-              <div className="min-w-0 flex-1">
-                <CommandInput
-                  value={query}
-                  onValueChange={setQuery}
-                  placeholder={placeholder}
-                  data-testid="command-palette-input"
-                />
-              </div>
-              <Button
-                variant="ghost"
-                size="icon-lg"
-                className="shrink-0 rounded-full"
-                onClick={close}
-                aria-label="Close search"
-              >
-                <XIcon className="size-5 text-muted-foreground" />
-              </Button>
-            </div>
-          ) : (
-            <CommandInput
-              value={query}
-              onValueChange={setQuery}
-              placeholder={placeholder}
-              data-testid="command-palette-input"
-            />
-          )}
-          <CommandList
-            className={isMobile ? "max-h-none flex-1" : undefined}
-            // Hovering a row selects it in cmdk, which counts as the user's pick.
-            onPointerMove={(event) => {
-              if ((event.target as Element).closest("[cmdk-item]")) {
-                userMovedSelection.current = true;
-              }
+          {/* Command's base class is `size-full`, so it already fills the sheet. */}
+          <Command
+            shouldFilter={false}
+            vimBindings={false}
+            label={paletteLabel}
+            value={selectedValue}
+            onValueChange={setSelectedValue}
+            onKeyDown={(event) => {
+              if (SELECTION_KEYS.has(event.key)) userMovedSelection.current = true;
             }}
           >
-            {(loadError || (sessionsOnly && isFetching)) && (
-              <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
-                {loadError
-                  ? loadMoreError
-                    ? "Couldn't load more sessions."
-                    : "Couldn't load sessions."
-                  : "Loading sessions…"}
-                {loadError && (
-                  <button
-                    type="button"
-                    className="ml-2 underline"
-                    disabled={retrying}
-                    onClick={retryLoad}
-                  >
-                    Retry
-                  </button>
-                )}
-              </p>
+            {isMobile ? (
+              // Search field and an explicit close button share a top row; the
+              // full-screen sheet has no ⌘K/Esc affordance the way the desktop
+              // dialog does, so the X is how touch users dismiss it.
+              <div className="flex items-center gap-1 p-1">
+                <div className="min-w-0 flex-1">
+                  <CommandInput
+                    value={query}
+                    onValueChange={setQuery}
+                    placeholder={placeholder}
+                    data-testid="command-palette-input"
+                  />
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon-lg"
+                  className="shrink-0 rounded-full"
+                  onClick={close}
+                  aria-label="Close search"
+                >
+                  <XIcon className="size-5 text-muted-foreground" />
+                </Button>
+              </div>
+            ) : (
+              <CommandInput
+                value={query}
+                onValueChange={setQuery}
+                placeholder={placeholder}
+                data-testid="command-palette-input"
+              />
             )}
-            {!loadError && !(sessionsOnly && isFetching) && (
-              <CommandEmpty>{searchFetching ? "Searching…" : "No results found"}</CommandEmpty>
-            )}
-            {sessions.length > 0 && (
-              <CommandGroup heading="Sessions">
-                {visibleSessions.map(renderSession)}
-                {searching && renderShowMore("title", titleSearch, visibleSessions)}
-              </CommandGroup>
-            )}
-            {contentSessions.length > 0 && (
-              <CommandGroup heading="In messages">
-                {contentSessions.map(renderSession)}
-                {renderShowMore("content", contentSearch, contentSessions)}
-              </CommandGroup>
-            )}
-            {sessionsOnly && sessions.length > visibleSessions.length && (
-              <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
-                Showing {visibleSessions.length} of {sessions.length} matches. Type more to narrow
-                your search.
-              </p>
-            )}
-            {sessionsOnly && hasNextPage && loadedPages >= pageLimit && !loadError && (
-              <Button
-                variant="ghost"
-                className="w-full"
-                disabled={isFetching}
-                onClick={() => setPageLimit(loadedPages + SESSION_SEARCH_PAGE_BATCH)}
-              >
-                Search older sessions
-              </Button>
-            )}
-            {filteredActions.length > 0 && (
-              <CommandGroup heading="Actions">
-                {filteredActions.map((a) => {
-                  const Icon = a.icon;
-                  return (
-                    <CommandItem key={a.id} value={`action:${a.id}`} onSelect={() => runAction(a)}>
-                      <Icon />
-                      <span className="flex-1 truncate text-left">{a.label}</span>
-                    </CommandItem>
-                  );
-                })}
-              </CommandGroup>
-            )}
-          </CommandList>
-        </Command>
-      </DialogContent>
-    </Dialog>
+            <CommandList
+              className={isMobile ? "max-h-none flex-1" : undefined}
+              // Hovering a row selects it in cmdk, which counts as the user's pick.
+              onPointerMove={(event) => {
+                if ((event.target as Element).closest("[cmdk-item]")) {
+                  userMovedSelection.current = true;
+                }
+              }}
+            >
+              {(loadError || (sessionsOnly && isFetching)) && (
+                <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+                  {loadError
+                    ? loadMoreError
+                      ? "Couldn't load more sessions."
+                      : "Couldn't load sessions."
+                    : "Loading sessions…"}
+                  {loadError && (
+                    <button
+                      type="button"
+                      className="ml-2 underline"
+                      disabled={retrying}
+                      onClick={retryLoad}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </p>
+              )}
+              {!loadError && !(sessionsOnly && isFetching) && (
+                <CommandEmpty>{searchFetching ? "Searching…" : "No results found"}</CommandEmpty>
+              )}
+              {sessions.length > 0 && (
+                <CommandGroup heading="Sessions">
+                  {visibleSessions.map(renderSession)}
+                  {searching && renderShowMore("title", titleSearch, visibleSessions)}
+                </CommandGroup>
+              )}
+              {contentSessions.length > 0 && (
+                <CommandGroup heading="In messages">
+                  {contentSessions.map(renderSession)}
+                  {renderShowMore("content", contentSearch, contentSessions)}
+                </CommandGroup>
+              )}
+              {sessionsOnly && sessions.length > visibleSessions.length && (
+                <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+                  Showing {visibleSessions.length} of {sessions.length} matches. Type more to narrow
+                  your search.
+                </p>
+              )}
+              {sessionsOnly && hasNextPage && loadedPages >= pageLimit && !loadError && (
+                <Button
+                  variant="ghost"
+                  className="w-full"
+                  disabled={isFetching}
+                  onClick={() => setPageLimit(loadedPages + SESSION_SEARCH_PAGE_BATCH)}
+                >
+                  Search older sessions
+                </Button>
+              )}
+              {filteredActions.length > 0 && (
+                <CommandGroup heading="Actions">
+                  {filteredActions.map((a) => {
+                    const Icon = a.icon;
+                    return (
+                      <CommandItem
+                        key={a.id}
+                        value={`action:${a.id}`}
+                        onSelect={() => runAction(a)}
+                      >
+                        <Icon />
+                        <span className="flex-1 truncate text-left">{a.label}</span>
+                      </CommandItem>
+                    );
+                  })}
+                </CommandGroup>
+              )}
+            </CommandList>
+          </Command>
+        </DialogContent>
+      </Dialog>
+      {sessionGraphOpen && (
+        <Suspense fallback={null}>
+          <SessionGraphDialog
+            open
+            onOpenChange={setSessionGraphOpen}
+            activeSessionId={pathname.match(/\/c\/([^/]+)/)?.[1] ?? null}
+          />
+        </Suspense>
+      )}
+    </>
   );
 }

@@ -253,6 +253,15 @@ describe("ChatHeader — deployed Share presentation", () => {
   });
 });
 
+it("the session graph button asks the shell to open the graph", () => {
+  const onOpen = vi.fn();
+  window.addEventListener("omnigent:open-session-graph", onOpen);
+  renderHeader({ sidebarOpen: true, conversationId: "worker" });
+  fireEvent.click(screen.getByTestId("session-graph-button"));
+  window.removeEventListener("omnigent:open-session-graph", onOpen);
+  expect(onOpen).toHaveBeenCalledTimes(1);
+});
+
 describe("ChatHeader — pending session presentation", () => {
   it("shows the full desktop control shell disabled while Workspace remains available", () => {
     renderHeader({

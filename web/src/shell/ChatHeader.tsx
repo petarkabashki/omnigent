@@ -11,6 +11,7 @@ import {
   ListIcon,
   Maximize2Icon,
   MessagesSquareIcon,
+  NetworkIcon,
   PanelLeftIcon,
   PanelRightCloseIcon,
   PanelRightIcon,
@@ -32,6 +33,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AgentInfoButton } from "@/components/AgentInfo";
+import { openSessionGraph } from "@/hooks/useSessionGraphTrigger";
+import { isMacPlatform } from "@/lib/hotkeys";
 import { ConversationBreadcrumb } from "./ConversationBreadcrumb";
 import { CreatedBySession } from "./CreatedBySession";
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
@@ -639,6 +642,20 @@ export function ChatHeader({
         {/* Desktop (md+) action buttons. On mobile these collapse into
             the three-dot "Session actions" menu below. Fork is also
             available from the session menus and assistant messages. */}
+        {!isMobile && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Show session graph"
+            title={`Session graph (${isMacPlatform() ? "⌘⇧G" : "Ctrl+Shift+G"})`}
+            data-testid="session-graph-button"
+            onClick={openSessionGraph}
+            className="border-none text-muted-foreground"
+          >
+            <NetworkIcon className="size-4" />
+          </Button>
+        )}
         {pending && <PendingHeaderActions isMobile={isMobile} />}
         {/* Agent info: tools & policies for the bound agent. Desktop-only
             popover; self-hides when the agent has neither configured. */}

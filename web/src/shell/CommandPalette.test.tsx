@@ -6,7 +6,13 @@ import { CommandPalette } from "./CommandPalette";
 
 const navigate = vi.fn();
 vi.mock("@/lib/routing", () => ({
+  useLocation: () => ({ pathname: "/c/current" }),
   useNavigate: () => navigate,
+}));
+vi.mock("./SessionGraphDialog", () => ({
+  SessionGraphDialog: ({ activeSessionId }: { activeSessionId: string | null }) => (
+    <div>graph for {activeSessionId}</div>
+  ),
 }));
 
 const useConversations = vi.fn();
@@ -252,6 +258,14 @@ describe("CommandPalette — sessions", () => {
     fireEvent.keyDown(screen.getByTestId("command-palette-input"), { key: "Enter" });
     expect(navigate).toHaveBeenCalledWith("/c/c99");
   });
+  it("opens the session graph on the current session", async () => {
+    setSessions([]);
+    renderPalette();
+
+    fireEvent.click(screen.getByText("Show session graph"));
+    expect(await screen.findByText("graph for current")).toBeTruthy();
+  });
+
   it("lists sessions by display label with their agent type", () => {
     setSessions([conv("c1", "Fix the parser", "research-agent"), conv("c2", null)]);
     renderPalette();
