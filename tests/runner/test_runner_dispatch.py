@@ -7347,6 +7347,40 @@ async def test_session_peek_rest_offset_pages_through_long_item() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_peek_rest_pages_back_with_the_cursor() -> None:
+    """
+    The cursor reads older items, which descending order lists ``after`` it.
+    """
+    from omnigent.runner.tool_dispatch import _execute_session_query_tool
+
+    item_queries: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions/conv_target/items":
+            item_queries.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [], "last_id": "i2", "has_more": True},
+            )
+        if request.url.path == "/v1/sessions/conv_target":
+            return httpx.Response(200, json={"id": "conv_target", "title": "researcher:auth"})
+        raise AssertionError(f"unexpected path {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        payload = json.loads(
+            await _execute_session_query_tool(
+                "sys_session_get_history",
+                json.dumps({"conversation_id": "conv_target", "before_item_id": "i9"}),
+                conversation_id="conv_caller",
+                server_client=client,
+            )
+        )
+
+    assert item_queries == [{"limit": "10", "order": "desc", "after": "i9"}]
+    assert payload["older_items_cursor"] == "i2"
+
+
+@pytest.mark.asyncio
 async def test_session_peek_rest_rejects_invalid_offset() -> None:
     """An invalid offset is rejected before any REST request is made."""
     from omnigent.runner.tool_dispatch import _execute_session_query_tool

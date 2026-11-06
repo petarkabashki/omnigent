@@ -334,6 +334,7 @@ def test_peek_schema_required_fields_and_no_extra_props() -> None:
         "tail_items",
         "content_max_chars",
         "content_offset_chars",
+        "before_item_id",
     }
 
 
@@ -530,6 +531,55 @@ def test_peek_truncates_and_offsets_tool_call_fields(
 
     assert payload["items"][0]["args"] == "defgh [truncated]"
     assert payload["items"][1]["content"] == "34567 [truncated]"
+
+
+def test_peek_pages_back_to_the_oldest_item(session_fixture: _Fixture) -> None:
+    """
+    ``older_items_cursor`` reaches every item, oldest included, past the tail cap.
+    """
+    for index in range(5):
+        _append_assistant_text(session_fixture, f"turn-{index}")
+
+    pages: list[list[str]] = []
+    cursor: str | None = None
+    while True:
+        arguments: dict[str, object] = {
+            "conversation_id": session_fixture.child_conv_id,
+            "tail_items": 2,
+        }
+        if cursor is not None:
+            arguments["before_item_id"] = cursor
+        payload = json.loads(
+            SysSessionGetHistoryTool().invoke(json.dumps(arguments), session_fixture.ctx)
+        )
+        pages.append([item["content"] for item in payload["items"]])
+        cursor = payload["older_items_cursor"]
+        if cursor is None:
+            break
+
+    read_oldest_first = [text for page in reversed(pages) for text in page]
+    seeded_items = session_fixture.conv_store.list_items(session_fixture.child_conv_id).data
+    assert len(read_oldest_first) == len(seeded_items)
+    assert read_oldest_first[-5:] == [f"turn-{index}" for index in range(5)]
+
+
+def test_peek_reports_an_unknown_cursor(session_fixture: _Fixture) -> None:
+    """
+    A cursor that names no item is an error, not an empty history.
+    """
+    payload = json.loads(
+        SysSessionGetHistoryTool().invoke(
+            json.dumps(
+                {
+                    "conversation_id": session_fixture.child_conv_id,
+                    "before_item_id": "item_missing",
+                }
+            ),
+            session_fixture.ctx,
+        )
+    )
+
+    assert payload["error"] == "stale_item_cursor"
 
 
 def test_peek_joins_text_blocks_and_ignores_non_text_blocks(

@@ -6817,10 +6817,14 @@ async def _session_get_history_via_rest(
     content_offset_chars = _clamp_history_offset_chars(args.get("content_offset_chars", 0))
     if isinstance(content_offset_chars, str):
         return content_offset_chars
+    raw_cursor = args.get("before_item_id")
+    older_than = str(raw_cursor) if raw_cursor else None
+    # In descending order the older items come ``after`` the cursor.
+    older_cursor = {} if older_than is None else {"after": older_than}
     try:
         resp = await server_client.get(
             f"{_session_url(target_id)}/items",
-            params={"limit": tail_items, "order": "desc"},
+            params={"limit": tail_items, "order": "desc", **older_cursor},
             timeout=30.0,
         )
     except Exception as exc:  # noqa: BLE001
@@ -6831,7 +6835,8 @@ async def _session_get_history_via_rest(
         return json.dumps({"error": "session_out_of_tree", "conversation_id": target_id})
     if resp.status_code != 200:
         return json.dumps({"error": f"sys_session_get_history returned {resp.status_code}"})
-    data: list[_JsonObject] = resp.json().get("data", [])
+    page = resp.json()
+    data: list[_JsonObject] = page.get("data", [])
     # ``order="desc"`` returns newest-first; reverse to chronological so
     # the LLM reads top-to-bottom (matches the in-process peek).
     items: list[_JsonObject] = [
@@ -6846,15 +6851,17 @@ async def _session_get_history_via_rest(
     # lives only in the Omnigent server's pending-elicitations index, replayed
     # on the snapshot), so append the snapshot's outstanding prompts
     # after the stored tail — they are the sub-agent's most recent act.
-    items.extend(
-        pending_elicitations.project_for_peek(event) for event in meta.pending_elicitations
-    )
+    if older_than is None:
+        items.extend(
+            pending_elicitations.project_for_peek(event) for event in meta.pending_elicitations
+        )
     return json.dumps(
         {
             "conversation_id": target_id,
             "agent": meta.agent,
             "title": meta.title,
             "items": items,
+            "older_items_cursor": page.get("last_id") if page.get("has_more") else None,
         }
     )
 

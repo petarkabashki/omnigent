@@ -16,6 +16,7 @@ from omnigent.entities import (
     Conversation,
     ConversationItem,
 )
+from omnigent.errors import StaleCursorError
 from omnigent.runtime.prompt import SUBAGENT_WAKE_NOTICE_SHAPE
 from omnigent.spec import AgentSpec
 from omnigent.stores import ConversationStore
@@ -26,6 +27,7 @@ from omnigent.util.session_lifecycle import (
     CLOSED_TITLE_INFIX,
     is_session_closed,
 )
+from omnigent.util.uuid import InvalidUuidError, uuid_to_bytes
 
 # Maximum number of recent conversation items to include in
 # check_sub_agents activity for non-completed sub-agents.
@@ -1624,9 +1626,9 @@ class SysSessionGetHistoryTool(Tool):
         """:returns: Human-readable description of the tool."""
         return (
             "Read the most recent items from a session's conversation "
-            "without sending input. Global read — any session you can "
-            "access (not just sub-agents in your spawn tree), bounded "
-            "by the server's per-user permission model. Returns the "
+            "without sending input, or older ones with before_item_id. "
+            "Global read — any session you can access (not just sub-agents "
+            "in your spawn tree), bounded by the server's per-user permission model. Returns the "
             "tail of conversation items (assistant/user messages, tool "
             "calls, tool results) in chronological order. Returns "
             "session_not_found if conversation_id is unknown, or "
@@ -1695,6 +1697,14 @@ class SysSessionGetHistoryTool(Tool):
                                 "until the ' [truncated]' suffix disappears."
                             ),
                         },
+                        "before_item_id": {
+                            "type": "string",
+                            "description": (
+                                "Read the items older than this one. Pass the "
+                                "older_items_cursor from the previous read to page "
+                                "back through a long session."
+                            ),
+                        },
                     },
                     "required": ["conversation_id"],
                     "additionalProperties": False,
@@ -1739,11 +1749,20 @@ class SysSessionGetHistoryTool(Tool):
         )
         if isinstance(content_offset_chars, str):
             return content_offset_chars
-        page = resolution.conv_store.list_items(
-            resolution.child.id,
-            limit=tail_items,
-            order="desc",
-        )
+        raw_cursor = resolution.args.get("before_item_id")
+        older_than = str(raw_cursor) if raw_cursor else None
+        try:
+            if older_than is not None:
+                uuid_to_bytes(older_than)
+            # In descending order the older items come ``after`` the cursor.
+            page = resolution.conv_store.list_items(
+                resolution.child.id,
+                limit=tail_items,
+                after=older_than,
+                order="desc",
+            )
+        except (StaleCursorError, InvalidUuidError):
+            return json.dumps({"error": "stale_item_cursor", "before_item_id": older_than})
         # ``list_items(order="desc")`` returns newest-first; reverse
         # to chronological order so the LLM reads top-to-bottom.
         items: list[dict[str, Any]] = [
@@ -1763,10 +1782,11 @@ class SysSessionGetHistoryTool(Tool):
         # show no sign it needs input. Append the index's outstanding
         # prompts after the stored tail — they are the most recent
         # thing the sub-agent did.
-        items.extend(
-            pending_elicitations.project_for_peek(event)
-            for event in pending_elicitations.snapshot_for(resolution.child.id)
-        )
+        if older_than is None:
+            items.extend(
+                pending_elicitations.project_for_peek(event)
+                for event in pending_elicitations.snapshot_for(resolution.child.id)
+            )
         labelled = _agent_title_from_conversation(resolution.child)
         return json.dumps(
             {
@@ -1774,6 +1794,7 @@ class SysSessionGetHistoryTool(Tool):
                 "agent": labelled.agent,
                 "title": labelled.title,
                 "items": items,
+                "older_items_cursor": page.last_id if page.has_more else None,
             }
         )
 
