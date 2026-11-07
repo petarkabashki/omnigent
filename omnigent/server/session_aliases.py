@@ -15,7 +15,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from omnigent.entities import Conversation, Role
 from omnigent.errors import ErrorCode, OmnigentError
@@ -31,6 +31,9 @@ from omnigent.stores.project_store import ProjectStore, lookup_project_path
 from omnigent.stores.role_store import RoleStore
 from omnigent.util.session_lifecycle import is_session_closed
 from omnigent.util.uuid import uuid_to_bytes
+
+if TYPE_CHECKING:
+    from omnigent.policies.builtins.messaging import HandleResolver
 
 _logger = logging.getLogger(__name__)
 
@@ -1000,3 +1003,43 @@ def list_namespace_roles(
                 }
             )
     return sorted(entries, key=lambda entry: entry["name"].casefold())
+
+
+def messaging_handle(
+    session: Conversation, projects: ProjectStore | None, user_id: str | None
+) -> str:
+    """``path/Role`` for an aliased session, else ``path/`` (``/`` when unfiled)."""
+    return session_handle(session, projects, user_id) or role_handle(
+        session_project_name(session, projects, user_id), ""
+    )
+
+
+def messaging_route_resolver(
+    conversations: ConversationStore, projects: ProjectStore | None
+) -> "HandleResolver":
+    """Build the role resolver the messaging-rules policy uses to name both ends.
+
+    The resolver returns ``None`` when either end does not resolve; the message
+    route then reports the bad address itself.
+    """
+    from omnigent.policies.builtins.messaging import MessageRoute
+
+    def resolve(sender_id: str, address: str, user_id: str | None) -> MessageRoute | None:
+        sender = conversations.get_conversation(sender_id)
+        if sender is None:
+            return None
+        try:
+            target_id = resolve_session_address(
+                conversations, projects, address=address, user_id=user_id, source=sender
+            )
+        except OmnigentError:
+            return None
+        target = conversations.get_conversation(target_id)
+        if target is None:
+            return None
+        return MessageRoute(
+            messaging_handle(sender, projects, user_id),
+            messaging_handle(target, projects, user_id),
+        )
+
+    return resolve
