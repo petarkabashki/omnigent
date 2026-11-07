@@ -67,6 +67,7 @@ from omnigent.harness_plugins import (
     native_provider_for_key,
 )
 from omnigent.host.launch_audit import request_client_audit_attributes
+from omnigent.policies.builtins.messaging import set_handle_resolver
 from omnigent.resources import examples as _examples_resources
 from omnigent.runtime import (
     get_terminal_registry,
@@ -165,6 +166,7 @@ from omnigent.server.server_config import (
     RESTRICT_TO_AGENT_NAMES_KEY,
     PickerCuration,
 )
+from omnigent.server.session_aliases import messaging_route_resolver
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
@@ -3969,6 +3971,8 @@ def create_app(
         prefix="/v1",
         tags=["sharing"],
     )
+    # Messaging-rules policies name both ends of a message by role handle.
+    set_handle_resolver(messaging_route_resolver(conversation_store, project_store))
     # First-class projects (owner-private session containers). Mounted only
     # when a project store is wired; the endpoints self-scope to the caller.
     if project_store is not None:
