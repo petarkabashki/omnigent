@@ -249,12 +249,16 @@ async def test_archive_idle_parent_stops_running_child(
         _sessions_common._session_status_cache.pop(child.id, None)
 
 
+@pytest.mark.parametrize("action", ["archive", "delete"])
 async def test_archive_tears_down_host_spawned_runner(
     client: httpx.AsyncClient,
     db_uri: str,
+    action: str,
 ) -> None:
     """
-    Archiving a host-spawned session tears down its dedicated runner.
+    Archiving or deleting a host-spawned session tears down its dedicated runner.
+
+    A deleted session's runner left alive idles until timeout, holding a host slot.
 
     Killing the pane alone leaves the host-launched runner connected, so
     ``/health`` keeps reporting ``runner_online: true`` and a later
@@ -281,13 +285,15 @@ async def test_archive_tears_down_host_spawned_runner(
             ),
             patch.object(_sessions_facade, "_stop_session_host_runner", mock_teardown),
         ):
-            resp = await client.patch(
-                f"/v1/sessions/{session_id}",
-                json={"archived": True},
-            )
+            if action == "archive":
+                resp = await client.patch(
+                    f"/v1/sessions/{session_id}",
+                    json={"archived": True},
+                )
+            else:
+                resp = await client.delete(f"/v1/sessions/{session_id}")
             await _drain_detached_stops()
         assert resp.status_code == 200
-        assert resp.json()["archived"] is True
         mock_teardown.assert_awaited_once()
         assert mock_teardown.await_args is not None
         assert mock_teardown.await_args.args[:3] == (

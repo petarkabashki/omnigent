@@ -4218,6 +4218,24 @@ def register_events_routes(
 
             with contextlib.suppress(RuntimeError):
                 await get_terminal_registry().cleanup_conversation(session_id)
+        # Stop the host runner too, or it idles until timeout holding a host slot.
+        if conv.host_id and conv.runner_id:
+            try:
+                if await _owns_host_runner(conv, conversation_store):
+                    await _stop_host_runner_intentionally(
+                        session_id,
+                        conv.host_id,
+                        conv.runner_id,
+                        getattr(request.app.state, "host_registry", None),
+                        conversation_store,
+                    )
+            except Exception:
+                _logger.debug(
+                    "Delete host-runner teardown failed for %s",
+                    session_id,
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
         # Opt-in git worktree cleanup: only when delete_branch=true and
         # the session has a server-created worktree. Runs after runner
         # teardown but before the irreversible file cleanup below: an
