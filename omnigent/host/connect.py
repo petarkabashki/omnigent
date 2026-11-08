@@ -240,6 +240,7 @@ from omnigent.runtime.websocket_metrics import (
     websocket_close_reason,
 )
 from omnigent.scheduled_context import current_scheduled_run, scheduled_run_scope
+from omnigent.update_check import running_build_commit
 from omnigent.util.env_credentials import env_names_with_omnigent_prefix
 from omnigent.util.suspend_watch import watch_for_resume
 from omnigent.util.tls import client_ssl_context
@@ -5726,6 +5727,7 @@ class HostProcess:
             installation_id=_tel_install_id,
             capabilities=list(HOST_CAPABILITIES),
             connection_id=connection_id,
+            build_commit=running_build_commit(),
         )
         try:
             encoded_hello = encode_host_frame(hello)

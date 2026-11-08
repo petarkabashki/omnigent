@@ -36,6 +36,7 @@ whether a ``.git/`` directory is reachable from this module's path.
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib.metadata
 import json
 import os
@@ -983,6 +984,25 @@ def _read_build_info() -> tuple[float, str] | None:
         # Don't trust it — fall back to other signals.
         return None
     return ts, sha
+
+
+@functools.cache
+def running_build_commit() -> str | None:
+    """Return the commit this process runs, read once and then cached.
+
+    A source checkout reports its HEAD and an installed wheel its build
+    commit, so a hub and its hosts can be compared for drift. Call it at
+    startup: a checkout's HEAD can move while the process keeps old code.
+
+    :returns: A full commit SHA, or ``None`` when neither source has one.
+    """
+    repo_root = _find_repo_root()
+    if repo_root is not None:
+        return _get_head_sha(repo_root)
+    build_info = _read_build_info()
+    if build_info is None:
+        return None
+    return build_info[1] or None
 
 
 def _get_distribution() -> importlib.metadata.Distribution | None:

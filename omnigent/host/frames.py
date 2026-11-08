@@ -261,6 +261,8 @@ class HostHelloFrame:
         supported" without a version check.
     :param connection_id: Host-minted identifier for this socket, shared with
         server diagnostics. Absent from older hosts.
+    :param build_commit: Commit the host software was built from, e.g. a
+        40-hex SHA. ``None`` from older hosts or builds without git.
     """
 
     version: str
@@ -275,6 +277,7 @@ class HostHelloFrame:
     installation_id: str | None = None
     capabilities: list[str] = field(default_factory=list)
     connection_id: str | None = None
+    build_commit: str | None = None
 
 
 @dataclass
@@ -1610,6 +1613,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "installation_id": frame.installation_id,
                 "capabilities": list(frame.capabilities),
                 "connection_id": frame.connection_id,
+                "build_commit": frame.build_commit,
             }
         )
     if isinstance(frame, HostConnectionErrorFrame):
@@ -2699,6 +2703,7 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         installation_id=_optional_nullable_str(msg, "installation_id"),
         capabilities=_optional_str_list(msg, "capabilities"),
         connection_id=_optional_nullable_str(msg, "connection_id"),
+        build_commit=_optional_nullable_str(msg, "build_commit"),
     )
 
 

@@ -2499,3 +2499,35 @@ def test_read_installed_wheel_info_reads_pipx_metadata(
     assert info.installer == "pip"
     assert info.detected_installer == "pipx"
     assert info.extras == ("all",)
+
+
+@pytest.mark.parametrize(
+    ("repo_root", "head_sha", "build_info", "expected"),
+    [
+        # A source checkout reports its HEAD, even when a stale build file exists.
+        (Path("/repo"), "a" * 40, (1.0, "b" * 40), "a" * 40),
+        # An installed wheel reports the commit it was built from.
+        (None, None, (1.0, "b" * 40), "b" * 40),
+        # A wheel built without git, or with no build file, reports nothing.
+        (None, None, (1.0, ""), None),
+        (None, None, None, None),
+    ],
+)
+def test_running_build_commit_prefers_checkout_then_wheel(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path | None,
+    head_sha: str | None,
+    build_info: tuple[float, str] | None,
+    expected: str | None,
+) -> None:
+    """The commit a process runs comes from its checkout, else from its wheel."""
+    from omnigent import update_check
+
+    monkeypatch.setattr(update_check, "_find_repo_root", lambda: repo_root)
+    monkeypatch.setattr(update_check, "_get_head_sha", lambda _root: head_sha)
+    monkeypatch.setattr(update_check, "_read_build_info", lambda: build_info)
+    update_check.running_build_commit.cache_clear()
+    try:
+        assert update_check.running_build_commit() == expected
+    finally:
+        update_check.running_build_commit.cache_clear()

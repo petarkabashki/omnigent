@@ -11268,6 +11268,9 @@ def host_enable(
 ) -> None:
     """Install and start the host as a per-user system service.
 
+    It writes its own service unit, replacing any existing one. Don't run it
+    where another tool, such as a fleet manager, owns the host's unit.
+
     :param ctx: Click context carrying group-level options.
     :param server: Optional server target; empty selects local mode.
     :param non_interactive: Fail instead of launching browser sign-in.

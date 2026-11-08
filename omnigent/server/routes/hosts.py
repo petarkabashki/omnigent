@@ -99,6 +99,8 @@ from omnigent.server.schemas import SessionGitOptions
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.host_store import Host, HostStore, host_is_live
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.update_check import running_build_commit
+from omnigent.version import VERSION
 
 _logger = logging.getLogger(__name__)
 
@@ -187,6 +189,18 @@ def _release_tuple(version: str) -> tuple[int, int, int] | None:
         return None
     padded = (*release, 0, 0, 0)[:3]
     return (padded[0], padded[1], padded[2])
+
+
+def _host_build(conn: HostConnection | None) -> dict[str, str | None]:
+    """Return the software version and build commit a connected host reported.
+
+    :param conn: The host's live connection on this replica, or ``None``.
+    :returns: ``{"version": ..., "build_commit": ...}``, both ``None`` when the
+        host is not connected here or (for the commit) predates reporting it.
+    """
+    if conn is None:
+        return {"version": None, "build_commit": None}
+    return {"version": conn.hello.version, "build_commit": conn.hello.build_commit}
 
 
 def _require_harness_setup_support(host_conn: HostConnection, action: str) -> None:
@@ -871,18 +885,25 @@ def create_hosts_router(
             update_harness_accounts(conn, result_accounts)
         return conn.hello.configured_harnesses, conn.hello.harness_accounts
 
+    # Read once at startup: a source checkout's HEAD can move while the server
+    # keeps running the code it started with.
+    server_build_commit = running_build_commit()
+
     @router.get("/hosts")
-    async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
+    async def list_hosts(request: Request) -> dict[str, Any]:
         """List all hosts owned by the authenticated user.
 
         Returns both online and offline hosts, with live runner
         information for online hosts.
 
         :param request: The incoming request (for auth).
-        :returns: ``{"hosts": [...]}`` with host details — ``host_id``,
-            ``name``, ``owner``, ``status``, ``sandbox_provider``,
-            ``configured_harnesses``, and ``gateway_inference`` (``None`` when
-            no connected host has reported it to this replica).
+        :returns: ``{"hosts": [...], "server_version": ..., "server_build_commit": ...}``.
+            Each host has ``host_id``, ``name``, ``owner``, ``status``,
+            ``sandbox_provider``, ``configured_harnesses``, ``gateway_inference``
+            (``None`` when no connected host has reported it to this replica),
+            and the ``version`` / ``build_commit`` its connection reported
+            (``None`` when it is not connected to this replica). Comparing
+            ``build_commit`` with ``server_build_commit`` shows hosts that lag.
         """
         # require_user: unauthenticated callers 401. user_id is None
         # only when auth is disabled entirely — there the single-user
@@ -927,6 +948,7 @@ def create_hosts_router(
                 # gateway-backed".
                 "gateway_inference": host_registry.gateway_inference(host.host_id),
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
+                **_host_build(conn),
             }
             if (
                 harness_setup_enabled
@@ -943,7 +965,11 @@ def create_hosts_router(
                     conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
                 )
             result.append(item)
-        return {"hosts": result}
+        return {
+            "hosts": result,
+            "server_version": VERSION,
+            "server_build_commit": server_build_commit,
+        }
 
     @router.get("/hosts/{host_id}")
     async def get_host(
@@ -988,6 +1014,7 @@ def create_hosts_router(
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
             "interactive_shells": host_registry.interactive_shells(host.host_id),
+            **_host_build(conn),
             "runners": [],
         }
         if (

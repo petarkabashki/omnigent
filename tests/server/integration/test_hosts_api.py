@@ -37,12 +37,15 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.update_check import running_build_commit
+from omnigent.version import VERSION
 from tests.budgets import budget
 from tests.server.helpers import websocket_scope as _websocket_scope
 
 pytestmark = pytest.mark.asyncio
 
 _HOST_ID = "33296f9b15e02671c34e013dd711407e"
+_HOST_BUILD_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 # Binding persistence can exceed two seconds under parallel CI load.
 # A receive timeout cancels the ASGI app and disconnects the fake host.
 _LAUNCH_FRAME_TIMEOUT_S = 10.0
@@ -71,6 +74,7 @@ def _make_hello(
             version="0.1.0-test",
             frame_protocol_version=1,
             name=name,
+            build_commit=_HOST_BUILD_COMMIT,
             configured_harnesses=configured_harnesses,
             gateway_inference=gateway_inference,
             harness_accounts=harness_accounts,
@@ -234,6 +238,12 @@ async def test_list_hosts_returns_connected_host(
     # field must be present and None so clients can tell it apart from
     # server-managed hosts without a schema sniff.
     assert hosts[0]["sandbox_provider"] is None
+    # Version drift is read by comparing each host's build with the hub's own.
+    assert hosts[0]["version"] == "0.1.0-test"
+    assert hosts[0]["build_commit"] == _HOST_BUILD_COMMIT
+    body = resp.json()
+    assert body["server_version"] == VERSION
+    assert body["server_build_commit"] == running_build_commit()
 
 
 async def test_list_hosts_reports_sandbox_provider_for_managed_host(
