@@ -121,6 +121,8 @@ from omnigent.host.frames import (
     HostPluginsResultFrame,
     HostProbeAccountsFrame,
     HostProbeAccountsResultFrame,
+    HostProjectShellFrame,
+    HostProjectShellResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
@@ -129,6 +131,7 @@ from omnigent.host.frames import (
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
     HostRunnerUsageFrame,
+    HostShellWsFrame,
     HostSkillContentFrame,
     HostSkillContentResultFrame,
     HostSkillsFrame,
@@ -161,6 +164,7 @@ from omnigent.host.host_resources import (
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
+from omnigent.host.project_shells import ProjectShellError, ProjectShellManager
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
@@ -260,6 +264,7 @@ _FS_READER_CACHE_SIZE = 8
 _LEGACY_SERVER_CREATE_BUDGET_S = 140.0
 
 _logger = logging.getLogger(__name__)
+_SHELL_WS_PREFIX = '{"kind": "host.shell_ws"'
 _T = TypeVar("_T")
 
 
@@ -1535,6 +1540,10 @@ class HostProcess:
         # Strong refs to in-flight frame tasks (create_task results are
         # otherwise GC-able); each discards itself on completion.
         self._frame_tasks: set[asyncio.Task[None]] = set()
+        # Shells owned by this host for projects; outlive every session.
+        self._project_shells = ProjectShellManager(
+            scope_limits=lambda: _resolve_scope_limits(None, load_host_resource_config())
+        )
         # Background watcher that force-drops a stale tunnel on wake from system
         # suspend (laptop sleep) so the reconnect loop reattaches at once
         # instead of waiting out the ~90s keepalive timeout. See run() /
@@ -3333,6 +3342,32 @@ class HostProcess:
             after=frame.after,
             before=frame.before,
         )
+
+    async def _handle_project_shell(
+        self, frame: HostProjectShellFrame
+    ) -> HostProjectShellResultFrame:
+        """Create, list or close project shells for the server."""
+        manager = self._project_shells
+        try:
+            if frame.op == "create":
+                if not frame.project_id:
+                    raise ProjectShellError("project_id is required")
+                shell = await manager.create(frame.project_id, frame.workspace or "", frame.title)
+                shells = [shell]
+            elif frame.op == "list":
+                shells = await manager.list(frame.project_id)
+            elif frame.op == "close":
+                if not frame.shell_id:
+                    raise ProjectShellError("shell_id is required")
+                await manager.close(frame.shell_id, frame.project_id)
+                shells = []
+            else:
+                raise ProjectShellError(f"unknown project shell op: {frame.op!r}")
+        except ProjectShellError as exc:
+            return HostProjectShellResultFrame(
+                request_id=frame.request_id, status="failed", error=str(exc)
+            )
+        return HostProjectShellResultFrame(request_id=frame.request_id, status="ok", shells=shells)
 
     def _handle_create_dir(self, frame: HostCreateDirFrame) -> HostCreateDirResultFrame:
         """Handle a ``host.create_dir`` request from the server.
@@ -5272,6 +5307,7 @@ class HostProcess:
             # race where shutdown took an incomplete snapshot of those tasks.
             try:
                 await self._quiesce_frame_tasks()
+                await self._project_shells.close_all()
                 await self._drain_runner_stop_tasks()
                 if self._maintenance_janitor is not None:
                     await self._maintenance_janitor.shutdown()
@@ -5771,6 +5807,10 @@ class HostProcess:
                     # request frames run concurrently below; exceptions raised
                     # on those detached tasks are intentionally contained.
                     self._raise_connection_error_from_raw(raw)
+                    if raw.startswith(_SHELL_WS_PREFIX):
+                        # Attach traffic stays on the receive loop so keystrokes keep order.
+                        await self._relay_shell_ws(ws, raw)
+                        continue
                     # Each request frame is handled on its own task so a slow
                     # handler (a model-options CLI exec, a long git walk) can't
                     # head-of-line block the frames behind it — measured
@@ -5781,6 +5821,7 @@ class HostProcess:
                     # _runner_lifecycle_lock in _dispatch_host_frame.
                     self._start_frame_task(ws, raw)
         finally:
+            await self._project_shells.drop_attaches()
             if (diagnostics := self._diagnostics_for(ws)) is not None:
                 diagnostics.freeze()
             readiness_task.cancel()
@@ -5857,6 +5898,19 @@ class HostProcess:
             return
         if isinstance(frame, HostConnectionErrorFrame):
             self._raise_connection_error(frame)
+
+    async def _relay_shell_ws(
+        self, ws: websockets.asyncio.client.ClientConnection, raw: str
+    ) -> None:
+        """Pass a relayed project-shell attach frame to the shell manager."""
+        try:
+            frame = decode_host_frame(raw)
+        except ValueError:
+            return
+        if isinstance(frame, HostShellWsFrame):
+            await self._project_shells.handle_ws_envelope(
+                frame, lambda text: self._send_text(ws, text)
+            )
 
     def _start_frame_task(self, ws: websockets.asyncio.client.ClientConnection, raw: str) -> None:
         """Handle one inbound frame on its own task, off the receive loop.
@@ -6049,6 +6103,8 @@ class HostProcess:
             await self._send_text(ws, encode_host_frame(list_result))
         elif isinstance(frame, HostCreateDirFrame):
             await self._send_text(ws, encode_host_frame(self._handle_create_dir(frame)))
+        elif isinstance(frame, HostProjectShellFrame):
+            await self._send_text(ws, encode_host_frame(await self._handle_project_shell(frame)))
         elif isinstance(frame, HostInstallHarnessFrame):
             # The installer shells out (npm) and can run for minutes, so run
             # it off the event loop and reply when it completes.

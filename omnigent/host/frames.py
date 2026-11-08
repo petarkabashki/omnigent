@@ -89,6 +89,8 @@ CAP_HARNESS_LOGIN = "harness_login"
 CAP_MCP_REGISTRY = "mcp_registry"
 # The host bounds a whole worktree create by ``HostCreateWorktreeFrame.timeout_s``:
 CAP_WORKTREE_CREATE_BUDGET = "worktree_create_budget"
+# The host can own project shells: tmux shells that outlive any session.
+CAP_PROJECT_SHELLS = "project_shells"
 
 # Every capability THIS build supports; reported verbatim in the hello frame.
 HOST_CAPABILITIES: list[str] = [
@@ -106,6 +108,7 @@ HOST_CAPABILITIES: list[str] = [
     CAP_WORKTREE_CREATE_BUDGET,
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
+    CAP_PROJECT_SHELLS,
 ]
 
 
@@ -182,6 +185,9 @@ class HostFrameKind(str, Enum):
     LIST_WORKTREES_RESULT = "host.list_worktrees_result"
     CREATE_DIR = "host.create_dir"
     CREATE_DIR_RESULT = "host.create_dir_result"
+    PROJECT_SHELL = "host.project_shell"
+    PROJECT_SHELL_RESULT = "host.project_shell_result"
+    SHELL_WS = "host.shell_ws"
     INSTALL_HARNESS = "host.install_harness"
     INSTALL_HARNESS_RESULT = "host.install_harness_result"
     REFRESH_HARNESSES = "host.refresh_harnesses"
@@ -847,6 +853,61 @@ class HostCreateDirResultFrame:
     status: str
     path: str | None = None
     error: str | None = None
+
+
+@dataclass
+class HostProjectShellFrame:
+    """Server → host: create, list or close shells owned by the host process.
+
+    Project shells outlive any session; the host keeps them and is the source
+    of truth for which exist.
+
+    :param request_id: Correlates the result, e.g. ``"req_pshell_1"``.
+    :param op: ``"create"``, ``"list"`` or ``"close"``.
+    :param project_id: Owning project. Required for ``create`` and ``close``;
+        for ``list`` it filters, and ``None`` lists every project's shells.
+    :param shell_id: Shell to close, e.g. ``"pshell_ab12cd34"``.
+    :param workspace: Working directory for ``create``, e.g. ``"/home/me/app"``.
+    :param title: Optional title for ``create``.
+    """
+
+    request_id: str
+    op: str
+    project_id: str | None = None
+    shell_id: str | None = None
+    workspace: str | None = None
+    title: str | None = None
+
+
+@dataclass
+class HostProjectShellResultFrame:
+    """Host → server: outcome of a project-shell request.
+
+    :param request_id: Correlates to the :class:`HostProjectShellFrame`.
+    :param status: ``"ok"`` or ``"failed"``.
+    :param shells: Shell objects (``id``, ``project_id``, ``title``,
+        ``created_at``, ``alive``): the created shell for ``create``, the
+        matching shells for ``list``, empty for ``close``.
+    :param error: Failure description, ``None`` on success.
+    """
+
+    request_id: str
+    status: str
+    shells: list[_JsonObject] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class HostShellWsFrame:
+    """Either direction: one runner-tunnel WS frame for a project-shell attach.
+
+    Carries the same ``ws.open`` / ``ws.frame`` / ``ws.close`` JSON the runner
+    tunnel uses, so the attach relay is shared rather than re-implemented.
+
+    :param payload: The encoded runner-tunnel frame.
+    """
+
+    payload: str
 
 
 @dataclass
@@ -1519,6 +1580,9 @@ HostFrame = (
     | HostListWorktreesResultFrame
     | HostCreateDirFrame
     | HostCreateDirResultFrame
+    | HostProjectShellFrame
+    | HostProjectShellResultFrame
+    | HostShellWsFrame
     | HostInstallHarnessFrame
     | HostInstallHarnessResultFrame
     | HostRefreshHarnessesFrame
@@ -1831,6 +1895,31 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "error": frame.error,
             }
         )
+    if isinstance(frame, HostProjectShellFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROJECT_SHELL.value,
+                "request_id": frame.request_id,
+                "op": frame.op,
+                "project_id": frame.project_id,
+                "shell_id": frame.shell_id,
+                "workspace": frame.workspace,
+                "title": frame.title,
+            }
+        )
+    if isinstance(frame, HostProjectShellResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROJECT_SHELL_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "shells": frame.shells,
+                "error": frame.error,
+            }
+        )
+    if isinstance(frame, HostShellWsFrame):
+        # Not _encode_payload: that records bodies on spans, and these carry keystrokes.
+        return json.dumps({"kind": HostFrameKind.SHELL_WS.value, "payload": frame.payload})
     if isinstance(frame, HostCreateDirFrame):
         return _encode_payload(
             {
@@ -2514,6 +2603,19 @@ def _decode_known_host_frame(
             return _decode_list_worktrees(msg)
         case HostFrameKind.LIST_WORKTREES_RESULT:
             return _decode_list_worktrees_result(msg)
+        case HostFrameKind.PROJECT_SHELL:
+            return HostProjectShellFrame(
+                request_id=_required_str(msg, "request_id"),
+                op=_required_str(msg, "op"),
+                project_id=_optional_nullable_str(msg, "project_id"),
+                shell_id=_optional_nullable_str(msg, "shell_id"),
+                workspace=_optional_nullable_str(msg, "workspace"),
+                title=_optional_nullable_str(msg, "title"),
+            )
+        case HostFrameKind.PROJECT_SHELL_RESULT:
+            return _decode_project_shell_result(msg)
+        case HostFrameKind.SHELL_WS:
+            return HostShellWsFrame(payload=_required_str(msg, "payload"))
         case HostFrameKind.CREATE_DIR:
             return _decode_create_dir(msg)
         case HostFrameKind.CREATE_DIR_RESULT:
@@ -3085,6 +3187,25 @@ def _decode_create_dir_result(msg: _JsonObject) -> HostCreateDirResultFrame:
         request_id=_required_str(msg, "request_id"),
         status=_required_str(msg, "status"),
         path=_optional_nullable_str(msg, "path"),
+        error=_optional_nullable_str(msg, "error"),
+    )
+
+
+def _decode_project_shell_result(msg: _JsonObject) -> HostProjectShellResultFrame:
+    """Decode a host.project_shell_result frame.
+
+    :param msg: Decoded frame object.
+    :returns: Typed host.project_shell_result frame.
+    """
+    raw = msg.get("shells")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list) or not all(isinstance(entry, dict) for entry in raw):
+        raise ValueError("frame field 'shells' must be a list of JSON objects")
+    return HostProjectShellResultFrame(
+        request_id=_required_str(msg, "request_id"),
+        status=_required_str(msg, "status"),
+        shells=raw,
         error=_optional_nullable_str(msg, "error"),
     )
 
