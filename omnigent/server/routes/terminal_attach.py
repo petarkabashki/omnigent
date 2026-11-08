@@ -204,37 +204,16 @@ def create_terminal_attach_router(
                     reason="runner attach factory failed",
                 )
                 return
-            try:
-                from omnigent.runtime import telemetry
-
-                with telemetry.span(
-                    "terminal.attach",
-                    attributes={
-                        "session.id": session_id,
-                        "terminal.id": terminal_id,
-                        "terminal.read_only": read_only,
-                        "terminal.mode": "runner-proxy",
-                    },
-                ):
-                    async with runner_cm as runner_ws:
-                        await _shuttle_ws_frames(websocket, runner_ws)
-            except _RunnerWSClosed as closed:
-                code = (
-                    closed.code
-                    if closed.code and closed.code >= 1000
-                    else _WS_CLOSE_INTERNAL_ERROR
-                )
-                with contextlib.suppress(RuntimeError):
-                    await websocket.close(
-                        code=code,
-                        reason=closed.reason or "",
-                    )
-            except Exception:  # noqa: BLE001
-                with contextlib.suppress(RuntimeError):
-                    await websocket.close(
-                        code=_WS_CLOSE_INTERNAL_ERROR,
-                        reason="runner attach proxy failed",
-                    )
+            await relay_terminal_ws(
+                websocket,
+                runner_cm,
+                span_attributes={
+                    "session.id": session_id,
+                    "terminal.id": terminal_id,
+                    "terminal.read_only": read_only,
+                    "terminal.mode": "runner-proxy",
+                },
+            )
             return
 
         try:
@@ -277,6 +256,40 @@ def create_terminal_attach_router(
             )
 
     return router
+
+
+async def relay_terminal_ws(
+    websocket: WebSocket,
+    runner_cm: object,
+    *,
+    span_attributes: dict[str, str | bool],
+) -> None:
+    """
+    Shuttle an accepted browser *websocket* to a tunneled terminal channel.
+
+    Mirrors the runner's close code to the browser and closes it with an
+    internal-error code when the relay itself fails.
+
+    :param websocket: The accepted browser-facing WebSocket.
+    :param runner_cm: Async context manager yielding the tunneled channel.
+    :param span_attributes: Attributes for the ``terminal.attach`` span.
+    """
+    try:
+        from omnigent.runtime import telemetry
+
+        with telemetry.span("terminal.attach", attributes=span_attributes):
+            async with runner_cm as runner_ws:  # type: ignore[attr-defined]
+                await _shuttle_ws_frames(websocket, runner_ws)
+    except _RunnerWSClosed as closed:
+        code = closed.code if closed.code and closed.code >= 1000 else _WS_CLOSE_INTERNAL_ERROR
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(code=code, reason=closed.reason or "")
+    except Exception:  # noqa: BLE001
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(
+                code=_WS_CLOSE_INTERNAL_ERROR,
+                reason="runner attach proxy failed",
+            )
 
 
 async def _authorize_terminal_attach(

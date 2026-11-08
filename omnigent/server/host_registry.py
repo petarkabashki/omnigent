@@ -438,6 +438,10 @@ class HostConnection:
         in-flight ``host.remove_worktree`` requests. Resolved when
         the host sends ``host.remove_worktree_result``. Values
         carry ``status`` and ``error``.
+    :param pending_project_shells: Per-``request_id`` futures for in-flight
+        ``host.project_shell`` requests, resolved by the matching result frame.
+    :param shell_ws_channels: Open project-shell attach channels
+        (:class:`WSChannelState`) keyed by channel id.
     :param pending_create_dirs: Per-``request_id`` futures for
         in-flight ``host.create_dir`` requests. Resolved when the
         host sends ``host.create_dir_result``. Values carry the
@@ -531,6 +535,11 @@ class HostConnection:
     pending_create_dirs: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
+    pending_project_shells: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
+    # Project-shell attach channels relayed over this tunnel, by channel id.
+    shell_ws_channels: dict[str, Any] = field(default_factory=dict)
     pending_installs: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )

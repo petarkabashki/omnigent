@@ -752,31 +752,9 @@ class TunnelRegistry:
             if channel is None:
                 return False
 
-        item: WSInboundItem
-        if isinstance(frame, WSCloseFrame):
-            item = ("close", (frame.code, frame.reason))
-        else:
-            if frame.encoding == "utf-8":
-                item = ("text", frame.data)
-            elif frame.encoding == "base64":
-                try:
-                    decoded = base64.b64decode(frame.data, validate=True)
-                except (binascii.Error, ValueError):
-                    _logger.warning(
-                        "ws-channel %s: dropping frame with malformed base64",
-                        frame.ch_id,
-                        extra={"session_id": runner_primary_session_id()},
-                    )
-                    return False
-                item = ("data", decoded)
-            else:
-                _logger.warning(
-                    "ws-channel %s: dropping frame with unknown encoding %r",
-                    frame.ch_id,
-                    frame.encoding,
-                    extra={"session_id": runner_primary_session_id()},
-                )
-                return False
+        item = ws_inbound_item(frame)
+        if item is None:
+            return False
 
         return _call_channel_soon_threadsafe(
             channel, lambda: channel.inbound_queue.put_nowait(item)
@@ -1061,6 +1039,34 @@ def _call_soon_threadsafe(state: RequestState, callback: Callable[[], None]) -> 
         )
         return False
     return True
+
+
+def ws_inbound_item(frame: WSFrame | WSCloseFrame) -> WSInboundItem | None:
+    """Convert a WS data/close frame to its channel queue item.
+
+    :returns: The item, or ``None`` (after logging) for a malformed payload.
+    """
+    if isinstance(frame, WSCloseFrame):
+        return ("close", (frame.code, frame.reason))
+    if frame.encoding == "utf-8":
+        return ("text", frame.data)
+    if frame.encoding == "base64":
+        try:
+            return ("data", base64.b64decode(frame.data, validate=True))
+        except (binascii.Error, ValueError):
+            _logger.warning(
+                "ws-channel %s: dropping frame with malformed base64",
+                frame.ch_id,
+                extra={"session_id": runner_primary_session_id()},
+            )
+            return None
+    _logger.warning(
+        "ws-channel %s: dropping frame with unknown encoding %r",
+        frame.ch_id,
+        frame.encoding,
+        extra={"session_id": runner_primary_session_id()},
+    )
+    return None
 
 
 def _call_channel_soon_threadsafe(

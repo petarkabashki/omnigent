@@ -27,6 +27,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import _require_access_sync, require_user
 from omnigent.server.routes._sessions.orchestration import _finish_archive
+from omnigent.server.routes.project_shells import close_deleted_project_shells
 from omnigent.server.routes.sessions import announce_projects_changed
 from omnigent.server.schemas import (
     CreateProjectRequest,
@@ -366,13 +367,18 @@ def create_projects_router(
             database.
         """
         user_id = require_user(request, auth_provider)
+        doomed = await asyncio.to_thread(project_store.get, project_id, user_id=user_id)
         if archive_sessions:
             if conversation_store is None:
                 raise OmnigentError(
                     "Deleting a project with its sessions is not supported by this server",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            return await _delete_with_sessions(request, conversation_store, project_id, user_id)
+            deleted_with_sessions = await _delete_with_sessions(
+                request, conversation_store, project_id, user_id
+            )
+            await close_deleted_project_shells(request.app.state, doomed, user_id)
+            return deleted_with_sessions
         role_path = await asyncio.to_thread(project_store.get_path, project_id, user_id=user_id)
         deleted = await asyncio.to_thread(project_store.delete, project_id, user_id=user_id)
         if not deleted:
@@ -390,6 +396,7 @@ def create_projects_router(
             )
         # Drop the folder from the owner's other connected clients live.
         announce_projects_changed(user_id)
+        await close_deleted_project_shells(request.app.state, doomed, user_id)
         return {"id": project_id, "object": "project.deleted", "deleted": True}
 
     return router

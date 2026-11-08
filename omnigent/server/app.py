@@ -128,6 +128,7 @@ from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.preferences import create_preferences_router
+from omnigent.server.routes.project_shells import create_project_shells_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
@@ -3987,6 +3988,11 @@ def create_app(
             prefix="/v1",
             tags=["projects"],
         )
+        app.include_router(
+            create_project_shells_router(project_store, auth_provider),
+            prefix="/v1",
+            tags=["projects"],
+        )
 
     if preference_store is not None:
         app.include_router(
@@ -4972,6 +4978,7 @@ def create_app(
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,
                 harness_install=app.state.harness_install,
+                project_store=project_store,
             ),
             prefix="/v1",
             tags=["hosts"],

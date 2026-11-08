@@ -60,11 +60,13 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsResultFrame,
     HostProbeAccountsResultFrame,
+    HostProjectShellResultFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
     HostRunnerUsageFrame,
+    HostShellWsFrame,
     HostSkillContentResultFrame,
     HostSkillsResultFrame,
     HostStatResultFrame,
@@ -90,8 +92,15 @@ from omnigent.server.host_registry import (
     RunnerExitReports,
     update_harness_accounts,
 )
+from omnigent.server.project_shells import (
+    abort_shell_attaches,
+    deliver_shell_ws,
+    reconcile_project_shells,
+    resolve_project_shell_result,
+)
 from omnigent.server.tunnel_handshake import receive_tunnel_hello
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.project_store import ProjectStore
 
 _logger = logging.getLogger(__name__)
 
@@ -162,6 +171,7 @@ def create_host_tunnel_router(
     local_single_user: bool | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
     harness_install: HarnessInstallGate = False,
+    project_store: ProjectStore | None = None,
 ) -> APIRouter:
     """Build the router hosting the ``/hosts/{id}/tunnel`` WS endpoint.
 
@@ -179,6 +189,8 @@ def create_host_tunnel_router(
     :param auth_provider: Optional auth provider for user identity.
         When set, the authenticated user is recorded as the host
         owner.
+    :param project_store: When set, a connecting host's shells whose project no
+        longer exists are closed.
     :param on_host_connect: Optional async callback fired after a
         host's tunnel is established. Receives the ``host_id``.
         Used for reconnect reconciliation.
@@ -488,6 +500,22 @@ def create_host_tunnel_router(
                         name=f"host-account-probe:{host_id}",
                     )
 
+                shell_reconcile_task: asyncio.Task[None] | None = None
+                if project_store is not None:
+                    shell_reconcile_task = asyncio.create_task(
+                        reconcile_project_shells(
+                            host_registry,
+                            conn,
+                            # Single-user servers file projects under no owner while the
+                            # tunnel owner is the reserved local user; check both.
+                            lambda project_id: any(
+                                project_store.get(project_id, user_id=owner) is not None
+                                for owner in (conn.owner, None)
+                            ),
+                        ),
+                        name=f"host-shell-reconcile:{host_id}",
+                    )
+
                 try:
                     if on_host_connect is not None:
                         try:
@@ -516,6 +544,9 @@ def create_host_tunnel_router(
                         if exc is not None:
                             raise exc
                 finally:
+                    abort_shell_attaches(conn)
+                    if shell_reconcile_task is not None:
+                        shell_reconcile_task.cancel()
                     conn.diagnostics.freeze()
                     disconnect_attrs = connection_attrs()
                     # Shield teardown from ASGI cancellation, but do not let a
@@ -1024,6 +1055,14 @@ async def _receive_loop(
                         "error": frame.error,
                     }
                 )
+            continue
+
+        if isinstance(frame, HostProjectShellResultFrame):
+            resolve_project_shell_result(conn, frame)
+            continue
+
+        if isinstance(frame, HostShellWsFrame):
+            deliver_shell_ws(conn, frame)
             continue
 
         if isinstance(frame, HostCreateDirResultFrame):

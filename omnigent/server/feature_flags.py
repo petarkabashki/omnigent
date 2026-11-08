@@ -38,6 +38,7 @@ class Feature(StrEnum):
     GRID_SESSIONS_DISPLAY_UI = "grid_sessions_display_ui"
     AUTOMATIONS_V2 = "automations_v2"
     SPLITTABLE_TERMINAL_VIEW_UI = "splittable_terminal_view_ui"
+    PROJECT_SHELLS = "project_shells"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,12 @@ FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
     FeatureDefinition(
         feature=Feature.SPLITTABLE_TERMINAL_VIEW_UI,
         description="Split the main terminal view into several shell panes",
+        owner="web",
+        review_by_release="0.22.0",
+    ),
+    FeatureDefinition(
+        feature=Feature.PROJECT_SHELLS,
+        description="Host-owned project shells that outlive sessions, in the workspace rail",
         owner="web",
         review_by_release="0.22.0",
     ),
