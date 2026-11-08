@@ -6407,6 +6407,7 @@ async def _launch_runner_on_host_locked(
 ) -> _HostLaunchAttempt:
     """The launch round-trip proper; runs under the conversation's lock."""
     from omnigent.host.frames import HostLaunchRunnerFrame, encode_host_frame
+    from omnigent.host.host_resources import resource_limits_from_labels
     from omnigent.runner.identity import token_bound_runner_id
     from omnigent.scheduled_context import current_scheduled_run
 
@@ -6485,6 +6486,7 @@ async def _launch_runner_on_host_locked(
                 # Only the binding we just replaced: an unbound session's old
                 # runner may now serve its /clear or /switch successor.
                 superseded_runner_ids=(superseded_runner_id,) if superseded_runner_id else (),
+                resource_limits=resource_limits_from_labels(conv.labels),
             )
         )
         try:

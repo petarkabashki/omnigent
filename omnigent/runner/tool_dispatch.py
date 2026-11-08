@@ -5431,6 +5431,17 @@ async def _host_harnesses_or_none(
     return readiness if isinstance(readiness, dict) else None
 
 
+def _resource_usage_from_labels(labels: dict[str, str] | None) -> dict[str, str]:
+    """Compact view of the `omnigent.resource.*` and `omnigent.usage.*` labels."""
+    out: dict[str, str] = {}
+    for key, value in (labels or {}).items():
+        if key.startswith("omnigent.usage."):
+            out[key.removeprefix("omnigent.usage.")] = value
+        elif key.startswith("omnigent.resource."):
+            out["limit_" + key.removeprefix("omnigent.resource.")] = value
+    return out
+
+
 async def _none() -> None:
     """Awaitable placeholder for a skipped lookup in ``asyncio.gather``."""
 
@@ -5525,6 +5536,7 @@ async def _session_get_info_via_rest(
             # Role name; peers address it as 'Role', 'project/Role' or '/Role'.
             "alias": (_string_mapping(snap.get("labels")) or {}).get(ALIAS_LABEL_KEY),
             "sub_agent_name": snap.get("sub_agent_name"),
+            "resource_usage": _resource_usage_from_labels(_string_mapping(snap.get("labels"))),
             "reasoning_effort": snap.get("reasoning_effort"),
             # Effective model: a per-session override wins over the
             # agent spec's default; both may be None when unset.

@@ -26,13 +26,14 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 from omnigent import debug_logging
-from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import HOST_FATAL_EXIT_CODE, runner_scope
 from omnigent.host.connect import (
     HostConnectError,
     HostProcess,
     HostRetryableConnectionError,
     ModelOptionsResult,
     _build_runner_env,
+    _resolve_scope_limits,
     _runner_exit_error,
     _RunnerHandle,
     run_host_process,
@@ -82,6 +83,7 @@ from omnigent.host.frames import (
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
+    HostRunnerUsageFrame,
     HostSkillContentFrame,
     HostSkillContentResultFrame,
     HostSkillsFrame,
@@ -96,6 +98,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.host.git_worktree import CreatedWorktree
+from omnigent.host.host_resources import HostResourceConfig
 from omnigent.host.identity import HostIdentity
 from omnigent.host.maintenance import HostMaintenanceJanitor
 from omnigent.host.runner_zygote import ZygoteUnavailable
@@ -899,6 +902,12 @@ async def test_handle_model_options_reports_the_endpoints_wider_catalog(
         "system.ai.claude-opus-4-8",
     ]
     _cleanup_host(host)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_runner_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tests from placing fake runners into real systemd scopes."""
+    monkeypatch.setattr(runner_scope, "scope_supported", lambda: False)
 
 
 def _make_host_process() -> HostProcess:
@@ -11272,3 +11281,134 @@ async def test_host_publishes_stored_workspace_at_startup(
 
     assert host._origin_workspace_id == "1965859176160743"
     assert os.environ[debug_logging.ORIGIN_WORKSPACE_ID_ENV_VAR] == "1965859176160743"
+
+
+# --- per-runner systemd scopes -------------------------------------------------
+
+
+def _scope(tmp_path: Path) -> runner_scope.RunnerScope:
+    return runner_scope.RunnerScope(unit="omnigent-runner-x.scope", cgroup_dir=tmp_path)
+
+
+def _usage(peak: int = 100, cpu: int = 0, ooms: int = 0) -> runner_scope.ScopeUsage:
+    return runner_scope.ScopeUsage(
+        memory_peak_bytes=peak, memory_current_bytes=peak, cpu_usage_usec=cpu, oom_kill_count=ooms
+    )
+
+
+def test_resolve_scope_limits_prefers_labels_and_falls_back_on_invalid() -> None:
+    config = HostResourceConfig(
+        session_memory_max=8 << 30, session_memory_high=None, session_cpu_quota=300
+    )
+    assert _resolve_scope_limits({"memory_max": "6G", "cpu_quota": "200%"}, config) == (
+        6 << 30,
+        None,
+        200,
+    )
+    # Invalid label values fall back to the host default.
+    assert _resolve_scope_limits({"memory_max": "lots", "cpu_quota": "-1"}, config) == (
+        8 << 30,
+        None,
+        300,
+    )
+    assert _resolve_scope_limits(None, config) == (8 << 30, None, 300)
+
+
+async def test_handle_launch_places_runner_in_scope_with_label_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _make_host_process()
+    placed: dict[str, object] = {}
+
+    def _place(pid: int, **kwargs: object) -> runner_scope.RunnerScope:
+        placed.update(kwargs, pid=pid)
+        return _scope(tmp_path)
+
+    monkeypatch.setattr(runner_scope, "scope_supported", lambda: True)
+    monkeypatch.setattr(runner_scope, "place_runner_in_scope", _place)
+    monkeypatch.setattr(host, "_watch_runner", AsyncMock())
+    monkeypatch.setattr(host, "_watch_runner_connect", AsyncMock())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    proc = subprocess.Popen(["sleep", "5"])
+    try:
+        monkeypatch.setattr(host, "_spawn_runner_proc", lambda *_a: (proc, tmp_path / "r.log"))
+        result = await host._handle_launch(
+            HostLaunchRunnerFrame(
+                request_id="r1",
+                binding_token="tok_scope",
+                workspace=str(workspace),
+                session_id="s1",
+                resource_limits={"memory_max": "2G", "cpu_quota": "150%"},
+            )
+        )
+        assert result.status == "launched", result.error
+        runner_id = token_bound_runner_id("tok_scope")
+        assert placed["pid"] == proc.pid
+        assert placed["runner_id"] == runner_id
+        assert placed["memory_max"] == 2 << 30
+        assert placed["cpu_quota_percent"] == 150
+        assert host._runners[runner_id].scope is not None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_stop_runner_proc_samples_then_stops_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(runner_scope, "sample_scope_usage", lambda _s: calls.append("sample"))
+    monkeypatch.setattr(runner_scope, "stop_scope", lambda _s: calls.append("stop") or True)
+    proc = SimpleNamespace(
+        poll=lambda: None, terminate=lambda: calls.append("terminate"), wait=lambda timeout: 0
+    )
+    HostProcess._stop_runner_proc(proc, _scope(tmp_path))  # type: ignore[arg-type]
+    assert calls == ["sample", "terminate", "stop"]
+
+
+async def test_sampling_reports_oom_immediately_and_skips_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _make_host_process()
+    tunnel = _FakeTunnel()
+    host._ws = tunnel  # type: ignore[assignment]
+    handle = _RunnerHandle(proc=SimpleNamespace(), log_path=tmp_path / "l", scope=_scope(tmp_path))  # type: ignore[arg-type]
+    samples = iter([_usage(), _usage(peak=101), _usage(peak=101, ooms=1)])
+    monkeypatch.setattr(runner_scope, "sample_scope_usage", lambda _s: next(samples))
+    for _ in range(3):
+        await host._sample_and_report_usage("runner_x", handle)
+    frames = [decode_host_frame(text) for text in tunnel.sent]
+    # First sample and the OOM rise are sent; the near-identical one is not.
+    assert [f.oom_kill_count for f in frames] == [0, 1]  # type: ignore[union-attr]
+    assert isinstance(frames[0], HostRunnerUsageFrame)
+
+
+async def test_watch_runner_exit_after_oom_prefixes_error_and_sends_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("omnigent.host.connect._RUNNER_WATCH_INTERVAL_S", 0.01)
+    host = _make_host_process()
+    tunnel = _FakeTunnel()
+    host._ws = tunnel  # type: ignore[assignment]
+    log = tmp_path / "r.log"
+    log.write_text("boom\n")
+    scope = _scope(tmp_path)
+    scope.last_usage = _usage(peak=3 << 30, ooms=2)
+    monkeypatch.setattr(runner_scope, "final_scope_usage", lambda s: s.last_usage)
+    monkeypatch.setattr(runner_scope, "stop_scope", lambda _s: True)
+    proc = SimpleNamespace(poll=lambda: 137, returncode=137)
+    host._runners["runner_x"] = _RunnerHandle(
+        proc=proc,  # type: ignore[arg-type]
+        log_path=log,
+        scope=scope,
+        scope_memory_max=2 << 30,
+    )
+    await host._watch_runner("runner_x")
+    [report] = [decode_host_frame(text) for text in tunnel.sent]
+    assert isinstance(report, HostRunnerExitedFrame)
+    assert report.error.startswith("out of memory:")
+    assert "3072 MiB" in report.error
+    assert "limit 2048 MiB" in report.error
+    assert report.usage is not None
+    assert report.usage["oom_kill_count"] == 2

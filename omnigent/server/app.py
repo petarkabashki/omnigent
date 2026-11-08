@@ -4454,7 +4454,31 @@ def create_app(
 
         task.add_done_callback(_clear_grace_slot)
 
-    async def _on_runner_exited(host_id: str, runner_id: str, error: str) -> None:
+    async def _on_runner_usage(host_id: str, runner_id: str, usage: dict[str, Any]) -> None:
+        """Write a runner's usage onto its bound sessions as ``omnigent.usage.*`` labels.
+
+        A rising OOM kill count is logged as a warning; there is no cheap
+        session notice event to push it to the open view.
+        """
+        from omnigent.host.host_resources import USAGE_LABEL_PREFIX, usage_labels
+
+        updates = usage_labels(usage)
+        affected = await asyncio.to_thread(
+            conversation_store.list_conversations_by_runner_id, runner_id
+        )
+        for conv in affected:
+            previous_kills = int(conv.labels.get(USAGE_LABEL_PREFIX + "oom_kills") or 0)
+            await asyncio.to_thread(conversation_store.set_labels, conv.id, updates)
+            if int(usage.get("oom_kill_count") or 0) > previous_kills:
+                _logger.warning(
+                    "Session hit the OOM killer on host %s",
+                    host_id,
+                    extra=debug_event("session_oom_kill", session_id=conv.id, runner_id=runner_id),
+                )
+
+    async def _on_runner_exited(
+        host_id: str, runner_id: str, error: str, usage: dict[str, Any] | None = None
+    ) -> None:
         """Mark a crashed runner's session(s) failed and push the cause.
 
         Fired by the host tunnel when a daemon reports
@@ -4474,8 +4498,10 @@ def create_app(
         :param runner_id: The crashed runner's id.
         :param error: Human-readable cause from the daemon (exit code +
             log tail), e.g. ``"runner process exited with code 1 ..."``.
+        :param usage: Final scope usage sample, if the runner had a scope.
         """
-        from omnigent.runner.launch_failure import RUNNER_PROCESS_CRASH
+        from omnigent.host.host_resources import usage_labels
+        from omnigent.runner.launch_failure import OUT_OF_MEMORY, RUNNER_PROCESS_CRASH
         from omnigent.server.routes.host_tunnel import log_runner_exited
         from omnigent.server.routes.sessions import _mark_runner_sessions_offline
         from omnigent.server.schemas import ErrorDetail
@@ -4492,6 +4518,8 @@ def create_app(
         )
         # Only a runner that never connected failed to start; one that ran and died is a crash.
         failure_code = RUNNER_PROCESS_CRASH if runner_ran else "runner_failed_to_start"
+        if usage and int(usage.get("oom_kill_count") or 0) > 0:
+            failure_code = OUT_OF_MEMORY
         try:
             affected = await asyncio.to_thread(
                 conversation_store.list_conversations_by_runner_id, runner_id
@@ -4504,6 +4532,11 @@ def create_app(
         # with no bound session still gets a session-less row.
         for session_id in [conv.id for conv in affected] or [None]:
             log_runner_exited(host_id, runner_id, error, session_id=session_id)
+        if usage:
+            for conv in affected:
+                await asyncio.to_thread(
+                    conversation_store.set_labels, conv.id, usage_labels(usage)
+                )
         await _mark_runner_sessions_offline(
             affected,
             ErrorDetail(code=failure_code, message=error),
@@ -4930,6 +4963,7 @@ def create_app(
                 auth_provider=auth_provider,
                 runner_exit_reports=runner_exit_reports,
                 on_runner_exited=_on_runner_exited,
+                on_runner_usage=_on_runner_usage,
                 on_host_connect=_on_hosts_changed,
                 on_host_disconnect=_on_hosts_changed,
                 on_host_update=_on_hosts_changed,

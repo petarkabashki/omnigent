@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -2190,7 +2190,11 @@ def _runner_exited_app(db_uri: str, tmp_path: Path) -> tuple[FastAPI, SqlAlchemy
 
 
 async def _report_runner_exited(
-    app: FastAPI, runner_id: str, *, had_connected: bool | None = None
+    app: FastAPI,
+    runner_id: str,
+    *,
+    had_connected: bool | None = None,
+    usage: dict[str, int] | None = None,
 ) -> ApplicationCommunicator:
     """Connect a host to ``app`` and send a ``host.runner_exited`` frame.
 
@@ -2206,11 +2210,28 @@ async def _report_runner_exited(
     assert accepted["type"] == "websocket.accept", f"tunnel refused: {accepted!r}"
     await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
     report = json.loads(
-        encode_host_frame(HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1"))
+        encode_host_frame(
+            HostRunnerExitedFrame(runner_id=runner_id, error="exited with code 1", usage=usage)
+        )
     )
     if had_connected is not None:
         report["had_connected"] = had_connected
     await comm.send_input({"type": "websocket.receive", "text": json.dumps(report)})
+    return comm
+
+
+async def _report_runner_usage(
+    app: FastAPI, runner_id: str, **fields: int
+) -> ApplicationCommunicator:
+    """Connect a host to ``app`` and send a ``host.runner_usage`` frame."""
+    from omnigent.host.frames import HostRunnerUsageFrame
+
+    comm = ApplicationCommunicator(app, _websocket_scope(f"/v1/hosts/{_HOST_ID}/tunnel"))
+    await comm.send_input({"type": "websocket.connect"})
+    await comm.receive_output(timeout=5.0)
+    await comm.send_input({"type": "websocket.receive", "text": _make_hello()})
+    frame = HostRunnerUsageFrame(runner_id=runner_id, **fields)
+    await comm.send_input({"type": "websocket.receive", "text": encode_host_frame(frame)})
     return comm
 
 
@@ -2641,3 +2662,52 @@ async def test_session_response_keeps_existing_failure_cause_while_exit_report_i
     assert _persisted_task_error(conv_store, session_id) == original_error
     assert after["status"] == "failed"
     assert after["last_task_error"] == original_error
+
+
+async def test_runner_usage_frame_writes_usage_labels_and_warns_on_new_oom(
+    db_uri: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """host.runner_usage lands as omnigent.usage.* labels on every bound session."""
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    bound = conv_store.create_conversation(agent_id=None, runner_id="runner_u")
+    other = conv_store.create_conversation(agent_id=None, runner_id="runner_other")
+
+    caplog.set_level("WARNING", logger="omnigent.server.app")
+    _comm = await _report_runner_usage(
+        app, "runner_u", memory_peak_bytes=2048, cpu_usage_usec=77, oom_kill_count=1
+    )
+    await poll_until_async(
+        lambda: conv_store.get_conversation(bound.id).labels.get("omnigent.usage.oom_kills")
+    )
+
+    labels = conv_store.get_conversation(bound.id).labels
+    assert labels["omnigent.usage.memory_peak_bytes"] == "2048"
+    assert labels["omnigent.usage.cpu_usage_usec"] == "77"
+    assert labels["omnigent.usage.oom_kills"] == "1"
+    assert "omnigent.usage.oom_kills" not in conv_store.get_conversation(other.id).labels
+    assert any(getattr(r, "event_name", None) == "session_oom_kill" for r in caplog.records)
+
+
+async def test_runner_exit_with_oom_usage_uses_out_of_memory_code(
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final sample with OOM kills fails the sessions as out_of_memory and keeps usage."""
+    from omnigent.runner.launch_failure import OUT_OF_MEMORY
+
+    app, conv_store = _runner_exited_app(db_uri, tmp_path)
+    conv = conv_store.create_conversation(agent_id=None, runner_id="runner_oom")
+    marked = AsyncMock()
+    monkeypatch.setattr("omnigent.server.routes.sessions._mark_runner_sessions_offline", marked)
+
+    _comm = await _report_runner_exited(
+        app, "runner_oom", usage={"memory_peak_bytes": 5, "oom_kill_count": 2}
+    )
+    await poll_until_async(lambda: marked.await_count)
+
+    assert marked.await_args.args[1].code == OUT_OF_MEMORY
+    labels = conv_store.get_conversation(conv.id).labels
+    assert labels["omnigent.usage.oom_kills"] == "2"

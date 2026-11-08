@@ -61,6 +61,7 @@ from omnigent.host.frames import (
     optional_str_bool_map,
     workspace_missing_message,
 )
+from omnigent.host.host_resources import resource_limits_from_labels
 from omnigent.onboarding.harness_install import (
     ui_credential_configurable_harnesses,
     ui_install_key,
@@ -1443,6 +1444,7 @@ def create_hosts_router(
                     if profile_binding is not None and profile_binding.runner_id is not None
                     else ()
                 ),
+                resource_limits=resource_limits_from_labels(target.conv.labels),
             )
         )
         try:

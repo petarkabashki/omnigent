@@ -67,7 +67,7 @@ from omnigent.harness_aliases import (
     is_claude_sdk_harness_name,
 )
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
-from omnigent.host import HOST_FATAL_EXIT_CODE
+from omnigent.host import HOST_FATAL_EXIT_CODE, runner_scope
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
@@ -128,6 +128,7 @@ from omnigent.host.frames import (
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
+    HostRunnerUsageFrame,
     HostSkillContentFrame,
     HostSkillContentResultFrame,
     HostSkillsFrame,
@@ -151,9 +152,12 @@ from omnigent.host.git_worktree import (
     remove_worktree,
 )
 from omnigent.host.host_resources import (
+    HostResourceConfig,
     admission_refusal,
     available_memory_bytes,
     load_host_resource_config,
+    parse_cpu_quota,
+    parse_memory_size,
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
@@ -379,6 +383,13 @@ _LOG_TAIL_MAX_LINES = 15
 # steady-state online-poll cadence (daemon_launch.DAEMON_POLL_INTERVAL_S),
 # so a crashed runner is reported within about one client poll.
 _RUNNER_WATCH_INTERVAL_S = 0.5
+
+# How often a runner's scope usage is sampled and (if changed) reported.
+_RUNNER_USAGE_INTERVAL_S = 15.0
+# A usage report is sent only when peak memory grew by this many bytes...
+_USAGE_REPORT_MIN_PEAK_DELTA_BYTES = 16 * 1024 * 1024
+# ...or CPU time grew by this many microseconds (or an OOM kill occurred).
+_USAGE_REPORT_MIN_CPU_DELTA_USEC = 5_000_000
 
 # The server's 30s send wait handles user feedback; this host check also covers
 # create-time launches and outlasts the runner's 150s pending-sign-in wait.
@@ -1185,6 +1196,77 @@ def _with_model_configuration_source(
     return [{**model, "source": source} for model in models]
 
 
+def _resolve_scope_limits(
+    labels: dict[str, str] | None, config: HostResourceConfig
+) -> tuple[int | None, int | None, int | None]:
+    """Resolve (memory_max, memory_high, cpu_percent): session label, else host default.
+
+    An invalid label value is logged and replaced by the host default.
+    """
+    labels = labels or {}
+    resolved: list[int | None] = []
+    for key, parse, default in (
+        ("memory_max", parse_memory_size, config.session_memory_max),
+        ("memory_high", parse_memory_size, config.session_memory_high),
+        ("cpu_quota", parse_cpu_quota, config.session_cpu_quota),
+    ):
+        raw = labels.get(key)
+        value = default
+        if raw is not None:
+            try:
+                value = parse(raw)
+            except ValueError:
+                _logger.warning(
+                    "Ignoring invalid resource limit %s=%r; using host default", key, raw
+                )
+        resolved.append(value)
+    return resolved[0], resolved[1], resolved[2]
+
+
+def _format_mib(size: int | None) -> str:
+    return "unknown" if size is None else f"{size / (1 << 20):.0f} MiB"
+
+
+def _out_of_memory_message(usage: runner_scope.ScopeUsage, memory_max: int | None) -> str:
+    """One-line explanation prefixed to the exit error after an in-scope OOM kill."""
+    limit = _format_mib(memory_max) if memory_max else "none set"
+    return (
+        f"out of memory: the session used up to {_format_mib(usage.memory_peak_bytes)} "
+        f"(limit {limit}) and the kernel OOM killer fired {usage.oom_kill_count} time(s)."
+    )
+
+
+def _usage_to_dict(usage: runner_scope.ScopeUsage) -> dict[str, int | None]:
+    return {
+        "memory_peak_bytes": usage.memory_peak_bytes,
+        "memory_current_bytes": usage.memory_current_bytes,
+        "cpu_usage_usec": usage.cpu_usage_usec,
+        "oom_kill_count": usage.oom_kill_count,
+    }
+
+
+def _usage_changed_meaningfully(
+    new: runner_scope.ScopeUsage, old: runner_scope.ScopeUsage | None
+) -> bool:
+    if old is None or new.oom_kill_count != old.oom_kill_count:
+        return True
+    peak_delta = (new.memory_peak_bytes or 0) - (old.memory_peak_bytes or 0)
+    cpu_delta = (new.cpu_usage_usec or 0) - (old.cpu_usage_usec or 0)
+    return (
+        peak_delta >= _USAGE_REPORT_MIN_PEAK_DELTA_BYTES
+        or cpu_delta >= _USAGE_REPORT_MIN_CPU_DELTA_USEC
+    )
+
+
+def _finish_scope(scope: runner_scope.RunnerScope | None) -> runner_scope.ScopeUsage | None:
+    """Take one last usage sample, then stop the scope. Blocking; fail-open."""
+    if scope is None:
+        return None
+    usage = runner_scope.final_scope_usage(scope)
+    runner_scope.stop_scope(scope)
+    return usage
+
+
 @dataclass
 class _RunnerHandle:
     """A spawned runner subprocess and where its output lands.
@@ -1210,6 +1292,9 @@ class _RunnerHandle:
     session_id: str | None = None
     connect_marker: Path | None = None
     stop_requested: bool = False
+    scope: runner_scope.RunnerScope | None = None
+    scope_memory_max: int | None = None
+    reported_usage: runner_scope.ScopeUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -2253,11 +2338,27 @@ class HostProcess:
             self._runners.pop(rid, None)
             handle.stop_requested = True
             self._spawn_superseded_stop(rid, handle, frame.session_id or "")
+        scope = None
+        memory_max, memory_high, cpu_quota = _resolve_scope_limits(
+            frame.resource_limits, resource_config
+        )
+        if runner_scope.scope_supported():
+            # Blocks up to ~2s on systemd; keep it off the event loop.
+            scope = await asyncio.to_thread(
+                runner_scope.place_runner_in_scope,
+                proc.pid,
+                runner_id=runner_id,
+                memory_max=memory_max,
+                memory_high=memory_high,
+                cpu_quota_percent=cpu_quota,
+            )
         self._runners[runner_id] = _RunnerHandle(
             proc=proc,
             log_path=log_path,
             session_id=frame.session_id or None,
             connect_marker=_connect_marker_path(log_path),
+            scope=scope,
+            scope_memory_max=memory_max,
         )
         launch_context = current_scheduled_run()
         with scheduled_run_scope(None, session_id=frame.session_id):
@@ -2487,7 +2588,7 @@ class HostProcess:
         # direct-Popen runner, but blocking control-socket exchanges for a
         # zygote-forked one — run them off the loop so a wedged zygote can't
         # freeze the daemon's control handler.
-        await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
+        await self._stop_runner_and_trigger(handle.proc, "runner_stopped", handle.scope)
         _logger.info("Stopped runner %s", frame.runner_id)
         _print_host_status(
             f"  ↓ Runner stopped: {frame.runner_id}",
@@ -2519,7 +2620,7 @@ class HostProcess:
 
         async def _stop_and_log() -> None:
             try:
-                await self._stop_runner_and_trigger(handle.proc, "runner_superseded")
+                await self._stop_runner_and_trigger(handle.proc, "runner_superseded", handle.scope)
                 _logger.info(
                     "Stopped superseded runner %s for session %s",
                     runner_id,
@@ -2542,9 +2643,12 @@ class HostProcess:
         self,
         proc: subprocess.Popen[bytes] | ZygoteRunnerProc,
         reason: str,
+        scope: runner_scope.RunnerScope | None = None,
     ) -> None:
         """Finish runner termination before triggering host maintenance."""
-        stop_task = asyncio.create_task(asyncio.to_thread(self._stop_runner_proc, proc))
+        stop_task = asyncio.create_task(
+            asyncio.to_thread(self._stop_runner_proc, proc, *([scope] if scope else []))
+        )
         try:
             await asyncio.shield(stop_task)
         except asyncio.CancelledError:
@@ -2556,15 +2660,32 @@ class HostProcess:
                 self._trigger_maintenance(reason)
 
     @staticmethod
-    def _stop_runner_proc(proc: subprocess.Popen[bytes] | ZygoteRunnerProc) -> None:
+    def _stop_runner_proc(
+        proc: subprocess.Popen[bytes] | ZygoteRunnerProc,
+        scope: runner_scope.RunnerScope | None = None,
+    ) -> None:
         """Terminate a runner: SIGTERM, brief wait, then SIGKILL. Blocking.
+
+        With a ``scope``, take a last usage sample first and stop the whole
+        scope afterwards (the process kill above stays as the fallback).
 
         Runs on a worker thread (see :meth:`_handle_stop`) because for a
         zygote-forked runner these are blocking control-socket round-trips, not
         lock-free waitpid calls.
 
         :param proc: The runner process handle (Popen or zygote shim).
+        :param scope: The runner's systemd scope, if it was placed in one.
         """
+        if scope is not None:
+            runner_scope.sample_scope_usage(scope)
+        try:
+            HostProcess._terminate_runner(proc)
+        finally:
+            if scope is not None:
+                runner_scope.stop_scope(scope)
+
+    @staticmethod
+    def _terminate_runner(proc: subprocess.Popen[bytes] | ZygoteRunnerProc) -> None:
         if proc.poll() is not None:
             return
         proc.terminate()
@@ -2669,14 +2790,20 @@ class HostProcess:
         # blocking control-socket round-trip (with lock contention against a
         # booting zygote) for a zygote-forked one — so run it off the event
         # loop to avoid freezing the daemon on the enabled path.
+        next_usage_sample = time.monotonic() + _RUNNER_USAGE_INTERVAL_S
         while await asyncio.to_thread(handle.proc.poll) is None:
             await asyncio.sleep(_RUNNER_WATCH_INTERVAL_S)
+            if handle.scope is not None and time.monotonic() >= next_usage_sample:
+                next_usage_sample = time.monotonic() + _RUNNER_USAGE_INTERVAL_S
+                await self._sample_and_report_usage(runner_id, handle)
         if self._runners.get(runner_id) is not handle:
             # _handle_stop (or _cleanup_runners) removed it first —
             # an intentional termination, not a crash to report.
             return
         self._runners.pop(runner_id)
         self._trigger_maintenance("runner_exited")
+        # Last live sample (the scope is already gone), then reap stragglers.
+        final_usage = await asyncio.to_thread(_finish_scope, handle.scope)
         had_connected = None
         if handle.connect_marker is not None:
             try:
@@ -2698,9 +2825,13 @@ class HostProcess:
                     "Runner %s exited cleanly (code 0) before connecting; reporting exit",
                     runner_id,
                 )
-                await self._report_runner_exit(runner_id, error, had_connected=had_connected)
+                await self._report_runner_exit(
+                    runner_id, error, had_connected=had_connected, usage=final_usage
+                )
                 return
             error = _runner_exit_error(handle.proc.returncode, handle.log_path)
+            if final_usage is not None and final_usage.oom_kill_count > 0:
+                error = f"{_out_of_memory_message(final_usage, handle.scope_memory_max)}\n{error}"
             # A credential refusal before connecting needs renewed sign-in.
             # Other exits remain runner faults; the log tail carries the cause.
             auth_rejected = (
@@ -2732,7 +2863,47 @@ class HostProcess:
                     ).value,
                 ),
             )
-            await self._report_runner_exit(runner_id, error, had_connected=had_connected)
+            await self._report_runner_exit(
+                runner_id, error, had_connected=had_connected, usage=final_usage
+            )
+
+    async def _sample_and_report_usage(self, runner_id: str, handle: _RunnerHandle) -> None:
+        """Sample the runner's scope and send ``host.runner_usage`` when it changed.
+
+        An OOM kill count that rose is reported immediately, even though the
+        runner may have survived (the killer takes the biggest child).
+        """
+        scope = handle.scope
+        if scope is None:
+            return
+        usage = await asyncio.to_thread(runner_scope.sample_scope_usage, scope)
+        ws = self._ws
+        if usage is None or ws is None:
+            return
+        if not _usage_changed_meaningfully(usage, handle.reported_usage):
+            return
+        if usage.oom_kill_count > (
+            handle.reported_usage.oom_kill_count if handle.reported_usage else 0
+        ):
+            _logger.warning(
+                "Runner %s hit the OOM killer (%d kills, peak %s)",
+                runner_id,
+                usage.oom_kill_count,
+                _format_mib(usage.memory_peak_bytes),
+            )
+        frame = HostRunnerUsageFrame(
+            runner_id=runner_id,
+            memory_peak_bytes=usage.memory_peak_bytes,
+            memory_current_bytes=usage.memory_current_bytes,
+            cpu_usage_usec=usage.cpu_usage_usec,
+            oom_kill_count=usage.oom_kill_count,
+        )
+        try:
+            await self._send_text(ws, encode_host_frame(frame))
+        except Exception:  # unsent: the next sample retries
+            _logger.debug("Could not send runner_usage for %s", runner_id, exc_info=True)
+            return
+        handle.reported_usage = usage
 
     async def _watch_runner_connect(
         self, runner_id: str, *, exit_watcher: asyncio.Task[None]
@@ -2779,7 +2950,12 @@ class HostProcess:
             janitor.trigger(reason)
 
     async def _report_runner_exit(
-        self, runner_id: str, error: str, *, had_connected: bool | None = None
+        self,
+        runner_id: str,
+        error: str,
+        *,
+        had_connected: bool | None = None,
+        usage: runner_scope.ScopeUsage | None = None,
     ) -> None:
         """Send a ``host.runner_exited`` report, queueing on failure.
 
@@ -2787,12 +2963,16 @@ class HostProcess:
         :param error: Composed exit error from
             :func:`_runner_exit_error`.
         :param had_connected: First-connect marker evidence, or ``None`` when unknown.
+        :param usage: Final scope usage sample, if the runner had a scope.
         :returns: None. A report that cannot be sent (tunnel down or
             mid-reconnect) is parked in ``self._unreported_exits`` and
             flushed by :meth:`_serve_frames` after the next hello.
         """
         report = HostRunnerExitedFrame(
-            runner_id=runner_id, error=error, had_connected=had_connected
+            runner_id=runner_id,
+            error=error,
+            had_connected=had_connected,
+            usage=_usage_to_dict(usage) if usage is not None else None,
         )
         ws = self._ws
         if ws is not None:
@@ -5201,6 +5381,8 @@ class HostProcess:
                 handle.proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 handle.proc.kill()
+            if handle.scope is not None:
+                runner_scope.stop_scope(handle.scope)
         self._runners.clear()
 
     async def _connect_and_serve(self) -> None:

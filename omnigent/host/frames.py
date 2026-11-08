@@ -167,6 +167,7 @@ class HostFrameKind(str, Enum):
     STOP_RUNNER = "host.stop_runner"
     STOP_RUNNER_RESULT = "host.stop_runner_result"
     RUNNER_EXITED = "host.runner_exited"
+    RUNNER_USAGE = "host.runner_usage"
     RUNNER_STATUS = "host.runner_status"
     RUNNER_STATUS_RESULT = "host.runner_status_result"
     STAT = "host.stat"
@@ -335,6 +336,10 @@ class HostLaunchRunnerFrame:
         falls back to stopping every runner launched for ``session_id``; an
         empty tuple stops none, e.g. after /clear moved the old runner to
         another session.
+    :param resource_limits: Per-session runner limits from the session's
+        ``omnigent.resource.*`` labels, e.g. ``{"memory_max": "6G"}``
+        (keys: memory_max, memory_high, cpu_quota). ``None`` or empty
+        means use the host defaults.
     """
 
     request_id: str
@@ -345,6 +350,7 @@ class HostLaunchRunnerFrame:
     inference_config: dict[str, Any] | None = None
     superseded_runner_ids: tuple[str, ...] | None = None
     scheduled_run: ScheduledRunLogContext | None = None
+    resource_limits: dict[str, str] | None = None
 
 
 @dataclass
@@ -440,6 +446,28 @@ class HostRunnerExitedFrame:
     runner_id: str
     error: str
     had_connected: bool | None = None
+    usage: dict[str, Any] | None = None
+
+
+@dataclass
+class HostRunnerUsageFrame:
+    """Host → server: periodic resource usage of a runner's scope.
+
+    One-way report. ``oom_kill_count`` rising means the kernel OOM killer
+    fired inside the runner's scope (the runner itself may have survived).
+
+    :param runner_id: The runner, e.g. ``"runner_abc123..."``.
+    :param memory_peak_bytes: Peak memory of the scope, or ``None``.
+    :param memory_current_bytes: Current memory of the scope, or ``None``.
+    :param cpu_usage_usec: Cumulative CPU time in microseconds, or ``None``.
+    :param oom_kill_count: Cumulative OOM kills in the scope.
+    """
+
+    runner_id: str
+    memory_peak_bytes: int | None = None
+    memory_current_bytes: int | None = None
+    cpu_usage_usec: int | None = None
+    oom_kill_count: int = 0
 
 
 @dataclass
@@ -1473,6 +1501,7 @@ HostFrame = (
     | HostStopRunnerFrame
     | HostStopRunnerResultFrame
     | HostRunnerExitedFrame
+    | HostRunnerUsageFrame
     | HostRunnerStatusFrame
     | HostRunnerStatusResultFrame
     | HostStatFrame
@@ -1615,6 +1644,8 @@ def encode_host_frame(frame: HostFrame) -> str:
             payload["scheduled_run"] = frame.scheduled_run.model_dump()
         if frame.superseded_runner_ids is not None:
             payload["superseded_runner_ids"] = list(frame.superseded_runner_ids)
+        if frame.resource_limits:
+            payload["resource_limits"] = frame.resource_limits
         return _encode_payload(payload)
     if isinstance(frame, HostLaunchRunnerResultFrame):
         return _encode_payload(
@@ -1653,6 +1684,18 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "runner_id": frame.runner_id,
                 "error": frame.error,
                 "had_connected": frame.had_connected,
+                "usage": frame.usage,
+            }
+        )
+    if isinstance(frame, HostRunnerUsageFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.RUNNER_USAGE.value,
+                "runner_id": frame.runner_id,
+                "memory_peak_bytes": frame.memory_peak_bytes,
+                "memory_current_bytes": frame.memory_current_bytes,
+                "cpu_usage_usec": frame.cpu_usage_usec,
+                "oom_kill_count": frame.oom_kill_count,
             }
         )
     if isinstance(frame, HostRunnerStatusFrame):
@@ -2441,6 +2484,8 @@ def _decode_known_host_frame(
             return _decode_stop_runner_result(msg)
         case HostFrameKind.RUNNER_EXITED:
             return _decode_runner_exited(msg)
+        case HostFrameKind.RUNNER_USAGE:
+            return _decode_runner_usage(msg)
         case HostFrameKind.RUNNER_STATUS:
             return _decode_runner_status(msg)
         case HostFrameKind.RUNNER_STATUS_RESULT:
@@ -2699,6 +2744,7 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
             if "superseded_runner_ids" in msg
             else None
         ),
+        resource_limits=_optional_str_dict(msg, "resource_limits"),
     )
 
 
@@ -2754,12 +2800,35 @@ def _decode_runner_exited(msg: _JsonObject) -> HostRunnerExitedFrame:
     :param msg: Decoded frame object.
     :returns: Typed host.runner_exited frame.
     """
+    usage = msg.get("usage")
+    if usage is not None and not isinstance(usage, dict):
+        raise ValueError("usage must be an object or null")
     return HostRunnerExitedFrame(
         runner_id=_required_str(msg, "runner_id"),
         error=_required_str(msg, "error"),
         had_connected=(
             _required_bool(msg, "had_connected") if msg.get("had_connected") is not None else None
         ),
+        usage=usage,
+    )
+
+
+def _decode_runner_usage(msg: _JsonObject) -> HostRunnerUsageFrame:
+    """Decode a host.runner_usage report frame.
+
+    :param msg: Decoded frame object.
+    :returns: Typed host.runner_usage frame.
+    """
+
+    def optional_int(key: str) -> int | None:
+        return _required_int(msg, key) if msg.get(key) is not None else None
+
+    return HostRunnerUsageFrame(
+        runner_id=_required_str(msg, "runner_id"),
+        memory_peak_bytes=optional_int("memory_peak_bytes"),
+        memory_current_bytes=optional_int("memory_current_bytes"),
+        cpu_usage_usec=optional_int("cpu_usage_usec"),
+        oom_kill_count=optional_int("oom_kill_count") or 0,
     )
 
 

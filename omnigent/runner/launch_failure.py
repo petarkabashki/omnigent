@@ -45,6 +45,8 @@ CODEX_COMPACTION_MODEL_FAILED = "codex_compaction_model_failed"
 CODEX_PROVIDER_AUTH_FAILED = "codex_provider_auth_failed"
 # A runner that connected and then exited, as opposed to one that never came up.
 RUNNER_PROCESS_CRASH = "runner_process_crash"
+# A runner whose scope hit the kernel OOM killer before it exited.
+OUT_OF_MEMORY = "out_of_memory"
 
 
 @dataclass(frozen=True)

@@ -926,6 +926,7 @@ def register_core_routes(
             HostLaunchRunnerFrame,
             encode_host_frame,
         )
+        from omnigent.host.host_resources import resource_limits_from_labels
         from omnigent.runner.identity import token_bound_runner_id
         from omnigent.server.routes._host_launch import (
             LAUNCH_TIMEOUT_ENV_VAR,
@@ -1011,6 +1012,7 @@ def register_core_routes(
                 ),
                 # The session had no runner bound, so nothing is superseded.
                 superseded_runner_ids=(),
+                resource_limits=resource_limits_from_labels(target.conv.labels),
             )
         )
         launch_timeout_s = resolve_launch_timeout_s()

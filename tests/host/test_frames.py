@@ -62,6 +62,7 @@ from omnigent.host.frames import (
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
+    HostRunnerUsageFrame,
     HostSkillContentFrame,
     HostSkillContentResultFrame,
     HostSkillsFrame,
@@ -2878,3 +2879,43 @@ def test_runner_exit_rejects_non_boolean_connection_evidence(invalid: object) ->
                 }
             )
         )
+
+
+def test_runner_usage_frame_round_trip() -> None:
+    """host.runner_usage keeps every counter, including absent (None) ones."""
+    original = HostRunnerUsageFrame(
+        runner_id="runner_abc",
+        memory_peak_bytes=123,
+        memory_current_bytes=None,
+        cpu_usage_usec=456,
+        oom_kill_count=2,
+    )
+    assert decode_host_frame(encode_host_frame(original)) == original
+
+
+def test_runner_exited_frame_usage_round_trip_and_back_compat() -> None:
+    """The final usage rides on host.runner_exited; an older host omits it."""
+    usage = {"memory_peak_bytes": 9, "oom_kill_count": 1}
+    with_usage = HostRunnerExitedFrame(runner_id="r", error="e", usage=usage)
+    decoded = decode_host_frame(encode_host_frame(with_usage))
+    assert isinstance(decoded, HostRunnerExitedFrame)
+    assert decoded.usage == usage
+    legacy = decode_host_frame('{"kind": "host.runner_exited", "runner_id": "r", "error": "e"}')
+    assert isinstance(legacy, HostRunnerExitedFrame)
+    assert legacy.usage is None
+
+
+def test_launch_runner_frame_resource_limits_round_trip_and_back_compat() -> None:
+    """resource_limits survives encode/decode; absent decodes to None."""
+    limits = {"memory_max": "6G", "cpu_quota": "200%"}
+    frame = HostLaunchRunnerFrame(
+        request_id="q", binding_token="t", workspace="/w", resource_limits=limits
+    )
+    decoded = decode_host_frame(encode_host_frame(frame))
+    assert isinstance(decoded, HostLaunchRunnerFrame)
+    assert decoded.resource_limits == limits
+    plain = decode_host_frame(
+        encode_host_frame(HostLaunchRunnerFrame(request_id="q", binding_token="t", workspace="/w"))
+    )
+    assert isinstance(plain, HostLaunchRunnerFrame)
+    assert plain.resource_limits is None

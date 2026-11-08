@@ -64,6 +64,7 @@ from omnigent.host.frames import (
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
+    HostRunnerUsageFrame,
     HostSkillContentResultFrame,
     HostSkillsResultFrame,
     HostStatResultFrame,
@@ -104,7 +105,9 @@ _HARNESS_ACCOUNT_PROBE_TIMEOUT_S = 30.0
 # WebSocket close codes a host sends on purpose: 1000 normal, 1001 going away.
 _CLEAN_CLOSE_CODES = frozenset({1000, 1001})
 
-RunnerExitedCallback = Callable[[str, str, str], Awaitable[None]]
+RunnerExitedCallback = Callable[..., Awaitable[None]]
+# (host_id, runner_id, usage) for a ``host.runner_usage`` report.
+RunnerUsageCallback = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 """Async ``(host_id, runner_id, error)`` hook for a ``host.runner_exited`` report."""
 
 
@@ -155,6 +158,7 @@ def create_host_tunnel_router(
     on_host_disconnect: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None = None,
     on_runner_exited: RunnerExitedCallback | None = None,
+    on_runner_usage: RunnerUsageCallback | None = None,
     local_single_user: bool | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
     harness_install: HarnessInstallGate = False,
@@ -187,6 +191,8 @@ def create_host_tunnel_router(
         runner-tunnel ``on_runner_disconnect`` path never fires). When
         set, it owns the ``runner_exited`` event (see
         :func:`log_runner_exited`) so rows carry the bound session.
+    :param on_runner_usage: Optional async callback fired with
+        ``(host_id, runner_id, usage)`` for each ``host.runner_usage`` report.
     :param on_host_disconnect: Optional async callback fired when
         a host's tunnel closes. Receives the ``host_id``.
     :param on_host_update: Optional async callback fired when a connected
@@ -469,6 +475,7 @@ def create_host_tunnel_router(
                         runner_exit_reports,
                         on_runner_exited,
                         on_host_update,
+                        on_runner_usage,
                     ),
                     name=f"host-receive:{host_id}",
                 )
@@ -776,6 +783,7 @@ async def _receive_loop(
     runner_exit_reports: RunnerExitReports | None,
     on_runner_exited: RunnerExitedCallback | None,
     on_host_update: Callable[[str, str | None], Awaitable[None]] | None,
+    on_runner_usage: RunnerUsageCallback | None = None,
 ) -> None:
     """Receive host frames and route results to pending futures.
 
@@ -794,6 +802,8 @@ async def _receive_loop(
         logs the session-less ``runner_exited`` event here instead.
     :param on_host_update: Callback fired after readiness changes persist;
         ``None`` skips it.
+    :param on_runner_usage: Callback fired with ``(host_id, runner_id, usage)``
+        for a ``host.runner_usage`` frame; ``None`` drops it.
     """
     # Per-request reassembly of chunked import sessions; buffers die with the
     # connection, so a tunnel drop can never leak a partial session.
@@ -905,11 +915,35 @@ async def _receive_loop(
                 # Only failure signal for a runner that crashed before connecting
                 # its tunnel; the callback resolves bound sessions and logs the event.
                 try:
-                    await on_runner_exited(host_id, frame.runner_id, frame.error)
+                    if frame.usage is None:
+                        await on_runner_exited(host_id, frame.runner_id, frame.error)
+                    else:
+                        await on_runner_exited(
+                            host_id, frame.runner_id, frame.error, usage=frame.usage
+                        )
                 except Exception:
                     # One failed report must not tear down the tunnel for every runner.
                     _logger.exception(
                         "on_runner_exited callback failed for %s/%s", host_id, frame.runner_id
+                    )
+            continue
+
+        if isinstance(frame, HostRunnerUsageFrame):
+            if on_runner_usage is not None:
+                try:
+                    await on_runner_usage(
+                        host_id,
+                        frame.runner_id,
+                        {
+                            "memory_peak_bytes": frame.memory_peak_bytes,
+                            "memory_current_bytes": frame.memory_current_bytes,
+                            "cpu_usage_usec": frame.cpu_usage_usec,
+                            "oom_kill_count": frame.oom_kill_count,
+                        },
+                    )
+                except Exception:
+                    _logger.exception(
+                        "on_runner_usage callback failed for %s/%s", host_id, frame.runner_id
                     )
             continue
 

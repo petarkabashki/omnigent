@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -186,3 +188,37 @@ def admission_refusal(
                 f"below its {floor / (1 << 30):.1f} GiB floor",
             )
     return None
+
+
+RESOURCE_LABEL_PREFIX = "omnigent.resource."
+USAGE_LABEL_PREFIX = "omnigent.usage."
+_LIMIT_KEYS = ("memory_max", "memory_high", "cpu_quota")
+
+
+def resource_limits_from_labels(labels: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Pick the ``omnigent.resource.*`` limits (memory_max/memory_high/cpu_quota) from labels.
+
+    :returns: e.g. ``{"memory_max": "6G"}``, or ``None`` when no limit label is set.
+    """
+    if not labels:
+        return None
+    limits = {
+        key: str(labels[RESOURCE_LABEL_PREFIX + key])
+        for key in _LIMIT_KEYS
+        if labels.get(RESOURCE_LABEL_PREFIX + key)
+    }
+    return limits or None
+
+
+def usage_labels(usage: Mapping[str, Any]) -> dict[str, str]:
+    """Map a runner usage sample to ``omnigent.usage.*`` label updates."""
+    fields = (
+        ("memory_peak_bytes", "memory_peak_bytes"),
+        ("cpu_usage_usec", "cpu_usage_usec"),
+        ("oom_kill_count", "oom_kills"),
+    )
+    return {
+        USAGE_LABEL_PREFIX + label: str(usage[key])
+        for key, label in fields
+        if usage.get(key) is not None
+    }
