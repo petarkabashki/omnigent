@@ -109,6 +109,13 @@ import {
   WRAPPER_LABEL_KEY,
 } from "@/lib/nativeCodingAgents";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
+import {
+  parseProjectShellKey,
+  projectShellTabKey,
+  useCreateProjectShell,
+  useDeleteProjectShell,
+  useProjectShells,
+} from "@/hooks/useProjectShells";
 import { isFeatureEnabled, isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
 import { holdsInitialDraft, isTempConvId, useChatStore } from "@/store/chatStore";
@@ -716,6 +723,22 @@ function AppShellImpl() {
     terminalFirst,
     terminalPending,
   });
+  // Host-owned project shells (behind `project_shells`): listed beside the
+  // session's own shells in the rail's tab strip.
+  const sessionProjectId = activeSession?.projectId ?? activeConv?.project_id ?? null;
+  const projectShellsOn =
+    sessionProjectId !== null && isFeatureEnabled(serverInfo, "project_shells");
+  const projectShellsQuery = useProjectShells(sessionProjectId, projectShellsOn);
+  const createProjectShell = useCreateProjectShell(sessionProjectId);
+  const deleteProjectShell = useDeleteProjectShell(sessionProjectId);
+  const projectShells = useMemo(
+    () => (projectShellsOn ? (projectShellsQuery.data ?? []) : []),
+    [projectShellsOn, projectShellsQuery.data],
+  );
+  const railTerminals = useMemo(
+    () => [...openTerminals, ...projectShells.map((shell) => projectShellTabKey(shell.id))],
+    [openTerminals, projectShells],
+  );
   const isClaudeNative = sessionLabels["omnigent.wrapper"] === "claude-code-native-ui";
   // Native-CLI wrapper of either family. Keys harness behavior gates
   // (composer slash commands, `/model`); terminal-first SDK sessions
@@ -2115,14 +2138,26 @@ function AppShellImpl() {
     setTerminalPendingClose(null);
     setSelectedTerminalKey((active) => {
       if (active !== key) return active;
-      const idx = openTerminals.indexOf(key);
-      const remaining = openTerminals.filter((k) => k !== key);
+      const idx = railTerminals.indexOf(key);
+      const remaining = railTerminals.filter((k) => k !== key);
       if (remaining.length === 0) return null;
       return remaining[idx - 1] ?? remaining[idx] ?? remaining[0];
     });
+    const projectShellId = parseProjectShellKey(key);
+    if (projectShellId !== null) {
+      deleteProjectShell.mutate(projectShellId);
+      return;
+    }
     const info = terminals.find((t) => terminalTabKey(t) === key);
     if (info && conversationId) deleteTerminalMutation.mutate(info.id);
-  }, [terminalPendingClose, openTerminals, terminals, conversationId, deleteTerminalMutation]);
+  }, [
+    terminalPendingClose,
+    railTerminals,
+    terminals,
+    conversationId,
+    deleteTerminalMutation,
+    deleteProjectShell,
+  ]);
 
   // The active shell selection is sticky: it changes only on explicit user
   // action (opening a shell/file, switching a nav tab, closing the active
@@ -2806,7 +2841,21 @@ function AppShellImpl() {
                       onShowScopeView={showScopeView}
                       onCommentsOpenChange={setFileViewerCommentsOpen}
                       openTerminalTab={openTerminalTab}
-                      openTerminals={openTerminals}
+                      openTerminals={railTerminals}
+                      projectShells={
+                        projectShellsOn
+                          ? {
+                              projectId: sessionProjectId,
+                              shells: projectShells,
+                              creating: createProjectShell.isPending,
+                              onCreate: () =>
+                                createProjectShell.mutate(undefined, {
+                                  onSuccess: (shell) =>
+                                    openTerminalTab(projectShellTabKey(shell.id)),
+                                }),
+                            }
+                          : undefined
+                      }
                       selectedTerminalKey={selectedTerminalKey}
                       autoFocusSelectedTerminal={
                         autoFocusTerminalKeyRef.current !== null &&

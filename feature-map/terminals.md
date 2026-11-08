@@ -32,6 +32,12 @@ reattach when the session moves to another host.
   says so and routes the user to the terminal.
 - `split-panes`: behind `splittable_terminal_view_ui`, split the Terminal view
   into shell panes, resize them (each side stays within 25–75%), and close them.
+- `project-shells`: behind `project_shells`, a project's default host owns
+  shells that outlive sessions, listed in the rail's "+" menu under "Project
+  shells" for sessions filed in that project. Each runs in the project's default
+  workspace in its own memory-capped scope; they open in the same tab strip and
+  die with the project (or when the host reconnects and the project is gone).
+  A host restart drops them.
 
 ## How to get to it (user POV)
 
@@ -69,6 +75,12 @@ with their own terminal retain the switcher.
   In the Electron desktop app, Cmd/Ctrl+W also closes the selected visible
   workspace tab, using the same terminal confirmation. A read-only viewer's
   terminal stays open. Cmd/Ctrl+Shift+W closes the window.
+
+**Project shells** (needs `project_shells`, a project with a default host and
+workspace, and that host online): in a session filed in the project, open the
+rail's "+" menu, choose "New project shell", type into it, close its tab. Open
+another session of the same project and expect the shell in the menu and tab
+strip. Deleting the project closes its shells.
 
 **After the session moves:** open the host badge, choose "Switch host…", pick
 another host, then look at both the terminal strip and the agent terminal.
@@ -133,6 +145,10 @@ verify-env run -- python -m pytest <test> --ui-skip-build --video=on \
   in Terminal view with the agent terminal focused, press ⌘/Ctrl+Alt+Shift+\
   and expect a default shell pane on the right that takes typing; press
   ⌘/Ctrl+Alt+Shift+] and expect typing to reach the agent pane again.
+- **`project-shells`:** `tests/host/test_project_shells.py` (real tmux; plain
+  `uv run pytest`, not under a sandbox), `tests/server/integration/test_project_shells.py`
+  and `web/src/lib/projectShellsApi.test.ts`. No browser e2e: set the flag, make a
+  project with host and workspace, then follow the path above.
 - **`scrollback`, wheel:**
   `tests/e2e_ui/shells/test_new_shell.py::test_shell_wheel_scroll_reaches_mouse_tracking_program`
 - **`scrollback`, touch:**

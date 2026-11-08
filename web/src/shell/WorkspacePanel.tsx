@@ -80,6 +80,8 @@ import { createSideChat, stopSession } from "@/lib/sessionsApi";
 import { subagentSessionIdFromTab } from "@/lib/subagentTabs";
 import { useSessionAgent } from "@/hooks/useAgents";
 import type { SessionLiveness } from "@/hooks/useSessionLiveness";
+import { parseProjectShellKey, projectShellTabKey } from "@/hooks/useProjectShells";
+import { projectShellAttachPath, type ProjectShell } from "@/lib/projectShellsApi";
 import {
   terminalDisplayLabel,
   terminalTabKey,
@@ -182,6 +184,14 @@ function WorkspaceTabTooltip({
 /** How the "Shell" item should behave given the session's liveness. */
 type ShellConnectState = "ready" | "wakeable" | "offline";
 
+/** Project shells offered by the rail's "+" menu and tab strip. */
+export interface ProjectShellsMenu {
+  projectId: string;
+  shells: ProjectShell[];
+  creating: boolean;
+  onCreate: () => void;
+}
+
 function shellConnectState(liveness: SessionLiveness | undefined): ShellConnectState {
   switch (liveness?.kind) {
     case "host_offline":
@@ -200,6 +210,7 @@ function shellConnectState(liveness: SessionLiveness | undefined): ShellConnectS
 
 function NewTabMenu({
   conversationId,
+  projectShells,
   panels,
   onOpenPanel,
   onOpenTerminal,
@@ -211,6 +222,7 @@ function NewTabMenu({
   menuAlign,
 }: {
   conversationId: string;
+  projectShells?: ProjectShellsMenu;
   panels: readonly DefaultWorkspaceTab[];
   onOpenPanel: (tab: DefaultWorkspaceTab) => void;
   /** Open a freshly-created terminal as a rail tab by its tab key. */
@@ -243,7 +255,8 @@ function NewTabMenu({
   // declare a non-empty ``terminals:`` block.
   const declaredTerminals = agent?.terminals ?? [];
   const canOpenShell = declaredTerminals.length > 0;
-  if (!canOpenShell && !onOpenBrowser && !onOpenSideChat && panels.length === 0) return null;
+  if (!canOpenShell && !onOpenBrowser && !onOpenSideChat && !projectShells && panels.length === 0)
+    return null;
 
   // The remembered shell, or the first declared type. Used only when shell
   // access is available; the menu can also contain just built-in pages.
@@ -407,6 +420,30 @@ function NewTabMenu({
               {shellItemContent}
             </DropdownMenuItem>
           ))}
+        {projectShells && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Project shells</DropdownMenuLabel>
+            {projectShells.shells.map((shell) => (
+              <DropdownMenuItem
+                key={shell.id}
+                onSelect={() => onOpenTerminal(projectShellTabKey(shell.id))}
+                className="cursor-pointer"
+              >
+                <TerminalIcon className="size-4" />
+                {shell.title}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem
+              onSelect={projectShells.onCreate}
+              disabled={projectShells.creating}
+              className="cursor-pointer"
+            >
+              <PlusIcon className="size-4" />
+              New project shell
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -629,11 +666,14 @@ function TerminalTabsStrip({
 // ---------------------------------------------------------------------------
 
 function RailTerminalView({
+  projectId,
   conversationId,
   terminalKey,
   readOnly,
   autoFocus,
 }: {
+  /** Owning project when `terminalKey` is a project shell, else null. */
+  projectId: string | null;
   conversationId: string;
   terminalKey: string;
   readOnly: boolean;
@@ -644,6 +684,22 @@ function RailTerminalView({
 }) {
   const { terminals } = useTerminals(conversationId);
   const { setTerminalConnectionState, markTerminalActive } = useTerminalStatuses(terminals);
+  const projectShellId = parseProjectShellKey(terminalKey);
+  if (projectShellId !== null && projectId !== null) {
+    // Host-owned shell: same xterm, attached through the project route.
+    return (
+      <div key={projectShellId} className="flex h-full min-h-0 flex-col">
+        <Suspense fallback={null}>
+          <TerminalView
+            sessionId={projectId}
+            terminalId={projectShellId}
+            attachPath={projectShellAttachPath(projectId, projectShellId)}
+            focusOnConnect={autoFocus}
+          />
+        </Suspense>
+      </div>
+    );
+  }
   const terminal = terminals.find((t) => terminalTabKey(t) === terminalKey) ?? null;
   if (!terminal) {
     return (
@@ -776,6 +832,8 @@ interface WorkspacePanelProps {
   closingTerminalKey?: string | null;
   /** Close a single open shell tab by key. */
   onCloseTerminal: (key: string) => void;
+  /** Host-owned project shells (feature-flagged); absent when off. */
+  projectShells?: ProjectShellsMenu;
   /** Whether the rail is maximized (occupies the full content area). */
   maximized: boolean;
   /** Toggle the rail's maximized state. */
@@ -869,6 +927,7 @@ function WorkspacePanelImpl({
   autoFocusSelectedTerminal = false,
   closingTerminalKey,
   onCloseTerminal,
+  projectShells,
   maximized,
   onToggleMaximized,
   permissionLevel,
@@ -1173,11 +1232,17 @@ function WorkspacePanelImpl({
   const { terminals } = useTerminals(conversationId);
   const terminalLabelFor = useCallback(
     (key: string) => {
+      const shellId = parseProjectShellKey(key);
+      if (shellId !== null) {
+        return (
+          projectShells?.shells.find((shell) => shell.id === shellId)?.title ?? "Project shell"
+        );
+      }
       const t = terminals.find((term) => terminalTabKey(term) === key);
       if (!t) return key.replace(/^terminal:/, "");
       return terminalDisplayLabel(t);
     },
-    [terminals],
+    [terminals, projectShells],
   );
   const defaultTab = readDefaultWorkspaceTab();
   const tabOrder = [defaultTab, ...defaultWorkspaceTabs.filter((tab) => tab !== defaultTab)];
@@ -1248,6 +1313,7 @@ function WorkspacePanelImpl({
   const newTabMenu = (menuAlign: "start" | "end") => (
     <NewTabMenu
       conversationId={conversationId}
+      projectShells={projectShells}
       panels={unpinnedTabs}
       onOpenPanel={selectPermanentTab}
       onOpenBrowser={showBrowserTab ? addBrowser : undefined}
@@ -1871,6 +1937,11 @@ function WorkspacePanelImpl({
             // list), so during a transient terminals-list churn this falls back to
             // the default view and the xterm reappears when the terminal returns.
             <RailTerminalView
+              projectId={
+                projectShells !== undefined && parseProjectShellKey(selectedTerminalKey) !== null
+                  ? projectShells.projectId
+                  : null
+              }
               conversationId={conversationId}
               terminalKey={selectedTerminalKey}
               readOnly={!isOwnerLevel(permissionLevel)}

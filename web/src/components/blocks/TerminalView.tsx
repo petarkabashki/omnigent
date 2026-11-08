@@ -157,6 +157,12 @@ interface TerminalViewProps {
    * page URL and all HTTP traffic are unaffected either way.
    */
   directAttachUrl?: string;
+  /**
+   * Replaces the session-terminal attach path (e.g. a project shell's
+   * ``/v1/projects/{id}/shells/{sid}/attach``). ``sessionId``/``terminalId``
+   * then only key the component.
+   */
+  attachPath?: string;
 }
 
 export function TerminalView({
@@ -173,6 +179,7 @@ export function TerminalView({
   active = true,
   focusOnConnect = active,
   directAttachUrl,
+  attachPath,
 }: TerminalViewProps) {
   const openFile = useFileViewer();
   const workspacePaths = useWorkspacePaths();
@@ -577,7 +584,9 @@ export function TerminalView({
           const h = getSessionHost(sessionId);
           return h && (!isDatabricksWorkspace() || !isHostKeyless(h)) ? h : undefined;
         })();
-        const relayUrl = buildAttachUrl(sessionId, terminalId, readOnly, computedHostId);
+        const relayUrl = attachPath
+          ? resolveWebSocketUrl(attachPath)
+          : buildAttachUrl(sessionId, terminalId, readOnly, computedHostId);
         const directUrl = directAttachUrl ? withAttachParams(directAttachUrl, readOnly) : undefined;
         // Never keep the user waiting on the direct path: this resolves
         // direct only when the loopback listener is already known
@@ -622,6 +631,7 @@ export function TerminalView({
     [
       sessionId,
       terminalId,
+      attachPath,
       readOnly,
       directAttachUrl,
       notifyState,
