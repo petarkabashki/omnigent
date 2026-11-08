@@ -161,14 +161,30 @@ def pane_scope_join_command() -> str | None:
     ``tmux-spawn-*.scope``, escaping the runner's memory cap and stop. ``None``
     when this process is not in a runner scope. The command fails open.
     """
+    own = _own_runner_scope()
+    return None if own is None else _scope_join_command(own.unit)
+
+
+def own_scope_oom_kills() -> int:
+    """OOM kills recorded in this process's runner scope; 0 outside one or on error."""
+    own = _own_runner_scope()
+    if own is None:
+        return 0
+    usage = read_scope_usage(own)
+    return 0 if usage is None else usage.oom_kill_count
+
+
+def _own_runner_scope() -> RunnerScope | None:
+    """The runner scope this process runs in, from ``/proc/self/cgroup``."""
     try:
         line = _SELF_CGROUP.read_text().splitlines()[0]
     except (OSError, IndexError):
         return None
-    unit = line.rpartition("/")[2]
+    relative = line.partition("::")[2]
+    unit = relative.rpartition("/")[2]
     if not (unit.startswith("omnigent-runner-") and unit.endswith(".scope")):
         return None
-    return _scope_join_command(unit)
+    return RunnerScope(unit=unit, cgroup_dir=_CGROUP_ROOT / relative.lstrip("/"))
 
 
 def _scope_join_command(unit: str) -> str:

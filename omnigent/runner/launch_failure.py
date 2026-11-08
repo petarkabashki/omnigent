@@ -291,6 +291,17 @@ TERMINAL_CLOSED_OUTSIDE_OMNIGENT = FailureDiagnosis(
 )
 
 
+TERMINAL_OUT_OF_MEMORY = FailureDiagnosis(
+    title="The agent ran out of memory",
+    cause=(
+        "The session's memory limit was reached and the kernel stopped the agent's "
+        "terminal process."
+    ),
+    remediation="Raise the session's omnigent.resource.memory_max label, or do less at once.",
+    category=ErrorCategory.CONFIG,
+)
+
+
 def classify_terminal_failure(
     *,
     command: str | None,

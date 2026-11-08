@@ -76,6 +76,30 @@ def test_pane_scope_join_command_only_inside_runner_scope(
     assert command.endswith(">/dev/null 2>&1")
 
 
+@pytest.mark.parametrize(
+    ("cgroup_line", "expected"),
+    [
+        ("0::/app.slice/omnigent-runner-tok.scope", 3),
+        ("0::/app.slice/tmux-spawn-1.scope", 0),
+        ("0::/app.slice/omnigent-runner-gone.scope", 0),
+    ],
+)
+def test_own_scope_oom_kills_reads_only_a_runner_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cgroup_line: str, expected: int
+) -> None:
+    for unit in ("omnigent-runner-tok.scope", "tmux-spawn-1.scope"):
+        (tmp_path / "app.slice" / unit).mkdir(parents=True)
+        (tmp_path / "app.slice" / unit / "memory.events").write_text("oom 3\noom_kill 3\n")
+        (tmp_path / "app.slice" / unit / "cpu.stat").write_text("usage_usec 1\n")
+        for name in ("memory.peak", "memory.current"):
+            (tmp_path / "app.slice" / unit / name).write_text("1\n")
+    cgroup_file = tmp_path / "self-cgroup"
+    cgroup_file.write_text(cgroup_line + "\n")
+    monkeypatch.setattr(runner_scope, "_SELF_CGROUP", cgroup_file)
+    monkeypatch.setattr(runner_scope, "_CGROUP_ROOT", tmp_path)
+    assert runner_scope.own_scope_oom_kills() == expected
+
+
 def test_read_scope_usage_parses_cgroup_files(tmp_path: Path) -> None:
     (tmp_path / "memory.events").write_text("low 0\nhigh 3\nmax 9\noom 2\noom_kill 2\n")
     (tmp_path / "memory.peak").write_text("5242880\n")

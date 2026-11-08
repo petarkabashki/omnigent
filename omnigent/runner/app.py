@@ -70,6 +70,7 @@ from omnigent.harness_plugins import (
     model_env_keys,
     spawn_env_builders,
 )
+from omnigent.host import runner_scope
 from omnigent.inner.native_attachments import with_engine_handoff
 from omnigent.llms.errors import detect_request_size_overflow
 from omnigent.native.failure_telemetry import failure_log_attributes, normalize_failure_context
@@ -108,7 +109,9 @@ from omnigent.runner.background_titles import (
 from omnigent.runner.background_titles.service import BACKGROUND_TITLE_MAX_PROMPT_CHARS
 from omnigent.runner.codex.goal import CodexGoalRunner
 from omnigent.runner.launch_failure import (
+    OUT_OF_MEMORY,
     TERMINAL_CLOSED_OUTSIDE_OMNIGENT,
+    TERMINAL_OUT_OF_MEMORY,
     FailureDiagnosis,
     classify_terminal_failure,
 )
@@ -1996,7 +1999,8 @@ def create_runner_app(
         :param diagnosis: The exit's :func:`classify_terminal_failure` result.
         """
         message = _format_required_terminal_exit_output(event, diagnosis)
-        error: dict[str, str] = {"code": "required_terminal_exited", "message": message}
+        code = OUT_OF_MEMORY if diagnosis is TERMINAL_OUT_OF_MEMORY else "required_terminal_exited"
+        error: dict[str, str] = {"code": code, "message": message}
         if diagnosis is not None:
             error["title"] = diagnosis.title
             error["cause"] = diagnosis.cause
@@ -2141,6 +2145,9 @@ def create_runner_app(
         )
         if diagnosis is None and event.closed_outside_omnigent:
             diagnosis = TERMINAL_CLOSED_OUTSIDE_OMNIGENT
+        # The pane (or its tmux server) is a common OOM victim while the runner survives.
+        if event.exit_status != 0 and runner_scope.own_scope_oom_kills() > 0:
+            diagnosis = TERMINAL_OUT_OF_MEMORY
         error = _build_required_terminal_error(event, diagnosis)
         _required_terminal_exit_errors[event.session_id] = error
 
