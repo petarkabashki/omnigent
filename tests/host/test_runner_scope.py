@@ -36,9 +36,8 @@ def test_start_unit_args_with_all_limits() -> None:
         "org.freedesktop.systemd1.Manager",
     ]
     assert argv[4:8] == ["StartTransientUnit", "ssa(sv)a(sa(sv))", "u.scope", "fail"]
-    assert (
-        argv[8] == "7"
-    )  # PIDs, OOMPolicy, TimeoutStopUSec, MemoryMax, MemorySwapMax, MemoryHigh, CPU
+    # PIDs, OOMPolicy, TimeoutStopUSec, Delegate, MemoryMax, MemorySwapMax, MemoryHigh, CPU
+    assert argv[8] == "8"
     assert argv[9:14] == ["PIDs", "au", "2", "10", "11"]
     assert argv[argv.index("MemoryMax") :][:3] == ["MemoryMax", "t", "1000"]
     assert argv[argv.index("CPUQuotaPerSecUSec") :][:3] == ["CPUQuotaPerSecUSec", "t", "1500000"]
@@ -47,9 +46,34 @@ def test_start_unit_args_with_all_limits() -> None:
 
 def test_start_unit_args_without_limits_still_isolates() -> None:
     argv = runner_scope._start_unit_args("u.scope", [10], None, None, None)
-    assert argv[8] == "3"
+    assert argv[8] == "4"
+    assert argv[argv.index("Delegate") :][:3] == ["Delegate", "b", "true"]
     assert "MemoryMax" not in argv
     assert argv[argv.index("OOMPolicy") :][:3] == ["OOMPolicy", "s", "continue"]
+
+
+@pytest.mark.parametrize(
+    ("cgroup_line", "unit"),
+    [
+        ("0::/user.slice/app.slice/omnigent-runner-tok_1.scope", "omnigent-runner-tok_1.scope"),
+        ("0::/user.slice/app.slice/tmux-spawn-1234.scope", None),
+        ("0::/user.slice/session-4.scope", None),
+        ("", None),
+    ],
+)
+def test_pane_scope_join_command_only_inside_runner_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cgroup_line: str, unit: str | None
+) -> None:
+    cgroup_file = tmp_path / "cgroup"
+    cgroup_file.write_text(cgroup_line + "\n" if cgroup_line else "")
+    monkeypatch.setattr(runner_scope, "_SELF_CGROUP", cgroup_file)
+    command = runner_scope.pane_scope_join_command()
+    if unit is None:
+        assert command is None
+        return
+    assert command is not None
+    assert f"AttachProcessesToUnit ssau {unit} '' 1 $$" in command
+    assert command.endswith(">/dev/null 2>&1")
 
 
 def test_read_scope_usage_parses_cgroup_files(tmp_path: Path) -> None:
@@ -170,8 +194,14 @@ def test_real_scope_contains_oom_to_child_and_stop_kills_all() -> None:
         assert runner.stdout.readline().strip() == "-9"
         assert runner.poll() is None  # only the child was killed
         assert runner_scope.oom_kill_count(scope) == 1
+        # A pane started outside the scope (as tmux does) rejoins it and stops with it.
+        pane = subprocess.Popen(
+            ["sh", "-c", f"{runner_scope._scope_join_command(scope.unit)}; exec sleep 30"]
+        )
+        assert runner_scope._wait_for_cgroup_dir(pane.pid, scope.unit) == scope.cgroup_dir
         assert runner_scope.stop_scope(scope)
         assert runner.wait(timeout=10) is not None
+        assert pane.wait(timeout=10) is not None
         deadline = time.monotonic() + 5
         while scope.cgroup_dir.exists() and time.monotonic() < deadline:
             time.sleep(0.1)

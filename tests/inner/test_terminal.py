@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import logging
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1907,6 +1908,45 @@ async def test_launch_preserves_prompt_and_following_args_real_tmux(
                 await asyncio.sleep(0.01)
 
         assert json.loads(output.read_text()) == expected
+        assert instance.last_exit_status() == 0
+    finally:
+        await instance.close()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="requires a real tmux binary")
+@pytest.mark.parametrize("start_on_attach", [False, True])
+async def test_launch_joins_runner_scope_in_the_program_process_real_tmux(
+    tmp_path: Path,
+    short_tmp_parent: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_on_attach: bool,
+) -> None:
+    """The scope join runs in the pane shell, which then execs the program."""
+    joined = tmp_path / "joined-pid"
+    output = tmp_path / "program-pid"
+    monkeypatch.setattr(
+        terminal_mod, "pane_scope_join_command", lambda: f"echo $$ > {shlex.quote(str(joined))}"
+    )
+    script = "import os, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))"
+    instance = TerminalInstance(
+        name="scope",
+        session_key="main",
+        socket_path=short_tmp_parent / "tmux.sock",
+        private_dir=tmp_path,
+        command=sys.executable,
+        args=["-c", script, str(output)],
+        keep_alive_after_exit=True,
+        tmux_start_on_attach=start_on_attach,
+    )
+    try:
+        await instance.launch(cwd=tmp_path)
+        if start_on_attach:
+            await instance._tmux("wait-for", "-S", terminal_mod._TMUX_START_ON_ATTACH_CHANNEL)
+        async with asyncio.timeout(5):
+            while await instance.is_alive():
+                await asyncio.sleep(0.01)
+
+        assert joined.read_text().strip() == output.read_text()
         assert instance.last_exit_status() == 0
     finally:
         await instance.close()

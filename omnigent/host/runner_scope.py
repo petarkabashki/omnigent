@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -24,6 +26,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
+_SELF_CGROUP = Path("/proc/self/cgroup")
 _SYSTEMD_BUS_ARGS = (
     "org.freedesktop.systemd1",
     "/org/freedesktop/systemd1",
@@ -131,8 +134,10 @@ def _start_unit_args(
         "PIDs", "au", str(len(pids)), *map(str, pids),
         "OOMPolicy", "s", "continue",
         "TimeoutStopUSec", "t", str(_STOP_TIMEOUT_SECONDS * 1_000_000),
+        # Delegation lets terminal panes rejoin the scope (see pane_scope_join_command).
+        "Delegate", "b", "true",
     ]  # fmt: skip
-    count = 3
+    count = 4
     if memory_max is not None:
         properties += ["MemoryMax", "t", str(memory_max), "MemorySwapMax", "t", "0"]
         count += 2
@@ -147,6 +152,32 @@ def _start_unit_args(
         "call", *_SYSTEMD_BUS_ARGS, "StartTransientUnit", "ssa(sv)a(sa(sv))",
         unit, "fail", str(count), *properties, "0",
     ]  # fmt: skip
+
+
+def pane_scope_join_command() -> str | None:
+    """Shell prefix that moves a tmux pane's shell back into this runner's scope.
+
+    tmux built with systemd support starts each pane in its own
+    ``tmux-spawn-*.scope``, escaping the runner's memory cap and stop. ``None``
+    when this process is not in a runner scope. The command fails open.
+    """
+    try:
+        line = _SELF_CGROUP.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    unit = line.rpartition("/")[2]
+    if not (unit.startswith("omnigent-runner-") and unit.endswith(".scope")):
+        return None
+    return _scope_join_command(unit)
+
+
+def _scope_join_command(unit: str) -> str:
+    busctl = shutil.which("busctl") or "busctl"
+    call = [
+        busctl, "--user", "call", *_SYSTEMD_BUS_ARGS,
+        "AttachProcessesToUnit", "ssau", unit, "", "1",
+    ]  # fmt: skip
+    return f"{shlex.join(call)} $$ >/dev/null 2>&1"
 
 
 def _descendant_pids(pid: int) -> list[int]:

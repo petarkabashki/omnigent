@@ -33,6 +33,7 @@ from omnigent._platform import IS_WINDOWS
 from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.host.runner_scope import pane_scope_join_command
 from omnigent.native import owner_claim
 from omnigent.process_logging import redact_log_text
 from omnigent.runner.identity import strip_runner_auth_secrets
@@ -1731,6 +1732,10 @@ class TerminalInstance:
         inner_str = shlex.join(inner_cmd)
         if self.tmux_start_on_attach:
             inner_str = f"tmux wait-for {_TMUX_START_ON_ATTACH_CHANNEL}; exec {inner_str}"
+        join_scope = pane_scope_join_command()
+        if join_scope is not None:
+            exec_prefix = "" if self.tmux_start_on_attach else "exec "
+            inner_str = f"{join_scope}; {exec_prefix}{inner_str}"
 
         option_commands = [
             *_tmux_managed_option_commands(
