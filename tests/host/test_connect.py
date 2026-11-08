@@ -36,6 +36,7 @@ from omnigent.host.connect import (
     _resolve_scope_limits,
     _runner_exit_error,
     _RunnerHandle,
+    _usage_changed_meaningfully,
     run_host_process,
 )
 from omnigent.host.frames import (
@@ -11294,6 +11295,28 @@ def _usage(peak: int = 100, cpu: int = 0, ooms: int = 0) -> runner_scope.ScopeUs
     return runner_scope.ScopeUsage(
         memory_peak_bytes=peak, memory_current_bytes=peak, cpu_usage_usec=cpu, oom_kill_count=ooms
     )
+
+
+_MIB = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("new", "reported"),
+    [
+        (runner_scope.ScopeUsage(100 * _MIB, 100 * _MIB, 0, 0), False),
+        (runner_scope.ScopeUsage(116 * _MIB, 100 * _MIB, 0, 0), True),
+        (runner_scope.ScopeUsage(100 * _MIB, 84 * _MIB, 0, 0), True),
+        (runner_scope.ScopeUsage(100 * _MIB, 90 * _MIB, 0, 0), False),
+        (runner_scope.ScopeUsage(100 * _MIB, 100 * _MIB, 5_000_000, 0), True),
+        (runner_scope.ScopeUsage(100 * _MIB, 100 * _MIB, 0, 1), True),
+    ],
+)
+def test_usage_report_triggers_on_peak_current_cpu_or_oom(
+    new: runner_scope.ScopeUsage, reported: bool
+) -> None:
+    old = runner_scope.ScopeUsage(100 * _MIB, 100 * _MIB, 0, 0)
+    assert _usage_changed_meaningfully(new, old) is reported
+    assert _usage_changed_meaningfully(new, None) is True
 
 
 def test_resolve_scope_limits_prefers_labels_and_falls_back_on_invalid() -> None:

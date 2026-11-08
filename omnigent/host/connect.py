@@ -387,7 +387,8 @@ _RUNNER_WATCH_INTERVAL_S = 0.5
 
 # How often a runner's scope usage is sampled and (if changed) reported.
 _RUNNER_USAGE_INTERVAL_S = 15.0
-# A usage report is sent only when peak memory grew by this many bytes...
+# A usage report is sent only when peak memory grew, or current memory moved
+# either way, by this many bytes...
 _USAGE_REPORT_MIN_PEAK_DELTA_BYTES = 16 * 1024 * 1024
 # ...or CPU time grew by this many microseconds (or an OOM kill occurred).
 _USAGE_REPORT_MIN_CPU_DELTA_USEC = 5_000_000
@@ -1252,9 +1253,11 @@ def _usage_changed_meaningfully(
     if old is None or new.oom_kill_count != old.oom_kill_count:
         return True
     peak_delta = (new.memory_peak_bytes or 0) - (old.memory_peak_bytes or 0)
+    current_delta = (new.memory_current_bytes or 0) - (old.memory_current_bytes or 0)
     cpu_delta = (new.cpu_usage_usec or 0) - (old.cpu_usage_usec or 0)
     return (
         peak_delta >= _USAGE_REPORT_MIN_PEAK_DELTA_BYTES
+        or abs(current_delta) >= _USAGE_REPORT_MIN_PEAK_DELTA_BYTES
         or cpu_delta >= _USAGE_REPORT_MIN_CPU_DELTA_USEC
     )
 
