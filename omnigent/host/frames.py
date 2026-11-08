@@ -49,6 +49,10 @@ from omnigent.util.tunnel_limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
 # ``ErrorCode.HARNESS_NOT_CONFIGURED``), and tests.
 HARNESS_NOT_CONFIGURED_ERROR_CODE = "harness_not_configured"
 
+# Host refused the launch: at its runner limit or below its memory floor.
+# ``error_detail["reason"]`` is ``"slots"`` or ``"mem"``; retryable.
+HOST_CAPACITY_ERROR_CODE = "host_capacity"
+
 # when the host refuses a launch because the session's workspace directory
 # does not exist on the host and could not be recreated. Shared by the daemon
 # (producer) and server (consumer) so both can handle it structurally.
@@ -135,13 +139,16 @@ def classify_launch_refusal(
     :param error: The host's human-readable failure text.
     :param workspace: The server's authorized workspace for the session.
     :returns: :data:`HARNESS_NOT_CONFIGURED_ERROR_CODE`,
-        :data:`WORKSPACE_MISSING_ERROR_CODE`, or ``None`` when the failure
+        :data:`WORKSPACE_MISSING_ERROR_CODE`,
+        :data:`HOST_CAPACITY_ERROR_CODE`, or ``None`` when the failure
         is not a safe categorical refusal.
     """
     if error_code == HARNESS_NOT_CONFIGURED_ERROR_CODE:
         return HARNESS_NOT_CONFIGURED_ERROR_CODE
     if error_code == WORKSPACE_MISSING_ERROR_CODE:
         return WORKSPACE_MISSING_ERROR_CODE
+    if error_code == HOST_CAPACITY_ERROR_CODE:
+        return HOST_CAPACITY_ERROR_CODE
     # Rolling upgrade: an older host sends this exact categorical reason
     # with no error_code.
     if error_code is None and error == workspace_missing_message(workspace):
@@ -359,6 +366,9 @@ class HostLaunchRunnerResultFrame:
         :data:`WORKSPACE_MISSING_ERROR_CODE`. ``None`` for uncategorized
         failures and on success (and always from older hosts that don't
         send it).
+    :param error_detail: Optional string fields qualifying ``error_code``,
+        e.g. ``{"reason": "mem"}`` for :data:`HOST_CAPACITY_ERROR_CODE`.
+        ``None`` from older hosts.
     :param workspace_recreated: ``True`` when the host found the session
         workspace missing and recreated it as an empty directory before
         spawning the runner, so the server can tell the user. ``False`` on
@@ -371,6 +381,7 @@ class HostLaunchRunnerResultFrame:
     error: str | None = None
     error_code: str | None = None
     workspace_recreated: bool = False
+    error_detail: dict[str, str] | None = None
 
 
 @dataclass
@@ -1615,6 +1626,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "error": frame.error,
                 "error_code": frame.error_code,
                 "workspace_recreated": frame.workspace_recreated,
+                "error_detail": frame.error_detail,
             }
         )
     if isinstance(frame, HostStopRunnerFrame):
@@ -2705,6 +2717,7 @@ def _decode_launch_runner_result(
         error=_optional_nullable_str(msg, "error"),
         error_code=_optional_nullable_str(msg, "error_code"),
         workspace_recreated=_optional_bool(msg, "workspace_recreated"),
+        error_detail=_optional_str_dict(msg, "error_detail"),
     )
 
 
@@ -3602,6 +3615,14 @@ def optional_str_bool_map(msg: _JsonObject, key: str) -> dict[str, bool] | None:
     if not isinstance(val, dict):
         return None
     return {k: v for k, v in val.items() if isinstance(k, str) and isinstance(v, bool)}
+
+
+def _optional_str_dict(msg: _JsonObject, key: str) -> dict[str, str] | None:
+    """Return an optional string-to-string mapping, ``None`` when absent or malformed."""
+    val = msg.get(key)
+    if not isinstance(val, dict):
+        return None
+    return {k: v for k, v in val.items() if isinstance(k, str) and isinstance(v, str)} or None
 
 
 def _optional_nullable_str(msg: _JsonObject, key: str) -> str | None:

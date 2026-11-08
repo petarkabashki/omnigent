@@ -172,6 +172,8 @@ def test_enable_systemd_user_service(tmp_path: Path, monkeypatch: pytest.MonkeyP
     ) in unit
     assert "Restart=on-failure" in unit
     assert "RestartPreventExitStatus=78 143" in unit
+    assert "OOMPolicy=continue" in unit
+    assert "OOMScoreAdjust=-100" in unit
     assert calls == [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", "omnigent-host.service"],

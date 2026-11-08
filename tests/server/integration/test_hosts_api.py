@@ -725,6 +725,7 @@ async def test_launch_runner_happy_path(
         "expected_status",
         "expected_error_code",
         "expected_fragment",
+        "wire_error_detail",
     ),
     [
         (
@@ -733,6 +734,15 @@ async def test_launch_runner_happy_path(
             412,
             HARNESS_NOT_CONFIGURED_ERROR_CODE,
             "omnigent setup",
+            None,
+        ),
+        (
+            "host_capacity",
+            "host 'hpz4' is at its limit of 4 runners",
+            503,
+            "host_capacity",
+            "limit of 4 runners",
+            {"reason": "slots"},
         ),
         (
             WORKSPACE_MISSING_ERROR_CODE,
@@ -740,6 +750,7 @@ async def test_launch_runner_happy_path(
             410,
             WORKSPACE_MISSING_ERROR_CODE,
             "workspace path does not exist: /tmp/test-workspace",
+            None,
         ),
         (
             None,
@@ -747,6 +758,7 @@ async def test_launch_runner_happy_path(
             410,
             WORKSPACE_MISSING_ERROR_CODE,
             "workspace path does not exist: /tmp/test-workspace",
+            None,
         ),
     ],
 )
@@ -757,6 +769,7 @@ async def test_launch_runner_categorical_failure_returns_specific_status(
     expected_status: int,
     expected_error_code: str,
     expected_fragment: str,
+    wire_error_detail: dict[str, str] | None,
 ) -> None:
     """
     Verify the dedicated endpoint maps safe categorical host refusals
@@ -785,7 +798,7 @@ async def test_launch_runner_categorical_failure_returns_specific_status(
         del request
         return JSONResponse(
             status_code=exc.http_status,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content={"error": {"code": exc.code, "message": exc.message, **exc.details}},
         )
 
     comm = await _connect_host(app, registry)
@@ -810,6 +823,7 @@ async def test_launch_runner_categorical_failure_returns_specific_status(
                                 status="failed",
                                 error=launch_error,
                                 error_code=wire_error_code,
+                                error_detail=wire_error_detail,
                             )
                         ),
                     },
@@ -832,6 +846,7 @@ async def test_launch_runner_categorical_failure_returns_specific_status(
     body = resp.json()
     assert body["error"]["code"] == expected_error_code
     assert expected_fragment in body["error"]["message"]
+    assert body["error"].get("reason") == (wire_error_detail or {}).get("reason")
     if expected_error_code == WORKSPACE_MISSING_ERROR_CODE:
         assert body["error"]["message"] == (
             "host failed to launch runner: workspace path does not exist: /tmp/test-workspace"

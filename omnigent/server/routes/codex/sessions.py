@@ -13,11 +13,12 @@ from fastapi.responses import JSONResponse, Response
 from starlette.datastructures import State
 
 from omnigent.entities import Conversation
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import ErrorCode, OmnigentError, host_capacity_error
 from omnigent.harness_plugins import CODEX_NATIVE_CODING_AGENT
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 )
+from omnigent.host.frames import HOST_CAPACITY_ERROR_CODE
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ, AuthProvider
@@ -243,6 +244,10 @@ async def _start_codex_goal_runner_on_bound_host(
             host_registry,
             host_conn,
         )
+        if launch_attempt.error_code == HOST_CAPACITY_ERROR_CODE:
+            raise host_capacity_error(
+                launch_attempt.error or "host is at capacity", launch_attempt.error_detail
+            )
         if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
             raise OmnigentError(
                 launch_attempt.error or "host failed to launch runner: harness not configured",

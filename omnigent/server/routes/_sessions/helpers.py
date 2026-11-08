@@ -6131,6 +6131,8 @@ class _HostLaunchAttempt:
     :param error: Human-readable failure message from the host, e.g.
         ``"harness 'codex' is not configured on host 'laptop' — run
         `omnigent setup` ..."``; ``None`` when there was no error.
+    :param error_detail: Optional string fields from the host qualifying
+        ``error_code``, e.g. ``{"reason": "mem"}`` for ``host_capacity``.
     :param acknowledged: Whether the host confirmed ``status="launched"``;
         timeout and lost-connection attempts remain unconfirmed.
     """
@@ -6139,6 +6141,7 @@ class _HostLaunchAttempt:
     error_code: str | None = None
     error: str | None = None
     acknowledged: bool = False
+    error_detail: dict[str, str] | None = None
 
 
 async def _launch_runner_on_host(*args: Any, **kwargs: Any) -> _HostLaunchAttempt:
@@ -6545,6 +6548,7 @@ async def _launch_runner_on_host_locked(
                 runner_id=new_runner_id,
                 error_code=result.get("error_code"),
                 error=result.get("error"),
+                error_detail=result.get("error_detail"),
             )
         if result.get("workspace_recreated"):
             _logger.warning(

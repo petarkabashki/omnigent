@@ -134,6 +134,10 @@ def _systemd_unit(
         "Restart=on-failure",
         "RestartPreventExitStatus=78 143",
         "RestartSec=10s",
+        # A runner OOM-kill must not stop the unit and take every session with it.
+        "OOMPolicy=continue",
+        # Make the host the last OOM victim; heavy runner children are killed first.
+        "OOMScoreAdjust=-100",
         "",
         "[Install]",
         "WantedBy=default.target",

@@ -50,7 +50,7 @@ from omnigent.entities.conversation import (
 )
 from omnigent.entities.pagination import PagedList
 from omnigent.entities.permission import SessionPermission
-from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError
+from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError, host_capacity_error
 from omnigent.harness_availability import (
     HARNESS_BINARY_MISSING,
     HARNESS_NEEDS_AUTH,
@@ -60,6 +60,7 @@ from omnigent.harnesses.claude_native import PEER_MESSAGE_WAKE_KIND, PEER_MESSAG
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 )
+from omnigent.host.frames import HOST_CAPACITY_ERROR_CODE as _HOST_CAPACITY_ERROR_CODE
 from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE as _WORKSPACE_MISSING_ERROR_CODE,
 )
@@ -5478,6 +5479,8 @@ async def ensure_runner_connected(
                 _refusal_message = _workspace_missing_message(conv.workspace)
             else:
                 _refusal_message = launch_attempt.error or ""
+            if _refusal_code == _HOST_CAPACITY_ERROR_CODE and raise_host_refusal:
+                raise host_capacity_error(_refusal_message, launch_attempt.error_detail)
             if _refusal_code is not None and raise_host_refusal:
                 raise OmnigentError(
                     _refusal_message

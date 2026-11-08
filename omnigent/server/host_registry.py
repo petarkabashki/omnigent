@@ -375,6 +375,7 @@ class HostLaunchResult(TypedDict, total=False):
     runner_id: str | None
     error: str | None
     error_code: str | None
+    error_detail: dict[str, str] | None
     workspace_recreated: bool
 
 

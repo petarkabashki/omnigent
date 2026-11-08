@@ -2851,7 +2851,7 @@ def create_app(
             )
         return JSONResponse(
             status_code=exc.http_status,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content={"error": {"code": exc.code, "message": exc.message, **exc.details}},
         )
 
     @app.exception_handler(RequestValidationError)

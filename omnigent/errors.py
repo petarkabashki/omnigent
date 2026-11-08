@@ -14,7 +14,7 @@ from __future__ import annotations
 import errno
 import functools
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import Any, ParamSpec, TypeVar, cast
 
@@ -202,6 +202,9 @@ class ErrorCode:
         rather than 400 (the request is valid against a configured
         host) or 503 (retrying cannot succeed without user action —
         running ``omnigent setup`` on the host machine).
+    :cvar HOST_CAPACITY: The host refused the launch because it is at its
+        runner limit or low on memory (HTTP 503, retryable); the error
+        object carries ``reason`` ``"slots"`` or ``"mem"``.
     :cvar WORKSPACE_MISSING: The session's bound workspace no longer
         exists on the selected host (HTTP 410). Retrying cannot recreate
         deleted workspace state; the user must start a session in a valid
@@ -263,6 +266,8 @@ class ErrorCode:
     REFRESH_UNSUPPORTED = "refresh_unsupported"
     LOGIN_UNSUPPORTED = "login_unsupported"
     WORKSPACE_MISSING = "workspace_missing"
+    # Keep equal to frames.HOST_CAPACITY_ERROR_CODE (host refused: slots/memory).
+    HOST_CAPACITY = "host_capacity"
     SESSION_AGENT_MISSING = "session_agent_missing"
     UPSTREAM_CANCELLED = "upstream_cancelled"
     UPSTREAM_PERMISSION_DENIED = "upstream_permission_denied"
@@ -301,6 +306,8 @@ _CODE_TO_HTTP_STATUS: dict[str, int] = {
     ErrorCode.RUNNER_UNAVAILABLE: 503,
     # 503 like RUNNER_UNAVAILABLE: the send succeeds once the host is back.
     ErrorCode.HOST_OFFLINE: 503,
+    # 503: the host is full right now; the launch succeeds once capacity frees up.
+    ErrorCode.HOST_CAPACITY: 503,
     # 400, not 503: the request reached a replica that can't serve it, but the
     # request is valid — the fix is to re-address it (reissue without the key),
     # not to wait and retry. A 4xx also keeps this expected routing event out of
@@ -363,6 +370,7 @@ _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     ErrorCode.RUNNER_UNAVAILABLE: ErrorCategory.CONFIG,
     # The human's own machine is asleep or disconnected.
     ErrorCode.HOST_OFFLINE: ErrorCategory.USER,
+    ErrorCode.HOST_CAPACITY: ErrorCategory.HOST,
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: ErrorCategory.CONFIG,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorCategory.CONFIG,
     ErrorCode.REFRESH_UNSUPPORTED: ErrorCategory.CONFIG,
@@ -418,6 +426,7 @@ _CODE_TO_IMPACT: dict[str, ErrorImpact] = {
     # outlives. No progress is lost.
     ErrorCode.RUNNER_UNAVAILABLE: ErrorImpact.TRANSIENT,
     ErrorCode.HOST_OFFLINE: ErrorImpact.TRANSIENT,
+    ErrorCode.HOST_CAPACITY: ErrorImpact.TRANSIENT,
     ErrorCode.WRONG_REPLICA: ErrorImpact.TRANSIENT,
     ErrorCode.UPSTREAM_CANCELLED: ErrorImpact.TRANSIENT,
     # A single rejected request; the session stays healthy and usable.
@@ -463,6 +472,7 @@ _CODE_TO_PHASE: dict[str, ErrorPhase] = {
     ErrorCode.WRONG_REPLICA: ErrorPhase.ROUTING,
     ErrorCode.RUNNER_UNAVAILABLE: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.HOST_OFFLINE: ErrorPhase.RUNNER_LAUNCH,
+    ErrorCode.HOST_CAPACITY: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.RUNNER_CAPABILITY_MISMATCH: ErrorPhase.RUNNER_LAUNCH,
     ErrorCode.HARNESS_NOT_CONFIGURED: ErrorPhase.HARNESS_SETUP,
     ErrorCode.REFRESH_UNSUPPORTED: ErrorPhase.HARNESS_SETUP,
@@ -509,6 +519,7 @@ class OmnigentError(Exception):
         category: ErrorCategory | None = None,
         impact: ErrorImpact | None = None,
         phase: ErrorPhase | None = None,
+        details: Mapping[str, str] | None = None,
     ) -> None:
         """
         Create a new application error.
@@ -527,8 +538,11 @@ class OmnigentError(Exception):
         :param phase: Lifecycle-phase override. Defaults to the mapping for
             ``code`` (see :func:`phase_for_code`); pass it where the raise site
             knows the stage better than the code does.
+        :param details: Extra string fields merged into the response's ``error``
+            object, e.g. ``{"reason": "mem"}``.
         """
         super().__init__(message)
+        self.details = dict(details) if details else {}
         self.code = code
         self.message = message
         self._category_override = category
@@ -773,3 +787,20 @@ def classify_exception(exc: BaseException) -> tuple[ErrorCategory, ErrorImpact]:
     if is_permission_denied_rpc_error(exc):
         return ErrorCategory.UPSTREAM, ErrorImpact.BENIGN
     return ErrorCategory.UNKNOWN, ErrorImpact.UNKNOWN
+
+
+def host_capacity_error(message: str, error_detail: Mapping[str, str] | None) -> OmnigentError:
+    """Build the 503 error for a host launch refusal on runner or memory limits.
+
+    :param message: The host's human-readable refusal, e.g. ``"host 'hpz4' is at its
+        limit of 4 runners"``.
+    :param error_detail: The result frame's ``error_detail``; its ``reason``
+        (``"slots"`` or ``"mem"``) is exposed as ``error.reason`` in the response.
+    :returns: An :class:`OmnigentError` with code ``host_capacity``.
+    """
+    reason = (error_detail or {}).get("reason")
+    return OmnigentError(
+        message,
+        code=ErrorCode.HOST_CAPACITY,
+        details={"reason": reason} if reason else None,
+    )

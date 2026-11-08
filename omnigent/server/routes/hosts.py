@@ -37,13 +37,14 @@ from omnigent.debug_logging import (
     set_current_session_id,
 )
 from omnigent.entities import Conversation
-from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.errors import ErrorCode, OmnigentError, host_capacity_error
 from omnigent.harness_aliases import canonicalize_harness, harness_account_key
 from omnigent.host.frames import (
     CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
     CAP_REFRESH_HARNESSES,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_CAPACITY_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostCreateDirFrame,
     HostDetectCredentialsFrame,
@@ -1479,6 +1480,12 @@ def create_hosts_router(
                 result.get("error"),
                 workspace,
             )
+            if refusal_code == HOST_CAPACITY_ERROR_CODE:
+                # Retryable: the host is full right now (503 + reason slots/mem).
+                raise host_capacity_error(
+                    f"host failed to launch runner: {result.get('error')}",
+                    result.get("error_detail"),
+                )
             if refusal_code == HARNESS_NOT_CONFIGURED_ERROR_CODE:
                 # Categorical refusal: the harness isn't configured on
                 # the host, so a retry can't succeed without user action

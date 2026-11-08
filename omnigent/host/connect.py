@@ -72,6 +72,7 @@ from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     HOST_CAPABILITIES,
+    HOST_CAPACITY_ERROR_CODE,
     LAUNCH_HANDLER_FAILED_ERROR_CODE,
     RUNNER_LOG_TAIL_HEADING,
     WORKSPACE_MISSING_ERROR_CODE,
@@ -148,6 +149,11 @@ from omnigent.host.git_worktree import (
     create_worktree,
     list_worktrees,
     remove_worktree,
+)
+from omnigent.host.host_resources import (
+    admission_refusal,
+    available_memory_bytes,
+    load_host_resource_config,
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
 from omnigent.host.maintenance import HostMaintenanceJanitor
@@ -1846,6 +1852,7 @@ class HostProcess:
         error: str,
         *,
         error_code: str | None = None,
+        error_detail: dict[str, str] | None = None,
         error_category: ErrorCategory = ErrorCategory.HOST,
     ) -> HostLaunchRunnerResultFrame:
         """Report and return a failed runner launch.
@@ -1853,6 +1860,7 @@ class HostProcess:
         :param frame: Launch request that failed.
         :param error: Human-readable failure reason.
         :param error_code: Optional machine-readable failure category.
+        :param error_detail: Optional string fields qualifying ``error_code``.
         :param error_category: Fault attribution for a failure whose code has no
             mapping of its own; a coded preflight refusal uses its code's
             mapping instead.
@@ -1903,6 +1911,7 @@ class HostProcess:
             status="failed",
             error=error,
             error_code=error_code,
+            error_detail=error_detail,
         )
 
     def _classify_transient_404(self) -> HostConnectError | None:
@@ -1985,6 +1994,19 @@ class HostProcess:
             )
             return await self._handle_launch_impl(frame)
 
+    def _superseded_runners(self, frame: HostLaunchRunnerFrame) -> list[tuple[str, _RunnerHandle]]:
+        """Return the live runners this launch replaces once its runner is up."""
+        if frame.superseded_runner_ids is not None:
+            named = set(frame.superseded_runner_ids)
+            return [(rid, handle) for rid, handle in self._runners.items() if rid in named]
+        if frame.session_id:
+            return [
+                (rid, handle)
+                for rid, handle in self._runners.items()
+                if handle.session_id == frame.session_id
+            ]
+        return []
+
     async def _handle_launch_impl(
         self,
         frame: HostLaunchRunnerFrame,
@@ -2055,6 +2077,28 @@ class HostProcess:
                     f"{self._identity.name!r} — {setup_hint}"
                 ),
                 error_code=HARNESS_NOT_CONFIGURED_ERROR_CODE,
+            )
+
+        # Config and MemAvailable are small file reads; off the loop like the checks above.
+        resource_config, available = await asyncio.to_thread(
+            lambda: (load_host_resource_config(), available_memory_bytes())
+        )
+        self._alive_runner_ids()
+        # A runner this launch supersedes is replaced, not added.
+        superseded_ids = {rid for rid, _ in self._superseded_runners(frame)}
+        refusal = admission_refusal(
+            resource_config,
+            len(self._runners) - len(superseded_ids),
+            available,
+            host_name=self._identity.name,
+        )
+        if refusal is not None:
+            reason, message = refusal
+            return self._launch_failed(
+                frame,
+                message,
+                error_code=HOST_CAPACITY_ERROR_CODE,
+                error_detail={"reason": reason},
             )
 
         workspace = Path(frame.workspace).expanduser()
@@ -2204,17 +2248,7 @@ class HostProcess:
         # head-of-line block other sessions' launches on this host.
         # A server that names the superseded runners is authoritative: after
         # /clear or /switch the session's old runner serves another session.
-        if frame.superseded_runner_ids is not None:
-            named = set(frame.superseded_runner_ids)
-            superseded = [(rid, handle) for rid, handle in self._runners.items() if rid in named]
-        elif frame.session_id:
-            superseded = [
-                (rid, handle)
-                for rid, handle in self._runners.items()
-                if handle.session_id == frame.session_id
-            ]
-        else:
-            superseded = []
+        superseded = self._superseded_runners(frame)
         for rid, handle in superseded:
             self._runners.pop(rid, None)
             handle.stop_requested = True

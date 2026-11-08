@@ -1521,6 +1521,78 @@ async def test_handle_launch_configured_harness_proceeds_to_spawn(
             await _cancel(host._capability_init_task)
 
 
+def _live_runner(tmp_path: Path, name: str, session_id: str | None) -> _RunnerHandle:
+    proc = subprocess.Popen(["sleep", "30"])
+    return _RunnerHandle(proc=proc, log_path=tmp_path / f"{name}.log", session_id=session_id)
+
+
+@pytest.mark.parametrize(
+    ("session_id", "available_mib", "expected_code", "expected_reason"),
+    [
+        ("sess_new", 8192, "host_capacity", "slots"),
+        ("sess_old", 8192, None, None),
+        ("sess_old", 100, "host_capacity", "mem"),
+    ],
+)
+async def test_handle_launch_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str,
+    available_mib: int,
+    expected_code: str | None,
+    expected_reason: str | None,
+) -> None:
+    """
+    Verify launches are refused at the runner cap or below the memory floor,
+    and that a relaunch superseding the session's own runner does not count it.
+
+    If the superseding case is refused, a full host could never restart a
+    session's runner.
+    """
+    from omnigent.host.host_resources import HostResourceConfig
+
+    host = _make_host_process()
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    monkeypatch.setattr("omnigent.host.connect.harness_is_configured", lambda _h: True)
+    monkeypatch.setattr(
+        "omnigent.host.connect.load_host_resource_config",
+        lambda: HostResourceConfig(max_runners=2, min_mem_avail_mb=1024),
+    )
+    monkeypatch.setattr(
+        "omnigent.host.connect.available_memory_bytes", lambda: available_mib << 20
+    )
+    host._runners["r_old"] = _live_runner(tmp_path, "old", "sess_old")
+    host._runners["r_other"] = _live_runner(tmp_path, "other", "sess_other")
+    original_popen = subprocess.Popen
+
+    def _fake_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        return original_popen(
+            ["sleep", "10"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    frame = HostLaunchRunnerFrame(
+        request_id="req_admit",
+        binding_token="token_admit",
+        workspace=str(workspace),
+        session_id=session_id,
+    )
+    try:
+        with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
+            result = await asyncio.wait_for(host._handle_launch(frame), timeout=5.0)
+        assert result.error_code == expected_code, result.error
+        if expected_code is None:
+            assert result.status == "launched"
+        else:
+            assert result.status == "failed"
+            assert result.error_detail == {"reason": expected_reason}
+            assert "'" in (result.error or "")
+    finally:
+        for handle in host._runners.values():
+            handle.proc.kill()
+        _cleanup_host(host)
+
+
 async def test_handle_launch_without_harness_skips_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
