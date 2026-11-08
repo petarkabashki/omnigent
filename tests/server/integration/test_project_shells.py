@@ -215,7 +215,7 @@ def _client(app: FastAPI) -> AsyncClient:
 async def test_create_list_close_round_trip(env: _Env) -> None:
     project_id = _project(env)
     async with _client(env.app) as client:
-        created = await client.post(f"/v1/projects/{project_id}/shells")
+        created = await client.post(f"/v1/projects/{project_id}/shells", json={})
         assert created.status_code == 201, created.text
         shell = created.json()
         assert shell["host_id"] == _HOST_ID and shell["alive"] is True
@@ -230,6 +230,18 @@ async def test_create_list_close_round_trip(env: _Env) -> None:
         assert (await client.get(f"/v1/projects/{project_id}/shells")).json()["data"] == []
 
 
+async def test_create_rejects_a_simple_cross_site_request(env: _Env) -> None:
+    project_id = _project(env)
+    async with _client(env.app) as client:
+        response = await client.post(
+            f"/v1/projects/{project_id}/shells",
+            content="{}",
+            headers={"Content-Type": "text/plain"},
+        )
+    assert response.status_code in (400, 415)
+    assert env.host.creates() == []
+
+
 async def test_missing_default_host_or_workspace_is_400(env: _Env) -> None:
     no_host = env.project_store.create(uuid.uuid4().hex, "a", None, config={"workspace": "/w"}).id
     no_workspace = env.project_store.create(
@@ -237,7 +249,7 @@ async def test_missing_default_host_or_workspace_is_400(env: _Env) -> None:
     ).id
     async with _client(env.app) as client:
         for project_id, word in ((no_host, "host"), (no_workspace, "workspace")):
-            response = await client.post(f"/v1/projects/{project_id}/shells")
+            response = await client.post(f"/v1/projects/{project_id}/shells", json={})
             assert response.status_code == 400
             assert f"default {word}" in response.text
     assert env.host.creates() == []
@@ -247,10 +259,10 @@ async def test_offline_host_is_503(env: _Env) -> None:
     project_id = _project(env, host_id="ab" * 16)
     async with _client(env.app) as client:
         # An unknown host row is a 404; a known but disconnected one is a 503.
-        assert (await client.post(f"/v1/projects/{project_id}/shells")).status_code == 404
+        assert (await client.post(f"/v1/projects/{project_id}/shells", json={})).status_code == 404
         env.registry.deregister(_HOST_ID)
         online_project = _project(env, name="q")
-        response = await client.post(f"/v1/projects/{online_project}/shells")
+        response = await client.post(f"/v1/projects/{online_project}/shells", json={})
     assert response.status_code == 503, response.text
 
 
@@ -262,7 +274,7 @@ async def test_host_without_capability_gets_update_hint(db_uri: str) -> None:
             uuid.uuid4().hex, "x", None, config={"host_id": _HOST_ID, "workspace": "/w"}
         )
         async with _client(app) as client:
-            response = await client.post(f"/v1/projects/{project.id}/shells")
+            response = await client.post(f"/v1/projects/{project.id}/shells", json={})
         assert response.status_code == 409
         assert "update omnigent" in response.text
     finally:
@@ -282,7 +294,7 @@ async def test_shells_are_owner_only(db_uri: str) -> None:
         bob = {"X-Forwarded-Email": "bob@example.com"}
         for method, suffix in (("GET", ""), ("POST", ""), ("DELETE", "/pshell_1")):
             response = await client.request(
-                method, f"/v1/projects/{project.id}/shells{suffix}", headers=bob
+                method, f"/v1/projects/{project.id}/shells{suffix}", headers=bob, json={}
             )
             assert response.status_code == 404, (method, response.text)
 
@@ -290,8 +302,8 @@ async def test_shells_are_owner_only(db_uri: str) -> None:
 async def test_project_delete_closes_its_shells(env: _Env) -> None:
     doomed, kept = _project(env, "doomed"), _project(env, "kept")
     async with _client(env.app) as client:
-        await client.post(f"/v1/projects/{doomed}/shells")
-        survivor = (await client.post(f"/v1/projects/{kept}/shells")).json()
+        await client.post(f"/v1/projects/{doomed}/shells", json={})
+        survivor = (await client.post(f"/v1/projects/{kept}/shells", json={})).json()
         assert (await client.delete(f"/v1/projects/{doomed}")).status_code == 200
     assert list(env.host.shells) == [survivor["id"]]
 
@@ -347,7 +359,7 @@ async def _browser(app: FastAPI, path: str) -> ApplicationCommunicator:
 async def test_attach_relays_bytes_through_the_host_tunnel(env: _Env) -> None:
     project_id = _project(env)
     async with _client(env.app) as client:
-        shell = (await client.post(f"/v1/projects/{project_id}/shells")).json()
+        shell = (await client.post(f"/v1/projects/{project_id}/shells", json={})).json()
     browser = await _browser(env.app, f"/v1/projects/{project_id}/shells/{shell['id']}/attach")
     try:
         assert (await browser.receive_output(timeout=2.0))["type"] == "websocket.accept"

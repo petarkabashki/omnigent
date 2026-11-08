@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketException
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketException
 from starlette import status
 
 from omnigent.debug_logging import set_current_user_id
@@ -27,6 +27,7 @@ from omnigent.server.project_shells import (
     require_project_shell_support,
 )
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes.terminal_attach import relay_terminal_ws
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.project_store import ProjectStore
@@ -118,7 +119,11 @@ def create_project_shells_router(
             "data": [{**shell, "host_id": conn.host_id} for shell in result.shells],
         }
 
-    @router.post("/projects/{project_id}/shells", status_code=201)
+    @router.post(
+        "/projects/{project_id}/shells",
+        status_code=201,
+        dependencies=[Depends(require_json_content_type)],
+    )
     async def create_project_shell(request: Request, project_id: str) -> dict[str, Any]:
         """Start a shell on the project's default host in its default workspace."""
         project, user_id = await owned_project(request, project_id)
