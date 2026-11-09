@@ -1200,7 +1200,8 @@ index (state, summary, hop count) across compaction and relaunch.
 
 - `GET /v1/sessions/threads` lists a session's threads;
   `GET /v1/sessions/threads/history` reads one; `POST /v1/sessions/threads/note`
-  sets a thread's state or summary. Hops are capped, and a quiet thread resets.
+  sets a thread's state or summary and marks it read. Hops are capped, and a
+  quiet thread resets.
 - `POST /v1/sessions/{id}/fork` `{"side_chat": true, "thread": "<handle>"}`
   starts an owner thread with that counterpart; `thread` without `side_chat`
   is rejected.
@@ -1215,7 +1216,8 @@ index (state, summary, hop count) across compaction and relaunch.
 - Web: the session header menu shows "Open thread..." only when the session
   holds a role alias. It asks for the counterpart handle and opens the side chat.
 - Web: the sidebar lists a role session's threads under its row (urgent first,
-  with unread counts). Clicking one opens the holder with that thread's side
+  with counts of messages the role hasn't handled yet; the role clears them by
+  noting the thread, and the card's Handled button clears them by hand). Clicking one opens the holder with that thread's side
   chat; reopening a thread reuses its side chat rather than forking another.
   "Needs you" (`waiting_on_owner`) and "Blocked" sort first.
 - Web: the thread side chat shows your posts centred as "You" and has a Post

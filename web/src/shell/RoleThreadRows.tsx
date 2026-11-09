@@ -105,7 +105,8 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
             </span>
             {thread.unread > 0 && (
               <span
-                aria-label={`${thread.unread} unread`}
+                aria-label={`${thread.unread} not yet handled by the role`}
+                title="Messages the role hasn't handled yet"
                 className="shrink-0 rounded-full bg-primary px-1.5 text-[10px] leading-4 font-medium text-primary-foreground"
               >
                 {thread.unread}
@@ -184,11 +185,14 @@ function RoleThreadCard({
           {thread.messages}
         </span>
         {thread.unread > 0 && (
-          <span className="flex items-center gap-1 text-foreground" title="Unread">
+          <span
+            className="flex items-center gap-1 text-foreground"
+            title="Messages the role hasn't handled yet; the role clears this when it notes the thread"
+          >
             <span aria-hidden className="text-primary">
               ●
             </span>
-            {thread.unread} new
+            {thread.unread} unhandled
           </span>
         )}
         {thread.updatedAt > 0 && (
@@ -229,9 +233,10 @@ function RoleThreadCard({
             size="xs"
             variant="ghost"
             disabled={saving}
+            title="Clear the count for the role, as if it had noted the thread"
             onClick={() => void setLabels({ [`thread.${thread.key}.unread`]: "0" })}
           >
-            <MailOpenIcon aria-hidden /> Read
+            <MailOpenIcon aria-hidden /> Handled
           </Button>
         )}
         <Button

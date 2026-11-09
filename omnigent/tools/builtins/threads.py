@@ -109,7 +109,8 @@ class SysThreadNoteTool(_ThreadTool):
     def description(cls) -> str:
         """Return the LLM-facing description."""
         return (
-            "Record a thread's state and/or one-line summary in the role's index. In a side "
+            "Record a thread's state and/or one-line summary in the role's index; this also "
+            "marks the thread read. In a side "
             "chat opened for a thread, also sends the role's main session a "
             "'[thread note]' summary line; call it after any commitment, dependency, "
             "conflict or blocker. Set state 'waiting_on_owner' when the thread needs the "

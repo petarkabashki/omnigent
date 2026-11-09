@@ -253,14 +253,14 @@ def note_thread(
         raise OmnigentError(
             f"state must be one of {', '.join(THREAD_STATES)}", code=ErrorCode.INVALID_INPUT
         )
+    # Noting a thread means the role has seen it, so nothing in it is unread.
     updates = {
         _label(counterpart, "cp"): counterpart,
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
+        _label(counterpart, "unread"): "0",
     }
     if state is not None:
         updates[_label(counterpart, "state")] = state
-        if state in ("done", "waiting_on_them"):
-            updates[_label(counterpart, "unread")] = "0"
     if summary is not None:
         updates[_label(counterpart, "sum")] = preview(summary)
     store.set_labels(holder.id, updates)

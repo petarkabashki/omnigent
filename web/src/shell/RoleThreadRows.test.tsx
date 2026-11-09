@@ -72,7 +72,7 @@ describe("RoleThreadRows", () => {
         within(row).getByTestId("role-thread-state").firstElementChild?.getAttribute("data-tone"),
       ),
     ).toEqual(["red", "neutral"]);
-    expect(within(rows[0]).getByLabelText("3 unread")).toBeInTheDocument();
+    expect(within(rows[0]).getByLabelText("3 not yet handled by the role")).toBeInTheDocument();
   });
 
   it("renders nothing for a session with no threads", () => {
@@ -146,7 +146,7 @@ describe("RoleThreadRows", () => {
     fireEvent.focus(screen.getByTestId("role-thread-row"));
     const card = await screen.findByTestId("role-thread-card");
     expect(card).toHaveTextContent("/ArchitectOur turn");
-    expect(card).toHaveTextContent("2 new");
+    expect(card).toHaveTextContent("2 unhandled");
     expect(within(card).getByTitle("Messages")).toHaveTextContent("7");
     expect(card).toHaveTextContent("Asked for the schema review");
 

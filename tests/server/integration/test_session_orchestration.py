@@ -1946,8 +1946,13 @@ async def test_owner_posts_into_a_role_thread(auth_client, peers, db_uri):
         ("owner", "Use v2"),
     ]
 
-    # A post to one side reaches only that side.
+    # Noting a thread marks it read, even when the state stays the same.
+    assert (await rows(product))["/Architect"]["unread"] > 0
     await _tool(auth_client, product, "sys_thread_note", counterpart="/Architect", state="open")
+    await _tool(auth_client, product, "sys_thread_note", counterpart="/Architect", summary="Seen")
+    assert (await rows(product))["/Architect"]["unread"] == 0
+
+    # A post to one side reaches only that side.
     nudge = await post(message="Architect, answer the schema question", to="counterpart")
     assert nudge.json()["delivered"] == [architect["id"]]
     assert (await rows(product))["/Architect"]["state"] == "open"
