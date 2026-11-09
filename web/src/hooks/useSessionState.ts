@@ -10,10 +10,11 @@
 // after an error, so callers also inspect the latest conversation message.
 
 import type { Conversation } from "@/hooks/useConversations";
+import { awaitingInputReason, type AwaitingInputFields } from "@/lib/awaitingInput";
 import type { LatestSessionError } from "@/lib/sessionError";
 
 export type SessionState =
-  | { kind: "awaiting"; count: number }
+  | { kind: "awaiting"; count: number; reason?: string }
   | { kind: "running" }
   | { kind: "error" }
   | { kind: "disconnected" }
@@ -25,11 +26,13 @@ export type SessionState =
   | { kind: "starting" };
 
 export function getSessionState(
-  conversation: Pick<Conversation, "status" | "pending_elicitations_count"> | undefined | null,
+  conversation: (Pick<Conversation, "status"> & AwaitingInputFields) | undefined | null,
   latestError: LatestSessionError | null = null,
 ): SessionState | null {
   const pending = conversation?.pending_elicitations_count ?? 0;
-  if (pending > 0) return { kind: "awaiting", count: pending };
+  const reason = conversation ? awaitingInputReason(conversation) : undefined;
+  if (pending > 0) return { kind: "awaiting", count: pending, ...(reason ? { reason } : {}) };
+  if (reason) return { kind: "awaiting", count: 1, reason };
   if (conversation?.status === "running") return { kind: "running" };
   if (latestError === "disconnected") return { kind: "disconnected" };
   if (latestError === "recovered_disconnect") return null;

@@ -189,6 +189,15 @@ the header menu), and each place is a separate entry point.
   a third of its width, or after a quick flick, closes it; a shorter drag springs
   back. List scrolling, row taps, long-press reordering and horizontal scrollers
   keep their own touch handling.
+- `awaiting-input`: a session blocked on the user without an approval dialog
+  shows as "Needs response" like a pending approval: sidebar badge and count,
+  Inbox "Awaiting response" tab (the reason is the row preview), and an
+  immediate OS notification. The server sets label `omnigent.awaiting_input`
+  (reason, 256 chars) when a turn ends on a question or request to the user, or
+  when Claude Code's `Notification` hook reports a permission or idle prompt. It
+  clears when the user sends a message, a new turn starts, or the session is
+  archived. To try: ask an agent "End your reply by asking me which option I
+  prefer", wait for the turn to end, and check the sidebar and Inbox.
 
 ## How to get to it (user POV)
 

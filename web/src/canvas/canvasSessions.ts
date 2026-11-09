@@ -14,6 +14,7 @@ import {
   type Conversation,
   type ConversationsPage,
 } from "@/hooks/useConversations";
+import { awaitingInputReason } from "@/lib/awaitingInput";
 import { getOmnigentServerIdentity } from "@/lib/host";
 import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { sessionUpdatesSocket } from "@/lib/sessionUpdatesSocket";
@@ -135,6 +136,7 @@ function sessionSignature(sessions: readonly Conversation[]): string {
         row.status,
         row.title,
         row.pending_elicitations_count,
+        awaitingInputReason(row),
         row.git_branch,
         row.project_id,
         row.workspace,
@@ -314,6 +316,7 @@ function sameCard(left: Conversation, right: Conversation): boolean {
     left.title === right.title &&
     left.updated_at === right.updated_at &&
     (left.pending_elicitations_count ?? 0) === (right.pending_elicitations_count ?? 0) &&
+    awaitingInputReason(left) === awaitingInputReason(right) &&
     (left.git_branch ?? null) === (right.git_branch ?? null) &&
     (left.project_id ?? null) === (right.project_id ?? null) &&
     (left.workspace ?? null) === (right.workspace ?? null) &&

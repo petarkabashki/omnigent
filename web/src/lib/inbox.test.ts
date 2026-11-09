@@ -290,6 +290,23 @@ describe("collectUnreadInboxItems", () => {
     ]);
   });
 
+  it("lists awaiting-input rows first-class, seen or not, with their reason", () => {
+    const rows = [
+      makeRow({ id: "done", status: "idle", updated_at: 2_000 }),
+      makeRow({
+        id: "asking",
+        status: "idle",
+        updated_at: 500,
+        labels: { "omnigent.awaiting_input": "Which option?" },
+      }),
+    ];
+    const items = collectUnreadInboxItems(rows, unseenAfter(1_000));
+    expect(items.map((i) => [i.row.id, i.kind, i.reason])).toEqual([
+      ["done", "done", undefined],
+      ["asking", "awaiting", "Which option?"],
+    ]);
+  });
+
   it("skips archived rows and rows already listed as approvals", () => {
     // A session with a pending prompt shows as its approval card; listing it
     // again as unread would put one session in the inbox twice.

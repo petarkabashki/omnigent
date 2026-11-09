@@ -301,6 +301,19 @@ describe("useIdleNotifications elicitation transitions", () => {
     });
   });
 
+  it("notifies immediately, with the reason, when a session is flagged awaiting input", () => {
+    setConversations([conv("a", "idle", 0)]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+
+    const flagged = { ...conv("a", "idle", 0), labels: { "omnigent.awaiting_input": "Push it?" } };
+    setConversations([flagged]);
+    rerender();
+
+    // No settle delay: the waiting state is stable, not a step edge.
+    expect(showMock).toHaveBeenCalledOnce();
+    expect(showMock.mock.calls[0][0]).toMatchObject({ title: "a", body: "Push it?" });
+  });
+
   it("does not notify on a fresh load with already-pending elicitations", () => {
     setConversations([conv("a", "running", 2)]);
     renderHook(() => useIdleNotifications());
