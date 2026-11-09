@@ -699,15 +699,6 @@ export function onCloseTabRequest(callback: () => void): () => void {
   }
 }
 
-/** Ask the desktop shell to close this window. A no-op outside Electron. */
-export function closeNativeWindow(): void {
-  try {
-    electronApi()?.closeWindow?.();
-  } catch (err) {
-    console.warn("[nativeBridge] close window failed:", err);
-  }
-}
-
 /**
  * True when running inside the Electron desktop shell on macOS — the one
  * platform where the shell hides the native title bar (titleBarStyle

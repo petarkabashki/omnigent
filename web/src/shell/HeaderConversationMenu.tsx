@@ -52,8 +52,8 @@ import { useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { useReleaseRole } from "@/hooks/useRoles";
 import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
 import { PIN_WRITE_MUTATION_KEY } from "@/lib/sessionListCache";
-import { createSideChat, exportSessionTranscript } from "@/lib/sessionsApi";
-import { useChatStore } from "@/store/chatStore";
+import { exportSessionTranscript } from "@/lib/sessionsApi";
+import { OpenThreadDialog } from "./OpenThreadDialog";
 import { triggerBrowserDownload } from "@/hooks/useFileContent";
 import {
   PINNED_LABEL_KEY,
@@ -133,8 +133,6 @@ export function HeaderConversationMenu({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState(conversation.title ?? "");
   const [threadOpen, setThreadOpen] = useState(false);
-  const [threadHandle, setThreadHandle] = useState("");
-  const [threadPending, setThreadPending] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBranch, setDeleteBranch] = useState(false);
   const previousConversationId = useRef(conversation.id);
@@ -184,23 +182,6 @@ export function HeaderConversationMenu({
       rename.mutate({ id: conversation.id, title });
     }
     setRenameOpen(false);
-  };
-
-  const submitThread = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const thread = threadHandle.trim();
-    if (!thread) return;
-    setThreadPending(true);
-    try {
-      const { childSessionId } = await createSideChat(conversation.id, undefined, { thread });
-      useChatStore.getState().openSideChatWithDraft(childSessionId, "", conversation.id);
-      setThreadOpen(false);
-      setThreadHandle("");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't open the thread.");
-    } finally {
-      setThreadPending(false);
-    }
   };
 
   const confirmDelete = () => {
@@ -538,43 +519,12 @@ export function HeaderConversationMenu({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={threadOpen} onOpenChange={setThreadOpen}>
-        <DialogContent>
-          <form onSubmit={(event) => void submitThread(event)}>
-            <DialogHeader>
-              <DialogTitle>Open thread</DialogTitle>
-              <DialogDescription>
-                Enter the role handle of the counterpart, e.g. Architect.
-              </DialogDescription>
-            </DialogHeader>
-            <input
-              autoFocus
-              aria-label="Counterpart role handle"
-              data-testid="header-open-thread-input"
-              value={threadHandle}
-              onChange={(event) => setThreadHandle(event.target.value)}
-              className="mt-4 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
-            />
-            <DialogFooter className="mt-4 border-t-0 bg-transparent mobile-app:flex-col-reverse mobile-app:gap-1">
-              <Button
-                type="button"
-                variant="ghost"
-                className="mobile-touch-target mobile-app:w-full"
-                onClick={() => setThreadOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                className="mobile-touch-target mobile-app:w-full"
-                disabled={!threadHandle.trim() || threadPending}
-              >
-                Open
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <OpenThreadDialog
+        open={threadOpen}
+        onOpenChange={setThreadOpen}
+        holderId={conversation.id}
+        namespacePath={currentProject ?? ""}
+      />
 
       <Dialog
         open={deleteOpen}

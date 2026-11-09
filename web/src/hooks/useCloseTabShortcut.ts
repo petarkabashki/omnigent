@@ -2,12 +2,13 @@
 
 import { useEffect, useLayoutEffect, useRef } from "react";
 
-import { closeNativeWindow, onCloseTabRequest } from "@/lib/nativeBridge";
+import { onCloseTabRequest } from "@/lib/nativeBridge";
 import { useNavigate } from "@/lib/routing";
 
 /**
  * Handle Close Tab: close the workspace rail's selected tab; with none, leave
- * the session for the new-session page; anywhere else, close the window.
+ * the session for the new-session page. It never closes the window; Close
+ * Window (CmdOrCtrl+Shift+W) does.
  *
  * @param closeSelectedTab Close the rail's selected tab. Returns false when
  *   nothing closable is selected, including when the rail is hidden.
@@ -27,7 +28,6 @@ export function useCloseTabShortcut(closeSelectedTab: () => boolean, inSession: 
         const current = latest.current;
         if (current.closeSelectedTab()) return;
         if (current.inSession) current.navigate("/");
-        else closeNativeWindow();
       }),
     [],
   );

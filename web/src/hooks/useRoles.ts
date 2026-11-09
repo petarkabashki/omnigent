@@ -12,10 +12,11 @@ interface RoleCacheSnapshot {
   previous: [readonly unknown[], NamespaceRole[] | undefined][];
 }
 
-export function useNamespaceRoles(namespacePath: string) {
+export function useNamespaceRoles(namespacePath: string, enabled = true) {
   return useQuery({
     queryKey: [...ROLES_QUERY_KEY, namespacePath],
     queryFn: () => listNamespaceRoles(namespacePath),
+    enabled,
   });
 }
 

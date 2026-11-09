@@ -65,11 +65,11 @@ describe("useCloseTabShortcut", () => {
     expect(shell.closeWindow).not.toHaveBeenCalled();
   });
 
-  it("closes the window outside a session", () => {
+  it("never closes the window outside a session; Close Window does that", () => {
     const { shell, request } = stubCloseTabShell();
     renderHook(() => useCloseTabShortcut(() => false, false));
     request();
-    expect(shell.closeWindow).toHaveBeenCalledOnce();
+    expect(shell.closeWindow).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
   });
 
@@ -82,7 +82,7 @@ describe("useCloseTabShortcut", () => {
     rerender({ inSession: false });
     request();
     expect(shell.onCloseTabRequest).toHaveBeenCalledOnce();
-    expect(shell.closeWindow).toHaveBeenCalledOnce();
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("keeps the committed closer when a new render suspends", () => {

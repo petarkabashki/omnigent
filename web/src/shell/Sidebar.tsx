@@ -61,6 +61,7 @@ import {
   Loader2Icon,
   MailIcon,
   MailOpenIcon,
+  MessagesSquareIcon,
   MessageCircleDashedIcon,
   MessageCirclePlusIcon,
   Maximize2Icon,
@@ -185,7 +186,8 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode, sandboxOptionLabel } from "@/lib/capabilities";
 import { useBranding } from "@/lib/branding";
 import { relativeTime } from "@/lib/relativeTime";
-import { sessionRoleHandle } from "@/lib/rolesApi";
+import { ALIAS_LABEL_KEY, sessionRoleHandle } from "@/lib/rolesApi";
+import { OpenThreadDialog } from "./OpenThreadDialog";
 import { RoleThreadRows } from "./RoleThreadRows";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
@@ -4476,6 +4478,7 @@ function ConversationMenuItems({
   setStopOpen,
   setDeleteOpen,
   setLeaveOpen,
+  setThreadOpen,
   setMenuOpen,
   runArchive,
   reorder,
@@ -4507,6 +4510,7 @@ function ConversationMenuItems({
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
   setLeaveOpen: (open: boolean) => void;
+  setThreadOpen: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -4688,6 +4692,16 @@ function ConversationMenuItems({
             Only the session owner can rename this session
           </TooltipContent>
         </Tooltip>
+      )}
+      {conversation.labels?.[ALIAS_LABEL_KEY] && (
+        <C.Item
+          className="mobile-touch-target"
+          data-testid="sidebar-open-thread"
+          onSelect={() => setThreadOpen(true)}
+        >
+          <MessagesSquareIcon className="size-3.5" />
+          Open thread…
+        </C.Item>
       )}
       {/* Every row offers one read-state action: "Mark as unread" re-lights
           the pink dot so a session can be flagged to revisit (including the
@@ -5430,6 +5444,7 @@ function ConversationRowImpl({
   const [shareOpen, setShareOpen] = useState(false);
   const [forkOpen, setForkOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [threadOpen, setThreadOpen] = useState(false);
   const gitBranch = conversation.git_branch ?? null;
   // Every row action gates on ownership alone — the sidebar carries no
   // effective-permission level, so rename/share/move/drag are owner-only and
@@ -5798,6 +5813,7 @@ function ConversationRowImpl({
     setStopOpen,
     setDeleteOpen,
     setLeaveOpen,
+    setThreadOpen,
     runArchive,
     reorder: canReorder && !isProvisionalRow ? { previousId, nextId } : undefined,
   };
@@ -6382,6 +6398,14 @@ function ConversationRowImpl({
         )}
       </Dialog>
       {archiveWorktreePrompt.dialog}
+      {conversation.labels?.[ALIAS_LABEL_KEY] && (
+        <OpenThreadDialog
+          open={threadOpen}
+          onOpenChange={setThreadOpen}
+          holderId={conversation.id}
+          namespacePath={roleProjectPath ?? ""}
+        />
+      )}
       <Dialog open={leaveOpen} onOpenChange={setLeaveOpen}>
         {leaveOpen && (
           <DialogContent

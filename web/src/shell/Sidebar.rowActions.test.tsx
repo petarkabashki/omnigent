@@ -795,6 +795,22 @@ describe("leave a shared session", () => {
     );
   });
 
+  it("offers Open thread only on a role-holding row, and opens the dialog", () => {
+    mockConversations([
+      CONV,
+      { ...CONV, id: "conv_2", title: "Product", labels: { "omnigent.alias": "Product" } },
+    ]);
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /My Session/ }));
+    expect(screen.queryByTestId("sidebar-open-thread")).toBeNull();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: /Product/ }));
+    fireEvent.click(screen.getByTestId("sidebar-open-thread"));
+    expect(screen.getByRole("dialog", { name: "Open thread" })).toBeInTheDocument();
+  });
+
   it("shows Delete instead of Leave on a row the viewer owns", () => {
     // The owner grant is what keeps the session reachable — leaving would
     // orphan it, so the owner deletes instead. One slot, not two items.
