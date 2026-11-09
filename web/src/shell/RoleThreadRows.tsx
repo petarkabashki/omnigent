@@ -8,11 +8,12 @@ import { cn } from "@/lib/utils";
 import { roleThreadStateText, roleThreadsFromLabels, type RoleThread } from "@/lib/roleThreads";
 import { createSideChat } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
+import { RoleThreadDialog } from "./RoleThreadDialog";
 import { SIDEBAR_HOVER_HIGHLIGHT, SIDEBAR_ROW } from "./sidebarStyles";
 
 /**
  * The threads of a role-holding session, listed under its sidebar row.
- * Opening one shows the holder with that thread's side chat in the rail.
+ * Opening one shows the thread's messages; replying opens its side chat beside the holder.
  */
 export function RoleThreadRows({ conversation }: { conversation: Conversation }) {
   const threads = roleThreadsFromLabels(conversation.labels);
@@ -24,21 +25,38 @@ export function RoleThreadRows({ conversation }: { conversation: Conversation })
         className="flex flex-col gap-px pl-6"
       >
         {threads.map((thread) => (
-          <RoleThreadRow key={thread.counterpart} holderId={conversation.id} thread={thread} />
+          <RoleThreadRow
+            key={thread.counterpart}
+            holderId={conversation.id}
+            holderName={
+              conversation.labels?.["omnigent.alias"]?.trim() || conversation.title || "Role"
+            }
+            thread={thread}
+          />
         ))}
       </ul>
     </li>
   );
 }
 
-function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThread }) {
+function RoleThreadRow({
+  holderId,
+  holderName,
+  thread,
+}: {
+  holderId: string;
+  holderName: string;
+  thread: RoleThread;
+}) {
   const navigate = useNavigate();
   const [opening, setOpening] = useState(false);
+  const [viewing, setViewing] = useState(false);
   const urgent = thread.state === "blocked" || thread.state === "waiting_on_us";
 
-  const open = async () => {
+  const reply = async () => {
     if (opening) return;
     setOpening(true);
+    setViewing(false);
     navigate(`/c/${holderId}`);
     try {
       const { childSessionId } = await createSideChat(holderId, undefined, {
@@ -60,8 +78,7 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
             type="button"
             data-testid="role-thread-row"
             data-state-name={thread.state}
-            disabled={opening}
-            onClick={() => void open()}
+            onClick={() => setViewing(true)}
             className={cn(
               SIDEBAR_ROW,
               SIDEBAR_HOVER_HIGHLIGHT,
@@ -93,6 +110,19 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
           {thread.summary && <p className="mt-1">{thread.summary}</p>}
         </TooltipContent>
       </Tooltip>
+      <RoleThreadDialog
+        open={viewing}
+        onOpenChange={setViewing}
+        holderId={holderId}
+        holderName={holderName}
+        thread={thread}
+        replying={opening}
+        onReply={() => void reply()}
+        onOpenSession={() => {
+          setViewing(false);
+          navigate(`/c/${holderId}`);
+        }}
+      />
     </li>
   );
 }

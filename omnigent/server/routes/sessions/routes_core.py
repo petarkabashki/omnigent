@@ -2004,6 +2004,45 @@ def register_core_routes(
 
         return await asyncio.to_thread(_history)
 
+    @router.get("/sessions/{session_id}/threads/messages")
+    async def role_thread_messages(
+        session_id: str,
+        request: Request,
+        counterpart: str = Query(...),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Both sides of one of a role session's threads, for the owner's thread view."""
+        from omnigent.server.role_threads import (
+            holds_role,
+            thread_conversation,
+            validate_counterpart,
+        )
+        from omnigent.server.session_orchestration import require_owned_session
+
+        user_id = _require_user(request, auth_provider)
+
+        def _messages() -> dict[str, Any]:
+            if permission_store is not None and user_id:
+                holder = require_owned_session(
+                    session_id, user_id, conversation_store, permission_store
+                )
+            else:
+                holder = conversation_store.get_conversation(session_id)
+                if holder is None:
+                    raise _session_not_found()
+            if not holds_role(holder):
+                raise OmnigentError(
+                    "Threads belong to a session that holds a role",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            key = validate_counterpart(counterpart)
+            rows = thread_conversation(
+                conversation_store, holder, key, user_id=user_id, limit=limit
+            )
+            return {"counterpart": key, "messages": rows}
+
+        return await asyncio.to_thread(_messages)
+
     @router.post("/sessions/threads/note")
     async def note_role_thread(request: Request, body: ThreadNoteRequest) -> dict[str, Any]:
         """Set a thread's state or summary on the role holder; ``sys_thread_note`` calls this.

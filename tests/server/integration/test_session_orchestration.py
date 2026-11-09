@@ -1939,6 +1939,20 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     assert [m["text"] for m in history["messages"]] == ["Plan the API"]
     assert history["messages"][0]["message_id"].startswith("msg_")
 
+    # The owner's thread view shows both sides; sends are read from the receiver.
+    view = await auth_client.get(
+        f"/v1/sessions/{product['id']}/threads/messages", params={"counterpart": "/Architect"}
+    )
+    assert view.status_code == 200
+    assert [(m["direction"], m["text"]) for m in view.json()["messages"]] == [
+        ("in", "Plan the API"),
+        ("out", "Draft ready"),
+    ]
+    unroled = await auth_client.get(
+        f"/v1/sessions/{other['id']}/threads/messages", params={"counterpart": "/Product"}
+    )
+    assert unroled.status_code == 400
+
     # History follows the role to a new holder session.
     successor = await _create_session_as(auth_client, "", "alice")
     _bind_runner(db_uri, successor["id"])
