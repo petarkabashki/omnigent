@@ -127,6 +127,7 @@ from omnigent.server.routes.extensions import create_extensions_router
 from omnigent.server.routes.external_tasks import create_external_tasks_router
 from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
+from omnigent.server.routes.messaging_rules import create_messaging_rules_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.preferences import create_preferences_router
 from omnigent.server.routes.project_shells import create_project_shells_router
@@ -3952,6 +3953,16 @@ def create_app(
             ),
             prefix="/v1",
             tags=["default_policies"],
+        )
+        app.include_router(
+            create_messaging_rules_router(
+                policy_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
+            prefix="/v1",
+            tags=["messaging_rules"],
+            include_in_schema=False,
         )
     app.include_router(
         create_policy_registry_router(auth_provider=auth_provider),
