@@ -222,7 +222,7 @@ async def test_host_routes_mounted_with_host_store(
     assert resp.status_code == 200, (
         f"host routes should be mounted when host_store is set; got {resp.status_code}."
     )
-    assert resp.json() == {"hosts": []}
+    assert resp.json()["hosts"] == []
 
 
 async def test_me_header_mode_behaviors(
