@@ -46,6 +46,7 @@ from omnigent.harness_plugins import (
     PI_NATIVE_CODING_AGENT,
     harness_capabilities,
 )
+from omnigent.policies.builtins.messaging import MessagingGrantOffer
 from omnigent.runner.routing import RunnerRouter
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.schemas import (
@@ -348,6 +349,7 @@ _LABEL_VALUE_MAX_LEN: int = LABEL_VALUE_MAX_LEN
 
 
 _EXTERNAL_SESSION_TODOS_TYPE: str = "external_session_todos"
+_EXTERNAL_SESSION_AWAITING_INPUT_TYPE: str = "external_session_awaiting_input"
 
 
 _CLAUDE_NATIVE_WRAPPER_LABEL_KEY = WRAPPER_LABEL_KEY
@@ -614,6 +616,7 @@ _RUNNER_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
         _EXTERNAL_SESSION_TITLE_TYPE,
         _EXTERNAL_SESSION_TODOS_TYPE,
+        _EXTERNAL_SESSION_AWAITING_INPUT_TYPE,
         _EXTERNAL_SUBAGENT_START_TYPE,
         _EXTERNAL_ACP_SUBAGENT_START_TYPE,
         _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -823,6 +826,7 @@ class _PendingPolicyAskWrites:
     :param reviewed_arguments: Original MCP arguments shown for approval.
     :param transformed_arguments: Policy transform stored with that approval.
     :param mcp_call_identity: Session, tool, policy actor and credential user.
+    :param message_grant: Pair and rules file an approval may turn into an allow rule.
     """
 
     state_updates: list[StateUpdate] | None
@@ -831,6 +835,7 @@ class _PendingPolicyAskWrites:
     reviewed_arguments: dict[str, Any] | None = None
     transformed_arguments: dict[str, Any] | None = None
     mcp_call_identity: tuple[str, str, str | None, str | None] | None = None
+    message_grant: MessagingGrantOffer | None = None
 
 
 # Workspace-scoped: keyed by a harness elicitation id, which can be
@@ -1190,6 +1195,7 @@ __all__ = [
     "_EXTERNAL_PERMISSION_MODE_CHANGE_TYPE",
     "_EXTERNAL_PULL_REQUESTS_TYPE",
     "_EXTERNAL_REASONING_EFFORT_CHANGE_TYPE",
+    "_EXTERNAL_SESSION_AWAITING_INPUT_TYPE",
     "_EXTERNAL_SESSION_INTERRUPTED_TYPE",
     "_EXTERNAL_SESSION_STATUS_TYPE",
     "_EXTERNAL_SESSION_STATUS_VALUES",

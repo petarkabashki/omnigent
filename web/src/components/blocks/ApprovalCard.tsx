@@ -164,6 +164,14 @@ function SubagentRequesterLine({ sessionId, ancestorSessionId }: SubagentRequest
   );
 }
 
+/** Pair offered by a messaging-rules ASK in the elicitation schema, or null. */
+function castMessagingGrant(value: unknown): { from: string; to: string; hours: number } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { from, to, hours } = value as Record<string, unknown>;
+  if (typeof from !== "string" || typeof to !== "string") return null;
+  return { from, to, hours: typeof hours === "number" ? hours : 2 };
+}
+
 interface ApprovalCardProps {
   nativeDelivery?: NativePermissionDelivery;
   elicitationId: string;
@@ -451,6 +459,7 @@ export function ApprovalCard({
   // Persistent "don't ask again" affordance: label by the WebFetch
   // domain when present, else the tool name. Drives the third binary
   // button and the responded-state pill.
+  const messagingGrant = castMessagingGrant(requestedSchema["x-messaging-grant"]);
   const rememberTarget = rememberScope ? (rememberScope.host ?? rememberScope.tool) : null;
   // Tooltip spelling out the scope — the tool-wide case (no host) is a
   // broad grant (every call to the tool), so make that explicit rather
@@ -584,6 +593,30 @@ export function ApprovalCard({
           <CheckIcon className="mr-1 size-3.5" />
           Approve &amp; don't ask again for {rememberTarget}
         </Button>
+      )}
+      {messagingGrant && (
+        <>
+          <Button
+            size="sm"
+            variant="outline"
+            className={cn("h-auto min-h-8 whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+            onClick={() => submit(elicitationId, "accept", { messaging_grant: "always" })}
+            componentId="approval.messaging_grant_always"
+          >
+            <CheckIcon className="mr-1 size-3.5 shrink-0" />
+            Always allow {messagingGrant.from} → {messagingGrant.to}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className={cn("h-auto min-h-8 whitespace-normal text-left", MOBILE_CHOICE_CLASS)}
+            onClick={() => submit(elicitationId, "accept", { messaging_grant: "2h" })}
+            componentId="approval.messaging_grant_2h"
+          >
+            <CheckIcon className="mr-1 size-3.5 shrink-0" />
+            Allow {messagingGrant.from} → {messagingGrant.to} for {messagingGrant.hours} hours
+          </Button>
+        </>
       )}
       <Button
         size="sm"

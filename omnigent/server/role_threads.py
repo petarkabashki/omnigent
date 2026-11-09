@@ -1,0 +1,301 @@
+"""Role threads: a per-counterpart conversation index kept as labels on the role holder.
+
+A thread is a tag on peer messages plus ``thread.<hash>.<field>`` labels on the
+session holding the role. The transcript stays the ledger; the labels are only
+the index ``sys_thread_list`` reads, so they survive compaction and relaunch.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+from collections.abc import Mapping
+from typing import Any
+
+from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+from omnigent.entities import Conversation
+from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, ConversationStore
+
+THREAD_ROLE_LABEL = "thread.role"  # handle of the role a session held
+THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
+MAX_HOPS = 6
+HOP_RESET_SECONDS = 600  # a quiet thread starts counting hops again
+PROMOTION_MESSAGE_THRESHOLD = 20  # messages after which a thread is a promotion candidate
+THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "blocked", "done")
+COUNTERPART_MAX_LEN = 200
+
+_INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z]+)")
+_THREAD_TAG = re.compile(r"^\[Message from [^\n]*?\] \[thread ([^\]\n]+)\]\n", re.ASCII)
+_URGENT_STATES = {"blocked": 0, "waiting_on_us": 1}
+
+
+def thread_hash(counterpart: str) -> str:
+    """Short stable label-key segment for a counterpart (keeps keys under 128 chars)."""
+    return hashlib.sha256(counterpart.encode()).hexdigest()[:12]
+
+
+def _label(counterpart: str, field: str) -> str:
+    return f"thread.{thread_hash(counterpart)}.{field}"
+
+
+def validate_counterpart(value: object) -> str:
+    """A counterpart key that is safe to put in a header and a label value."""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > COUNTERPART_MAX_LEN
+        or any(char in value for char in "[]\n\r")
+    ):
+        raise OmnigentError(
+            "Provide a counterpart handle such as 'project/Role'", code=ErrorCode.INVALID_INPUT
+        )
+    return value.strip()
+
+
+def holds_role(session: Conversation) -> bool:
+    """Whether the session currently holds a role."""
+    return bool(session.labels.get(ALIAS_LABEL_KEY))
+
+
+def inbound_thread_key(source: Conversation, sender_handle: str | None) -> str:
+    """The sender's handle, or the owner-thread it speaks for, else ``session:<id>``."""
+    return source.labels.get(THREAD_OF_LABEL) or sender_handle or f"session:{source.id}"
+
+
+def preview(text: object) -> str:
+    """One-line summary that fits a label value."""
+    line = " ".join(str(text).split())
+    return line if len(line) <= LABEL_VALUE_MAX_LEN else line[: LABEL_VALUE_MAX_LEN - 1] + "…"
+
+
+def thread_index(labels: Mapping[str, str]) -> list[dict[str, Any]]:
+    """Thread rows from a holder's labels, urgent first, then most recent."""
+    grouped: dict[str, dict[str, str]] = {}
+    for key, value in labels.items():
+        match = _INDEX_LABEL.fullmatch(key)
+        if match:
+            grouped.setdefault(match.group(1), {})[match.group(2)] = value
+    rows = []
+    for fields in grouped.values():
+        if "cp" not in fields:
+            continue
+        messages, unread = _to_int(fields.get("n")), _to_int(fields.get("unread"))
+        rows.append(
+            {
+                "counterpart": fields["cp"],
+                "state": fields.get("state", "open"),
+                "last_message_id": fields.get("last"),
+                "unread": unread,
+                "messages": messages,
+                "summary": fields.get("sum", ""),
+                "updated_at": _to_int(fields.get("at")),
+                "promotion_candidate": messages >= PROMOTION_MESSAGE_THRESHOLD,
+            }
+        )
+    rows.sort(key=lambda row: -row["updated_at"])
+    rows.sort(key=lambda row: _URGENT_STATES.get(row["state"], 2))
+    return rows
+
+
+def _to_int(value: str | None) -> int:
+    try:
+        return int(value or 0)
+    except ValueError:
+        return 0
+
+
+def _row_fields(labels: Mapping[str, str], counterpart: str) -> dict[str, str]:
+    prefix = f"thread.{thread_hash(counterpart)}."
+    return {key[len(prefix) :]: value for key, value in labels.items() if key.startswith(prefix)}
+
+
+def next_hops(sender: Conversation, counterpart: str, *, now: int | None = None) -> int:
+    """Hop count for a message from a role holder to ``counterpart``; refuses past the cap."""
+    fields = _row_fields(sender.labels, counterpart)
+    stamp = now if now is not None else int(time.time())
+    fresh = stamp - _to_int(fields.get("at")) <= HOP_RESET_SECONDS
+    hops = (_to_int(fields.get("hops")) if fresh else 0) + 1
+    if hops > MAX_HOPS:
+        raise OmnigentError(
+            f"Thread loop guard: {MAX_HOPS} role-to-role hops with {counterpart} without a "
+            "pause. Stop replying and ask the owner.",
+            code=ErrorCode.CONFLICT,
+        )
+    return hops
+
+
+def record_inbound(
+    store: ConversationStore,
+    holder: Conversation,
+    counterpart: str,
+    holder_handle: str | None,
+    message_id: str | None,
+    text: object,
+    hops: int,
+    *,
+    keep_state: bool = False,
+    now: int | None = None,
+) -> bool:
+    """Update the holder's index for a delivered message; ``False`` for a duplicate id.
+
+    ``keep_state`` leaves state and summary as the thread's side chat noted them.
+    """
+    fields = _row_fields(store.get_conversation(holder.id).labels, counterpart)  # type: ignore[union-attr]
+    if message_id and fields.get("last") == message_id:
+        return False
+    updates = {
+        _label(counterpart, "cp"): counterpart,
+        _label(counterpart, "state"): "waiting_on_us",
+        _label(counterpart, "unread"): str(_to_int(fields.get("unread")) + 1),
+        _label(counterpart, "n"): str(_to_int(fields.get("n")) + 1),
+        _label(counterpart, "sum"): preview(text),
+        _label(counterpart, "hops"): str(hops),
+        _label(counterpart, "at"): str(now if now is not None else int(time.time())),
+    }
+    if keep_state:
+        del updates[_label(counterpart, "state")], updates[_label(counterpart, "sum")]
+    if message_id:
+        updates[_label(counterpart, "last")] = message_id
+    if holder_handle:
+        updates[THREAD_ROLE_LABEL] = holder_handle
+    store.set_labels(holder.id, updates)
+    return True
+
+
+def record_outbound(
+    store: ConversationStore,
+    sender: Conversation,
+    counterpart: str,
+    sender_handle: str | None,
+    message_id: str | None,
+    text: object,
+    hops: int,
+    *,
+    now: int | None = None,
+) -> None:
+    """A role holder wrote to ``counterpart``: waiting on them, nothing unread."""
+    fields = _row_fields(store.get_conversation(sender.id).labels, counterpart)  # type: ignore[union-attr]
+    updates = {
+        _label(counterpart, "cp"): counterpart,
+        _label(counterpart, "state"): "waiting_on_them",
+        _label(counterpart, "unread"): "0",
+        _label(counterpart, "n"): str(_to_int(fields.get("n")) + 1),
+        _label(counterpart, "sum"): preview(f"sent: {text}"),
+        _label(counterpart, "hops"): str(hops),
+        _label(counterpart, "at"): str(now if now is not None else int(time.time())),
+    }
+    if message_id:
+        updates[_label(counterpart, "last")] = message_id
+    if sender_handle:
+        updates[THREAD_ROLE_LABEL] = sender_handle
+    store.set_labels(sender.id, updates)
+
+
+def note_thread(
+    store: ConversationStore,
+    holder: Conversation,
+    counterpart: str,
+    *,
+    state: str | None,
+    summary: str | None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Set a thread's state and/or summary on the holder; returns the thread's row."""
+    if state is not None and state not in THREAD_STATES:
+        raise OmnigentError(
+            f"state must be one of {', '.join(THREAD_STATES)}", code=ErrorCode.INVALID_INPUT
+        )
+    updates = {
+        _label(counterpart, "cp"): counterpart,
+        _label(counterpart, "at"): str(now if now is not None else int(time.time())),
+    }
+    if state is not None:
+        updates[_label(counterpart, "state")] = state
+        if state in ("done", "waiting_on_them"):
+            updates[_label(counterpart, "unread")] = "0"
+    if summary is not None:
+        updates[_label(counterpart, "sum")] = preview(summary)
+    store.set_labels(holder.id, updates)
+    labels = store.get_conversation(holder.id).labels  # type: ignore[union-attr]
+    return next(row for row in thread_index(labels) if row["counterpart"] == counterpart)
+
+
+def thread_of_header(text: str) -> str | None:
+    """The thread key a delivered message header carries, if any."""
+    match = _THREAD_TAG.match(text)
+    return match.group(1) if match else None
+
+
+def thread_history(
+    store: ConversationStore,
+    holder: Conversation,
+    counterpart: str,
+    *,
+    user_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Newest ``limit`` inbound messages tagged with the thread, across all role holders.
+
+    Sessions that held the role are those carrying ``thread.role`` for its handle,
+    so the history follows the role, not the current session.
+    """
+    role = holder.labels.get(THREAD_ROLE_LABEL)
+    sessions = {holder.id: holder}
+    if role:
+        after: str | None = None
+        for _ in range(20):
+            page = store.list_conversations(
+                limit=100,
+                after=after,
+                owned_by=user_id,
+                has_label=THREAD_ROLE_LABEL,
+                include_archived=True,
+                kind=None,
+            )
+            for session in page.data:
+                if session.labels.get(THREAD_ROLE_LABEL) == role:
+                    sessions.setdefault(session.id, session)
+            if not page.has_more:
+                break
+            after = page.last_id
+    found: list[dict[str, Any]] = []
+    for session_id in sessions:
+        cursor: str | None = None
+        for _ in range(20):
+            page = store.list_items(session_id, limit=100, after=cursor, type="message")
+            for item in page.data:
+                text = _item_text(item.data)
+                if text is not None and thread_of_header(text) == counterpart:
+                    found.append(_history_row(session_id, item.id, item.created_at, text))
+            if not page.has_more:
+                break
+            cursor = page.last_id
+    found.sort(key=lambda row: row["created_at"])
+    return found[-limit:]
+
+
+def _item_text(data: Any) -> str | None:
+    content = getattr(data, "content", None)
+    if not isinstance(content, list):
+        return None
+    parts = [part.get("text") for part in content if isinstance(part, dict)]
+    text = "".join(part for part in parts if isinstance(part, str))
+    return text or None
+
+
+_MESSAGE_ID = re.compile(r"message (msg_[0-9a-f]+)")
+
+
+def _history_row(session_id: str, item_id: str, created_at: int, text: str) -> dict[str, Any]:
+    header, _, body = text.partition("\n")
+    found = _MESSAGE_ID.search(header)
+    return {
+        "session_id": session_id,
+        "item_id": item_id,
+        "message_id": found.group(1) if found else None,
+        "created_at": created_at,
+        "header": header,
+        "text": body[:2000],
+    }

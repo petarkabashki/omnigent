@@ -1890,3 +1890,137 @@ async def test_forged_agent_call_cannot_skip_approval_or_touch_another_session(
     assert (own.status_code, other.status_code) == (403, 403)
     assert _alias_of(db_uri, source) is None and _alias_of(db_uri, target) is None
     assert [asked[0] for asked in owner_verdicts["asked"]] == [source["id"]]
+
+
+async def _tool(client, session, name, **arguments):
+    return json.loads(
+        await execute_tool(
+            tool_name=name,
+            arguments=json.dumps(arguments),
+            server_client=client,
+            conversation_id=session["id"],
+        )
+    )
+
+
+async def test_role_threads_index_history_guard_and_owner_thread(auth_client, peers, db_uri):
+    architect, product, _ = peers
+    other = await _create_session_as(auth_client, "", "alice")
+    for session in (product, other):
+        _bind_runner(db_uri, session["id"])
+    for session, alias in ((architect, "Architect"), (product, "Product")):
+        assert (
+            await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        ).status_code == 200
+
+    # Delivery tags the thread and indexes it on the holder; an unroled sender is session:<id>.
+    assert (await _send(auth_client, architect, product, "Plan the API")).get("queued") is True
+    assert (await _send(auth_client, other, product, "Hello from nowhere")).get("queued") is True
+    items = (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+    assert "message msg_" in items and "] [thread /Architect]" in items
+    assert f"[thread session:{other['id']}]" in items
+    threads = (await _tool(auth_client, product, "sys_thread_list"))["threads"]
+    rows = {row["counterpart"]: row for row in threads}
+    assert rows["/Architect"]["state"] == "waiting_on_us" and rows["/Architect"]["unread"] == 1
+    assert rows["/Architect"]["summary"] == "Plan the API"
+    assert rows["/Architect"]["promotion_candidate"] is False
+    assert set(rows) == {"/Architect", f"session:{other['id']}"}
+    sent = (await _tool(auth_client, architect, "sys_thread_list"))["threads"]
+    assert [(r["counterpart"], r["state"]) for r in sent] == [("/Product", "waiting_on_them")]
+
+    # A reply marks the thread read and waiting on them; history reads it by tag.
+    assert (await _send(auth_client, product, architect, "Draft ready")).get("queued") is True
+    rows = {
+        r["counterpart"]: r
+        for r in (await _tool(auth_client, product, "sys_thread_list"))["threads"]
+    }
+    assert rows["/Architect"]["state"] == "waiting_on_them" and rows["/Architect"]["unread"] == 0
+    history = await _tool(auth_client, product, "sys_thread_history", counterpart="/Architect")
+    assert [m["text"] for m in history["messages"]] == ["Plan the API"]
+    assert history["messages"][0]["message_id"].startswith("msg_")
+
+    # History follows the role to a new holder session.
+    successor = await _create_session_as(auth_client, "", "alice")
+    _bind_runner(db_uri, successor["id"])
+    store = SqlAlchemyConversationStore(db_uri)
+    store.set_labels(successor["id"], {"thread.role": "/Product"})
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    moved = await _tool(auth_client, successor, "sys_thread_history", counterpart="/Architect")
+    assert [m["text"] for m in moved["messages"]] == ["Plan the API"]
+    assert moved["messages"][0]["session_id"] == product["id"]
+
+    # A duplicate message_id is acknowledged once and delivered once.
+    body = {
+        "type": "session_message",
+        "data": {"message": "Once", "message_id": "msg_" + "a" * 32},
+    }
+    event_headers = {"X-Omnigent-Orchestration-Source": architect["id"]}
+    first = await auth_client.post(
+        f"/v1/sessions/{successor['id']}/events", json=body, headers=event_headers
+    )
+    again = await auth_client.post(
+        f"/v1/sessions/{successor['id']}/events", json=body, headers=event_headers
+    )
+    assert first.json()["queued"] is True and again.json().get("duplicate") is True
+    assert (await auth_client.get(f"/v1/sessions/{successor['id']}/items")).text.count("Once") == 1
+
+    # Role-to-role ping-pong stops at the hop cap.
+    pair = (architect, successor)
+    results = [
+        await _send(auth_client, pair[n % 2], pair[(n + 1) % 2], f"ping {n}") for n in range(8)
+    ]
+    refused_at = next(n for n, r in enumerate(results) if not r.get("queued"))
+    assert 0 < refused_at < 6 and all("loop guard" in json.dumps(r) for r in results[refused_at:])
+
+    # sys_thread_note validates state and truncates the summary to a label.
+    noted = await _tool(
+        auth_client,
+        successor,
+        "sys_thread_note",
+        counterpart="/Architect",
+        state="done",
+        summary="x" * 900,
+    )
+    assert noted["thread"]["state"] == "done" and len(noted["thread"]["summary"]) == 256
+    assert (
+        "state must be one of"
+        in (
+            await _tool(
+                auth_client, successor, "sys_thread_note", counterpart="/Architect", state="bogus"
+            )
+        )["detail"]
+    )
+
+    # An owner-started thread is a labelled side chat; its note reaches the holder.
+    opened = await auth_client.post(
+        f"/v1/sessions/{successor['id']}/fork",
+        json={"side_chat": True, "thread": "/Bench", "title": "Thread: /Bench"},
+    )
+    assert opened.status_code == 201, opened.text
+    side = opened.json()
+    _bind_runner(db_uri, side["id"])
+    labels = store.get_conversation(side["id"]).labels
+    assert labels["thread.of"] == "/Bench" and not [
+        k for k in labels if k.startswith("thread.") and k != "thread.of"
+    ]
+    assert {
+        r["counterpart"]: r["state"]
+        for r in (await _tool(auth_client, successor, "sys_thread_list"))["threads"]
+    }["/Bench"] == "open"
+    note = await _tool(
+        auth_client, side, "sys_thread_note", state="blocked", summary="Needs the schema"
+    )
+    assert note["notified"]["queued"] is True
+    assert (
+        "[thread /Bench]" in (await auth_client.get(f"/v1/sessions/{successor['id']}/items")).text
+    )
+    first_row = (await _tool(auth_client, successor, "sys_thread_list"))["threads"][0]
+    assert (first_row["counterpart"], first_row["state"]) == ("/Bench", "blocked")
+    # Threads need a role, and an unroled session cannot open one.
+    refused = await auth_client.post(
+        f"/v1/sessions/{other['id']}/fork", json={"side_chat": True, "thread": "/Bench"}
+    )
+    assert refused.status_code == 400

@@ -104,6 +104,14 @@ describe("detectNewElicitations", () => {
     };
   }
 
+  it("detects a session newly flagged as awaiting input", () => {
+    const prev = new Map([["a", 0]]);
+    const flagged = { ...convE("a", 0), labels: { "omnigent.awaiting_input": "Should I push?" } };
+    expect(detectNewElicitations(prev, [flagged]).map((c) => c.id)).toEqual(["a"]);
+    // Already flagged on the previous snapshot -> steady, no new notification.
+    expect(detectNewElicitations(buildElicitationMap([flagged]), [flagged])).toEqual([]);
+  });
+
   it("detects a 0 -> 1 increase (agent newly asks for input)", () => {
     const prev = new Map([["a", 0]]);
     // Previous count 0, now 1 -> a genuine new prompt, must fire.

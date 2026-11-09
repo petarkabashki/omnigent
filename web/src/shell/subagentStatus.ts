@@ -4,6 +4,7 @@
 // classify an agent's activity and color its status dot from here.
 
 import type { ChildSessionInfo } from "@/hooks/useChildSessions";
+import { needsResponse } from "@/lib/awaitingInput";
 
 // Collapsed activity of an agent, shared by the main row (derived from the
 // parent session's snapshot status) and the child rows (derived from
@@ -94,7 +95,7 @@ export function childStatus(child: ChildSessionInfo): AgentStatus {
   // elicitation is still "running" its turn (the future is pending),
   // so checking ``busy`` first would hide the prompt behind a generic
   // "Working" pill — exactly the signal the user needs to act on.
-  if (child.pending_elicitations_count > 0) {
+  if (needsResponse(child)) {
     return { activity: "awaiting", label: "Needs response" };
   }
   // ``busy`` is the authoritative live flag (queued or in_progress);

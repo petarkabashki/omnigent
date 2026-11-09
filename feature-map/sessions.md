@@ -189,6 +189,15 @@ the header menu), and each place is a separate entry point.
   a third of its width, or after a quick flick, closes it; a shorter drag springs
   back. List scrolling, row taps, long-press reordering and horizontal scrollers
   keep their own touch handling.
+- `awaiting-input`: a session blocked on the user without an approval dialog
+  shows as "Needs response" like a pending approval: sidebar badge and count,
+  Inbox "Awaiting response" tab (the reason is the row preview), and an
+  immediate OS notification. The server sets label `omnigent.awaiting_input`
+  (reason, 256 chars) when a turn ends on a question or request to the user, or
+  when Claude Code's `Notification` hook reports a permission or idle prompt. It
+  clears when the user sends a message, a new turn starts, or the session is
+  archived. To try: ask an agent "End your reply by asking me which option I
+  prefer", wait for the turn to end, and check the sidebar and Inbox.
 
 ## How to get to it (user POV)
 
@@ -1170,3 +1179,23 @@ Read-only session rows for work that runs outside Omnigent, such as ag-fleet
 - Tests: `tests/server/routes/test_external_tasks.py`,
   `tests/test_python_client_external_tasks.py`,
   `web/src/components/ExternalTaskPanel.test.tsx`.
+
+## Role threads
+
+A per-counterpart conversation index for role-holding sessions. Peer messages
+carry a `[thread ...]` tag; `thread.<hash>.*` labels on the role holder keep the
+index (state, summary, hop count) across compaction and relaunch.
+
+- `GET /v1/sessions/threads` lists a session's threads;
+  `GET /v1/sessions/threads/history` reads one; `POST /v1/sessions/threads/note`
+  sets a thread's state or summary. Hops are capped, and a quiet thread resets.
+- `POST /v1/sessions/{id}/fork` `{"side_chat": true, "thread": "<handle>"}`
+  starts an owner thread with that counterpart; `thread` without `side_chat`
+  is rejected.
+- Agents use `sys_thread_list`, `sys_thread_history` and `sys_thread_note`.
+- Web: the session header menu shows "Open thread..." only when the session
+  holds a role alias. It asks for the counterpart handle and opens the side chat.
+- Tests: `test_role_threads_index_history_guard_and_owner_thread` in
+  `tests/server/integration/test_session_orchestration.py`,
+  `web/src/shell/HeaderConversationMenu.test.tsx`,
+  `web/src/lib/sessionsApi.test.ts`.

@@ -145,11 +145,21 @@ describe("settingsNavGroups", () => {
     expect(ids(false, false)).not.toContain("members");
     // Admin on an accounts deploy → all appear, grouped under "Admin".
     const accountsAdmin = settingsNavGroups(true, false, true).find((g) => g.title === "Admin");
-    expect(accountsAdmin?.items.map((i) => i.id)).toEqual(["members", "policies", "sharing"]);
+    expect(accountsAdmin?.items.map((i) => i.id)).toEqual([
+      "members",
+      "policies",
+      "messaging-rules",
+      "sharing",
+    ]);
     // Admin under OIDC (accountsEnabled false) → still appears. This is the
     // #1489 fix: OIDC previously had no admin chrome at all.
     const oidcAdmin = settingsNavGroups(false, false, true).find((g) => g.title === "Admin");
-    expect(oidcAdmin?.items.map((i) => i.id)).toEqual(["members", "policies", "sharing"]);
+    expect(oidcAdmin?.items.map((i) => i.id)).toEqual([
+      "members",
+      "policies",
+      "messaging-rules",
+      "sharing",
+    ]);
   });
 
   it("drops Members and Sharing from the Admin group in single-user mode, keeping Policies", () => {
@@ -159,7 +169,7 @@ describe("settingsNavGroups", () => {
     const singleUserAdmin = settingsNavGroups(false, false, true, true).find(
       (g) => g.title === "Admin",
     );
-    expect(singleUserAdmin?.items.map((i) => i.id)).toEqual(["policies"]);
+    expect(singleUserAdmin?.items.map((i) => i.id)).toEqual(["policies", "messaging-rules"]);
   });
 
   it("includes the Sandbox Integrations item only when a connection is enabled", () => {

@@ -845,9 +845,11 @@ export async function forkSession(
     );
     /** Mark the fork as a side chat (hidden from the left sidebar). */
     sideChat?: boolean;
+    /** Counterpart role handle; makes the side chat that role-pair's thread. */
+    thread?: string;
   } = {},
 ): Promise<Session> {
-  const { title, agentId, upToResponseId, config, sandbox, sideChat } = options;
+  const { title, agentId, upToResponseId, config, sandbox, sideChat, thread } = options;
   const body: {
     title?: string;
     agent_id?: string;
@@ -864,9 +866,13 @@ export async function forkSession(
     workspace?: string | null;
     workspaces?: string[] | null;
     side_chat?: boolean;
+    thread?: string;
   } = {};
   if (sideChat) {
     body.side_chat = true;
+  }
+  if (thread) {
+    body.thread = thread;
   }
   if (title !== undefined) {
     body.title = title;
@@ -931,12 +937,14 @@ export async function forkSession(
  * branch may belong to a previous host and must not be required to send.
  *
  * @param sourceId - The parent conversation to fork, e.g. "conv_abc123".
+ * @param options - `thread`: counterpart role handle to open a role thread with.
  * @returns The new side-chat session id.
  * @throws Error when the source is disconnected or the fork / runner launch fails.
  */
 export async function createSideChat(
   sourceId: string,
   settings?: SideChatModelSettings,
+  options: { thread?: string } = {},
 ): Promise<{ childSessionId: string }> {
   let source = await getSession(sourceId);
   if (
@@ -956,6 +964,7 @@ export async function createSideChat(
   const fork = await forkSession(sourceId, {
     title: "Side chat",
     sideChat: true,
+    thread: options.thread,
     config: settings,
   });
   if (runnerId) {

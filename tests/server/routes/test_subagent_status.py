@@ -779,3 +779,90 @@ async def test_bare_external_failure_preserves_intake_presence_before_enrichment
     assert attributes["active_response_id_at_failure"] == "resp_active"
     assert route.store.get_conversation(route.child_id) is not None
     assert common._session_status_cache[route.child_id] == "failed"
+
+
+async def _post_event(
+    route: _StatusRoute, sid: str, event_type: str, data: dict[str, Any]
+) -> None:
+    response = await route.client.post(
+        f"/v1/sessions/{sid}/events", json={"type": event_type, "data": data}
+    )
+    assert response.status_code == 202, response.text
+    await _flush_live_state()
+
+
+def _awaiting_label(route: _StatusRoute, sid: str) -> str:
+    conv = route.store.get_conversation(sid)
+    assert conv is not None
+    return conv.labels.get("omnigent.awaiting_input", "")
+
+
+def _append_message(route: _StatusRoute, sid: str, role: str, text: str) -> None:
+    block_type = "output_text" if role == "assistant" else "input_text"
+    route.store.append(
+        sid,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="resp_awaiting",
+                data=MessageData(
+                    role=role,  # type: ignore[arg-type]
+                    agent="claude-native" if role == "assistant" else None,
+                    content=[{"type": block_type, "text": text}],
+                ),
+            )
+        ],
+    )
+
+
+async def test_turn_ending_with_a_question_sets_awaiting_input_until_next_turn(
+    status_route: _StatusRoute,
+) -> None:
+    route = status_route
+    sid = route.parent_id
+    _append_message(route, sid, "assistant", "Tests pass.\n\nShould I push this?")
+    await _post_event(route, sid, "external_session_status", {"status": "idle"})
+    assert _awaiting_label(route, sid) == "Should I push this?"
+
+    await _post_event(route, sid, "external_session_status", {"status": "running"})
+    assert _awaiting_label(route, sid) == ""
+
+    _append_message(route, sid, "assistant", "Pushed.")
+    await _post_event(route, sid, "external_session_status", {"status": "idle"})
+    assert _awaiting_label(route, sid) == ""
+
+
+async def test_user_message_and_archive_clear_awaiting_input(
+    status_route: _StatusRoute, db_uri: str
+) -> None:
+    route = status_route
+    sid = route.parent_id
+    await _post_event(
+        route, sid, "external_session_awaiting_input", {"message": "Claude is waiting for you"}
+    )
+    assert _awaiting_label(route, sid) == "Claude is waiting for you"
+
+    await _post_event(
+        route, sid, "message", {"role": "user", "content": [{"type": "input_text", "text": "go"}]}
+    )
+    assert _awaiting_label(route, sid) == ""
+
+    agent_id = uuid4().hex
+    SqlAlchemyAgentStore(db_uri).create(
+        agent_id=agent_id, name="archiver", bundle_location=f"{agent_id}/bundle"
+    )
+    sid = route.store.create_conversation(agent_id=agent_id).id
+    await _post_event(route, sid, "external_session_awaiting_input", {"message": "again"})
+    response = await route.client.patch(f"/v1/sessions/{sid}", json={"archived": True})
+    assert response.status_code == 200, response.text
+    await _flush_live_state()
+    assert _awaiting_label(route, sid) == ""
+
+
+async def test_awaiting_input_event_requires_a_message(status_route: _StatusRoute) -> None:
+    route = status_route
+    response = await route.client.post(
+        f"/v1/sessions/{route.parent_id}/events",
+        json={"type": "external_session_awaiting_input", "data": {"message": " "}},
+    )
+    assert response.status_code == 400

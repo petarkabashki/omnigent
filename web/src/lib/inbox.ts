@@ -5,6 +5,7 @@
 
 import type { Comment } from "@/hooks/useComments";
 import type { Conversation } from "@/hooks/useConversations";
+import { awaitingInputReason, needsResponseCount } from "./awaitingInput";
 import type { ElicitationRequest } from "./events";
 import { parseEvent } from "./sse";
 
@@ -66,8 +67,10 @@ export function collectInboxItems(sources: InboxSource[]): InboxItem[] {
 /** A session whose agent output the viewer hasn't opened yet (the sidebar's unread dot). */
 export interface UnreadInboxItem {
   row: Conversation;
-  /** `"error"` when the unseen turn failed, otherwise `"done"`. */
-  kind: "done" | "error";
+  /** `"awaiting"` when the session asks for input, `"error"` when the unseen turn failed, else `"done"`. */
+  kind: "done" | "error" | "awaiting";
+  /** Why the session waits on the user; set for `awaiting` items. */
+  reason?: string;
 }
 
 /**
@@ -76,7 +79,8 @@ export interface UnreadInboxItem {
  * `isUnseen` is the sidebar dot's predicate (injected to keep this module
  * free of the read-state store), so both surfaces agree on what's unread.
  * Rows with pending approvals are skipped — they're already listed as
- * approval items, and one session shouldn't appear twice.
+ * approval items, and one session shouldn't appear twice. Rows flagged as
+ * awaiting input (no approval dialog) are listed as `awaiting` items, seen or not.
  */
 export function collectUnreadInboxItems(
   rows: Conversation[],
@@ -87,10 +91,14 @@ export function collectUnreadInboxItems(
       (row) =>
         !row.archived &&
         (row.pending_elicitations_count ?? 0) === 0 &&
-        isUnseen(row.id, row.updated_at, row.status),
+        (awaitingInputReason(row) !== undefined || isUnseen(row.id, row.updated_at, row.status)),
     )
     .sort((a, b) => b.updated_at - a.updated_at)
-    .map((row) => ({ row, kind: row.status === "failed" ? "error" : "done" }));
+    .map((row): UnreadInboxItem => {
+      const reason = awaitingInputReason(row);
+      if (reason) return { row, kind: "awaiting", reason };
+      return { row, kind: row.status === "failed" ? "error" : "done" };
+    });
 }
 
 /** One unseen file comment, paired with the session that owns it. */
@@ -158,7 +166,7 @@ export function sumPendingApprovals(rows: Conversation[]): number {
   let total = 0;
   for (const row of rows) {
     if (row.archived) continue;
-    total += row.pending_elicitations_count ?? 0;
+    total += needsResponseCount(row);
   }
   return total;
 }

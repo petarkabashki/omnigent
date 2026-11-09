@@ -619,6 +619,35 @@ describe("ApprovalCard — approve & don't ask again (persistent allow rule)", (
     });
   });
 
+  it("offers always / 2 hour allow for a messaging pair and sends the choice", () => {
+    const submitSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({ submitApproval: submitSpy } as Partial<
+      ReturnType<typeof useChatStore.getState>
+    >);
+
+    render(
+      <ApprovalCard
+        elicitationId="elic_msg"
+        message="no messaging rule for a/S -> b/T"
+        phase="tool_call"
+        policyName="messaging_rules"
+        contentPreview="{}"
+        requestedSchema={{ "x-messaging-grant": { from: "a/S", to: "b/T", hours: 2 } }}
+        status="pending"
+        response={null}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Always allow a\/S → b\/T/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Allow a\/S → b\/T for 2 hours/ }));
+
+    expect(submitSpy).toHaveBeenNthCalledWith(1, "elic_msg", "accept", {
+      messaging_grant: "always",
+    });
+    expect(submitSpy).toHaveBeenNthCalledWith(2, "elic_msg", "accept", { messaging_grant: "2h" });
+    expect(screen.getByRole("button", { name: /Reject/ })).toBeTruthy();
+  });
+
   it("renders the won't-ask-again label in the responded state", () => {
     render(
       <ApprovalCard

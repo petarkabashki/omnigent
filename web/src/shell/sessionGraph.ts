@@ -1,4 +1,5 @@
 import type { Conversation } from "@/hooks/useConversations";
+import { needsResponse } from "@/lib/awaitingInput";
 import { sessionStatus, type AgentActivity } from "./subagentStatus";
 import { layoutTree, NODE_WIDTH, type TreeNode } from "./subagentGraphLayout";
 
@@ -50,7 +51,7 @@ export function sessionLocation(
 }
 
 function sessionActivity(session: Conversation): { activity: AgentActivity; label: string } {
-  if ((session.pending_elicitations_count ?? 0) > 0) {
+  if (needsResponse(session)) {
     return { activity: "awaiting", label: "Needs response" };
   }
   const unbound = !session.host_id && !session.runner_id;

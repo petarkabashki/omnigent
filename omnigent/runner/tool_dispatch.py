@@ -323,6 +323,9 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_role_list",
         "sys_role_take",
         "sys_role_release",
+        "sys_thread_list",
+        "sys_thread_history",
+        "sys_thread_note",
     }
 )
 
@@ -572,6 +575,11 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
         SysSessionGetInfoTool,
         SysSessionListTool,
     )
+    from omnigent.tools.builtins.threads import (
+        SysThreadHistoryTool,
+        SysThreadListTool,
+        SysThreadNoteTool,
+    )
     from omnigent.tools.builtins.update_comment import UpdateCommentTool
 
     schemas: list[_JsonObject] = []
@@ -612,6 +620,9 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysRoleListTool,
             SysRoleTakeTool,
             SysRoleReleaseTool,
+            SysThreadListTool,
+            SysThreadHistoryTool,
+            SysThreadNoteTool,
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
@@ -5328,6 +5339,8 @@ async def _execute_session_query_tool(
         return await _session_share_via_rest(args, conversation_id, server_client, agent_spec)
     if tool_name == "sys_role_list":
         return await _role_list_via_rest(args, conversation_id, server_client)
+    if tool_name in ("sys_thread_list", "sys_thread_history", "sys_thread_note"):
+        return await _thread_via_rest(tool_name, args, conversation_id, server_client)
     if tool_name in ("sys_role_take", "sys_role_release"):
         return await _role_change_via_rest(tool_name, args, conversation_id, server_client)
     return await _session_close_via_rest(args, conversation_id, server_client)
@@ -5355,6 +5368,50 @@ async def _role_list_via_rest(
         )
     payload = resp.json()
     return json.dumps({"namespace": payload.get("namespace"), "roles": payload.get("data", [])})
+
+
+async def _thread_via_rest(
+    tool_name: str, args: _JsonObject, conversation_id: str, server_client: httpx.AsyncClient
+) -> str:
+    """Answer the role-thread tools from ``/v1/sessions/threads``.
+
+    A note from a thread side chat also sends its role holder a summary line.
+    """
+    headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    try:
+        if tool_name == "sys_thread_list":
+            resp = await server_client.get("/v1/sessions/threads", headers=headers, timeout=30.0)
+        elif tool_name == "sys_thread_history":
+            params: dict[str, str | int] = {"counterpart": str(args.get("counterpart") or "")}
+            if isinstance(args.get("limit"), int):
+                params["limit"] = args["limit"]
+            resp = await server_client.get(
+                "/v1/sessions/threads/history", params=params, headers=headers, timeout=30.0
+            )
+        else:
+            note = {k: args[k] for k in ("counterpart", "state", "summary") if k in args}
+            resp = await server_client.post(
+                "/v1/sessions/threads/note", json=note, headers=headers, timeout=30.0
+            )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if resp.status_code != 200:
+        return json.dumps(
+            {"error": f"{tool_name} returned {resp.status_code}", "detail": resp.text[:300]}
+        )
+    payload = resp.json()
+    holder_id = payload.get("notify_session_id") if tool_name == "sys_thread_note" else None
+    if holder_id:
+        from omnigent.runner.session_message import execute_message_tool
+
+        row = payload["thread"]
+        line = f"[thread note] {row['state']}: {row['summary']}"
+        payload["notified"] = json.loads(
+            await execute_message_tool(
+                {"session_id": holder_id, "message": line}, server_client, conversation_id
+            )
+        )
+    return json.dumps(payload)
 
 
 async def _role_change_via_rest(

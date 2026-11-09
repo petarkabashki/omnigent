@@ -15,6 +15,7 @@ import {
   DownloadIcon,
   GitBranchIcon,
   KeyboardIcon,
+  MessageSquareIcon,
   PaletteIcon,
   PlugIcon,
   SettingsIcon,
@@ -47,6 +48,7 @@ export type SettingsSectionId =
   | "account"
   | "members"
   | "policies"
+  | "messaging-rules"
   | "sharing"
   | "archived"
   | "cli"
@@ -65,6 +67,7 @@ const SECTION_IDS: readonly SettingsSectionId[] = [
   "account",
   "members",
   "policies",
+  "messaging-rules",
   "sharing",
   "archived",
   "cli",
@@ -163,6 +166,7 @@ export function settingsNavGroups(
     const adminItems: SettingsNavItem[] = [];
     if (!isSingleUser) adminItems.push({ id: "members", label: "Members", icon: UsersIcon });
     adminItems.push({ id: "policies", label: "Policies", icon: ShieldCheckIcon });
+    adminItems.push({ id: "messaging-rules", label: "Messaging", icon: MessageSquareIcon });
     if (!isSingleUser) adminItems.push({ id: "sharing", label: "Sharing", icon: Share2Icon });
     groups.push({ title: "Admin", items: adminItems });
   }

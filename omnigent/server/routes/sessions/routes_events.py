@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import re
 import secrets
 import time
 import weakref
@@ -83,7 +84,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.server import presence
+from omnigent.server import awaiting_input, presence
 from omnigent.server import session_pull_requests as server_prs
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -156,6 +157,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
     _EXTERNAL_PULL_REQUESTS_TYPE,
     _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
+    _EXTERNAL_SESSION_AWAITING_INPUT_TYPE,
     _EXTERNAL_SESSION_INTERRUPTED_TYPE,
     _EXTERNAL_SESSION_STATUS_TYPE,
     _EXTERNAL_SESSION_STATUS_VALUES,
@@ -203,6 +205,7 @@ from omnigent.server.routes._sessions.helpers import (
     _forward_session_change_to_runner,
     _get_runner_client,
     _get_runner_client_for_resource_access,
+    _handle_external_session_awaiting_input,
     _handle_external_session_todos,
     _is_codex_native_subagent,
     _is_devin_native_subagent,
@@ -1196,7 +1199,12 @@ def register_events_routes(
         """
         if body.type != "session_message":
             return await _dispatch_event(request, session_id, body, in_flight)
-        message_id = f"msg_{secrets.token_hex(16)}"
+        supplied = body.data.get("message_id")
+        message_id = (
+            supplied
+            if isinstance(supplied, str) and re.fullmatch(r"msg_[0-9a-f]{32}", supplied)
+            else f"msg_{secrets.token_hex(16)}"
+        )
         ack = await _dispatch_event(
             request, session_id, body, in_flight, peer_message_id=message_id
         )
@@ -1351,13 +1359,60 @@ def register_events_routes(
                 permission_store,
                 target_id=session_id,
             )
+            from omnigent.server.role_threads import (
+                THREAD_OF_LABEL,
+                holds_role,
+                inbound_thread_key,
+                next_hops,
+                record_inbound,
+                record_outbound,
+            )
             from omnigent.server.session_aliases import session_handle
             from omnigent.server.session_orchestration import orchestration_message
 
             sender_handle = await asyncio.to_thread(session_handle, source, project_store, user_id)
+            peer_text = body.data.get("message")
+            thread_key = None
+            target_handle: str | None = None
+            hops = 0
+            if holds_role(source) or holds_role(conv):
+                target_handle = await asyncio.to_thread(
+                    session_handle, conv, project_store, user_id
+                )
+                if holds_role(source):
+                    hops = next_hops(source, target_handle or f"session:{conv.id}")
+            if holds_role(conv):
+                thread_key = inbound_thread_key(source, sender_handle)
             body = orchestration_message(
-                source.id, body.data.get("message"), sender_handle, message_id=peer_message_id
+                source.id,
+                peer_text,
+                sender_handle,
+                message_id=peer_message_id,
+                thread=thread_key,
             )
+            if thread_key is not None and not await asyncio.to_thread(
+                record_inbound,
+                conversation_store,
+                conv,
+                thread_key,
+                target_handle,
+                peer_message_id,
+                peer_text,
+                hops or 1,
+                keep_state=THREAD_OF_LABEL in source.labels,
+            ):
+                return {"queued": False, "duplicate": True}
+            if holds_role(source):
+                await asyncio.to_thread(
+                    record_outbound,
+                    conversation_store,
+                    source,
+                    target_handle or f"session:{conv.id}",
+                    sender_handle,
+                    peer_message_id,
+                    peer_text,
+                    hops,
+                )
         native_shell_authorized = False
         if (
             body.type == "message"
@@ -1483,6 +1538,7 @@ def register_events_routes(
             _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
             _EXTERNAL_SESSION_TITLE_TYPE,
             _EXTERNAL_SESSION_TODOS_TYPE,
+            _EXTERNAL_SESSION_AWAITING_INPUT_TYPE,
             _EXTERNAL_SUBAGENT_START_TYPE,
             _EXTERNAL_ACP_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -1560,6 +1616,8 @@ def register_events_routes(
             except ValueError as exc:
                 raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
         if body.type == "message" and body.data.get("role", "user") == "user":
+            if conv.labels.get(awaiting_input.AWAITING_INPUT_LABEL_KEY):
+                awaiting_input.schedule_clear(session_id)
             from omnigent.harnesses.claude_native.bridge import is_auth_slash_command
 
             if is_auth_slash_command(_extract_user_text_from_event(body)) and (
@@ -3074,6 +3132,9 @@ def register_events_routes(
                 body,
                 conversation_store,
             )
+            return {"queued": False}
+        if body.type == _EXTERNAL_SESSION_AWAITING_INPUT_TYPE:
+            await _handle_external_session_awaiting_input(session_id, body, conversation_store)
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_TODOS_TYPE:
             await _handle_external_session_todos(session_id, body, conversation_store)

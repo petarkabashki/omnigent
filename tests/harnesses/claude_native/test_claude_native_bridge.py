@@ -3965,6 +3965,11 @@ def test_augment_claude_args_injects_mcp_and_hooks(tmp_path: Path) -> None:
         "omnigent.harnesses.claude_native.hook"
         in settings["hooks"]["PreCompact"][0]["hooks"][0]["command"]
     )
+    # ``Notification`` reports a permission or idle prompt as awaiting input.
+    assert (
+        "omnigent.harnesses.claude_native.hook"
+        in settings["hooks"]["Notification"][0]["hooks"][0]["command"]
+    )
     # No built-in tools are disabled anymore: ``AskUserQuestion`` and
     # ``ExitPlanMode`` both surface through the standard PermissionRequest
     # elicitation card (question answers ride back via ``updatedInput``),
@@ -4013,7 +4018,7 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
         for hook in entry["hooks"]
         if "/venv/bin/python" in hook["command"]
     ]
-    assert len(python_commands) == 19
+    assert len(python_commands) == 20
     expected_tmpdir = f"env TMPDIR={shlex.quote(str(runner_tmpdir))}"
     assert all(expected_tmpdir in command for command in python_commands)
 

@@ -11,6 +11,7 @@
 // unarchiving diffs against real prior state, not a phantom transition.
 
 import type { Conversation } from "@/hooks/useConversations";
+import { needsResponse, needsResponseCount } from "@/lib/awaitingInput";
 
 // Statuses that mean "the agent stopped working and is waiting on the
 // user" — the moment worth surfacing. "running" is excluded (still
@@ -48,11 +49,11 @@ export function detectIdleTransitions(
   });
 }
 
-/** Snapshot of each conversation's pending-elicitation count, keyed by id. */
+/** Snapshot of each conversation's outstanding-prompt count (approvals + awaiting input), keyed by id. */
 export function buildElicitationMap(conversations: Conversation[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const conversation of conversations) {
-    map.set(conversation.id, conversation.pending_elicitations_count ?? 0);
+    map.set(conversation.id, needsResponseCount(conversation));
   }
   return map;
 }
@@ -73,7 +74,7 @@ export function detectNewElicitations(
 ): Conversation[] {
   return conversations.filter((conversation) => {
     if (conversation.archived) return false;
-    const current = conversation.pending_elicitations_count ?? 0;
+    const current = needsResponseCount(conversation);
     const prior = previous.get(conversation.id);
     return prior !== undefined && current > prior;
   });
@@ -116,7 +117,7 @@ export function computeUnreadBadgeIds(
   for (const conversation of conversations) {
     if (conversation.archived) continue;
     if (windowFocused && conversation.id === activeId) continue;
-    const awaiting = (conversation.pending_elicitations_count ?? 0) > 0;
+    const awaiting = needsResponse(conversation);
     if (awaiting || isUnseen(conversation.id, conversation.updated_at, conversation.status)) {
       unread.add(conversation.id);
     }

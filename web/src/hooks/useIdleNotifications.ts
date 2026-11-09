@@ -6,8 +6,8 @@ import { useLoadedConversations } from "@/hooks/useSidebarData";
 // Notifications fire on two "attention" TRANSITIONS, diffed against the
 // previous snapshot:
 //   * a turn finishing — status `running` -> `idle`/`failed`
-//   * a new elicitation — `pending_elicitations_count` increased (the agent
-//     is asking the user for input)
+//   * a new elicitation — `pending_elicitations_count` increased or the server
+//     flagged `omnigent.awaiting_input` (the agent is asking the user for input)
 //
 // A turn-end is DEFERRED by a short settle window. Agents that work in steps
 // emit a `running` -> `idle` edge per step and then resume, so each step would
@@ -50,6 +50,7 @@ import {
   onOpenPath,
   setBadgeCount,
 } from "@/lib/nativeBridge";
+import { awaitingInputReason, needsResponse } from "@/lib/awaitingInput";
 import { fetchLastAssistantText } from "@/lib/lastAssistantText";
 import {
   buildElicitationMap,
@@ -373,7 +374,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
           clearTimeout(pending);
           timers.delete(conversation.id);
         }
-        notify(conversation, ELICITATION_BODY, navigate);
+        notify(conversation, awaitingInputReason(conversation) ?? ELICITATION_BODY, navigate);
       }
     }
   }, [data, navigate, activeConversationId]);
@@ -410,9 +411,7 @@ function badgeActivationFor(
   // reads "Nothing waiting on you". Fall back to the session list —
   // ?sidebar=open so phone-width shells (sidebar closed by default) actually
   // show it instead of a bare composer (see AppShell).
-  const anyAwaiting = conversations.some(
-    (c) => ids.has(c.id) && (c.pending_elicitations_count ?? 0) > 0,
-  );
+  const anyAwaiting = conversations.some((c) => ids.has(c.id) && needsResponse(c));
   return {
     navigatePath: anyAwaiting ? "/inbox" : "/?sidebar=open",
     body: `${ids.size} sessions need your attention`,

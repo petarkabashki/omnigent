@@ -57,6 +57,7 @@ import {
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
+  MessageCircleQuestionIcon,
   HandIcon,
   InboxIcon,
   Loader2Icon,
@@ -316,7 +317,7 @@ export function InboxPage() {
 
   const visibleApprovals = showApprovals ? items : [];
   const visibleComments = showUnread ? commentInbox.items : [];
-  const visibleUnread = showUnread ? unreadItems : [];
+  const visibleUnread = showUnread ? unreadItems : unreadItems.filter((i) => i.kind === "awaiting");
   const visibleAutomations = showUnread ? automationInbox.items : [];
   const visibleCount =
     visibleApprovals.length +
@@ -648,9 +649,11 @@ export function InboxPage() {
     const { item } = entry;
     const sessionId = item.row.id;
     const isError = item.kind === "error";
+    const isAwaiting = item.kind === "awaiting";
     const previewQuery = previewBySession.get(sessionId);
     const output = previewQuery?.data ?? undefined;
-    const preview = output?.preview;
+    // An awaiting session leads with what it asks, not its latest output.
+    const preview = item.reason ?? output?.preview;
     const markRead = () => {
       // Drop the toggle so a later reply re-surfaces the row collapsed, and
       // the reply state so it can't come back stale with the row.
@@ -745,11 +748,13 @@ export function InboxPage() {
         dataKind={item.kind}
         tile={
           <KindTile
-            icon={isError ? CircleAlertIcon : CircleCheckIcon}
-            tone={isError ? "red" : "gray"}
+            icon={
+              isError ? CircleAlertIcon : isAwaiting ? MessageCircleQuestionIcon : CircleCheckIcon
+            }
+            tone={isError ? "red" : isAwaiting ? "yellow" : "gray"}
           />
         }
-        kindLabel={isError ? "Error" : "Done"}
+        kindLabel={isError ? "Error" : isAwaiting ? "Needs response" : "Done"}
         title={title}
         preview={preview}
         at={entry.at}

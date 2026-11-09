@@ -67,6 +67,11 @@ from omnigent.tools.builtins.spawn import (
     SysSessionSendTool,
     SysSessionShareTool,
 )
+from omnigent.tools.builtins.threads import (
+    SysThreadHistoryTool,
+    SysThreadListTool,
+    SysThreadNoteTool,
+)
 from omnigent.tools.builtins.timer import (
     SysTimerCancelTool,
     SysTimerSetTool,
@@ -106,6 +111,9 @@ __all__ = [
     "SysSessionRenameTool",
     "SysSessionSendTool",
     "SysSessionShareTool",
+    "SysThreadHistoryTool",
+    "SysThreadListTool",
+    "SysThreadNoteTool",
     "SysTimerCancelTool",
     "SysTimerSetTool",
     "UpdateCommentTool",

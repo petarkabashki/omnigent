@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   markUnread: vi.fn(),
   fork: vi.fn(),
   exportTranscript: vi.fn(),
+  createSideChat: vi.fn(),
   triggerDownload: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -74,7 +75,11 @@ vi.mock("@/hooks/useUnseenConversations", async (importOriginal) => {
 
 vi.mock("@/lib/sessionsApi", async (importOriginal) => {
   const actual = await importOriginal<typeof SessionsApiModule>();
-  return { ...actual, exportSessionTranscript: mocks.exportTranscript };
+  return {
+    ...actual,
+    exportSessionTranscript: mocks.exportTranscript,
+    createSideChat: mocks.createSideChat,
+  };
 });
 
 vi.mock("@/hooks/useFileContent", async (importOriginal) => {
@@ -189,6 +194,7 @@ describe("HeaderConversationMenu", () => {
     expect(screen.getByTestId("header-move-to-project")).toBeInTheDocument();
     expect(screen.getByTestId("header-rename-conversation")).toBeInTheDocument();
     expect(screen.queryByTestId("header-release-role")).toBeNull();
+    expect(screen.queryByTestId("header-open-thread")).toBeNull();
   });
 
   it("releases the role from the session menu", async () => {
@@ -198,6 +204,24 @@ describe("HeaderConversationMenu", () => {
     openMenu();
     fireEvent.click(screen.getByTestId("header-release-role"));
     await waitFor(() => expect(releaseSessionRole).toHaveBeenCalledWith(CONVERSATION.id));
+  });
+
+  it("opens a role thread with the entered counterpart handle", async () => {
+    mocks.createSideChat.mockResolvedValueOnce({ childSessionId: "conv-thread" });
+    renderMenu({
+      conversation: { ...CONVERSATION, labels: { "omnigent.alias": "Product" } },
+    });
+    openMenu();
+    fireEvent.click(screen.getByTestId("header-open-thread"));
+    fireEvent.change(screen.getByTestId("header-open-thread-input"), {
+      target: { value: " Architect " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    await waitFor(() =>
+      expect(mocks.createSideChat).toHaveBeenCalledWith(CONVERSATION.id, undefined, {
+        thread: "Architect",
+      }),
+    );
   });
 
   it("opens from the keyboard and focuses the first action", () => {

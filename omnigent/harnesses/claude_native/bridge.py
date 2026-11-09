@@ -1174,6 +1174,7 @@ class ClaudeHookRecord:
     failure_category: str | None = None
     failure_message: str | None = None
     failure_context: FailureContext | None = None
+    awaiting_input_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2662,6 +2663,10 @@ def build_hook_settings(
         # signal is ``SessionStart`` with ``source == "compact"`` (no
         # dedicated PreCompact-done hook exists), already wired above.
         "PreCompact": [{"hooks": [hook]}],
+        # ``Notification`` reports Claude waiting on the user (a permission
+        # prompt, or an idle prompt); the forwarder flags the session as
+        # awaiting input.
+        "Notification": [{"hooks": [hook]}],
         # ``MessageDisplay`` fires per streamed assistant-text chunk.
         # Routed to the dedicated fast appender so the forwarder can
         # publish live token deltas to the web UI.
@@ -4360,6 +4365,14 @@ def _hook_record_from_jsonl_record(record: _JsonlRecord) -> ClaudeHookRecord:
         failure_message = (
             _display_text(raw_details, is_api_error=True) if raw_details is not None else None
         )
+    awaiting_input_message: str | None = None
+    if event_name == "Notification" and isinstance(payload, dict):
+        fallback = _AWAITING_INPUT_NOTIFICATIONS.get(str(payload.get("notification_type")))
+        if fallback is not None:
+            awaiting_input_message = (
+                _bounded_hook_text(payload.get("message"), _AWAITING_INPUT_MESSAGE_MAX_CHARS)
+                or fallback
+            )
     return ClaudeHookRecord(
         event_cursor=record.line_number,
         byte_offset=record.next_byte_offset,
@@ -4407,8 +4420,17 @@ def _hook_record_from_jsonl_record(record: _JsonlRecord) -> ClaudeHookRecord:
         failure_category=failure_category,
         failure_message=failure_message,
         failure_context=failure_context,
+        awaiting_input_message=awaiting_input_message,
     )
 
+
+# ``Notification`` types meaning Claude is blocked on the user, with a fallback reason.
+_AWAITING_INPUT_NOTIFICATIONS = {
+    "permission_prompt": "Claude needs your permission",
+    "idle_prompt": "Claude is waiting for your input",
+    "elicitation_dialog": "Claude is asking you a question",
+}
+_AWAITING_INPUT_MESSAGE_MAX_CHARS = 256
 
 # Bounds on ``StopFailure`` text copied into the failed status edge.
 _FAILURE_CATEGORY_MAX_CHARS = 100

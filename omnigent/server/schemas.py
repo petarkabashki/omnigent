@@ -2867,6 +2867,16 @@ class ClearCodexGoalResponse(BaseModel):
     cleared: bool
 
 
+class ThreadNoteRequest(BaseModel):
+    """Set a role thread's state or summary (``sys_thread_note``)."""
+
+    counterpart: str | None = Field(default=None, max_length=200)
+    state: str | None = None
+    summary: str | None = Field(default=None, max_length=2000)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SessionForkRequest(_SandboxProfileSelection):
     """
     Request body for ``POST /v1/sessions/{source_id}/fork``.
@@ -2962,6 +2972,9 @@ class SessionForkRequest(_SandboxProfileSelection):
     # it is hidden from the left sidebar (it surfaces only as a Workspace-rail
     # side-chat tab). It may share its parent's runner.
     side_chat: bool = False
+    # Opens an owner-started role thread: the side chat of a role holder speaks
+    # for this counterpart handle. Requires ``side_chat``.
+    thread: str | None = Field(default=None, max_length=200)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2985,6 +2998,9 @@ class SessionForkRequest(_SandboxProfileSelection):
             conflicting or oversized workspace selections, or ``host_id`` /
             ``sandbox_provider`` / workspace(s) without ``host_type: "managed"``.
         """
+        if self.thread is not None and not self.side_chat:
+            raise ValueError("thread requires side_chat")
+
         # Lazy import: schemas is imported by nearly every module, so
         # pulling the (FastAPI/click-importing) managed-hosts module in
         # at module scope would risk import cycles.

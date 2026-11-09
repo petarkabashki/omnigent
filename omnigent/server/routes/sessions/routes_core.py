@@ -61,6 +61,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.server import awaiting_input
 from omnigent.server import session_pull_requests as server_prs
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -231,6 +232,7 @@ from omnigent.server.schemas import (
     SessionProjectSummary,
     SessionPullRequestSummary,
     SessionResponse,
+    ThreadNoteRequest,
     UpdateSessionRequest,
 )
 from omnigent.server.session_aliases import Namespace, release_role_after_lifecycle
@@ -1937,6 +1939,91 @@ def register_core_routes(
             }
 
         return await asyncio.to_thread(_list)
+
+    def _thread_holder(
+        request: Request, user_id: str | None
+    ) -> tuple[Conversation, Conversation, str | None]:
+        """``(caller, role holder, counterpart)``; an owner-thread side chat speaks for its holder."""
+        from omnigent.server.role_threads import THREAD_OF_LABEL, holds_role
+        from omnigent.server.session_orchestration import (
+            require_orchestration_source,
+            require_owned_session,
+        )
+
+        source = require_orchestration_source(
+            request, user_id, conversation_store, permission_store
+        )
+        if permission_store is None:  # require_orchestration_source already refused this
+            raise OmnigentError("Session permissions are unavailable", code=ErrorCode.FORBIDDEN)
+        counterpart = source.labels.get(THREAD_OF_LABEL)
+        holder_id = source.labels.get(SIDE_CHAT_SOURCE_LABEL_KEY) if counterpart else source.id
+        holder = require_owned_session(
+            holder_id or source.id, user_id or "", conversation_store, permission_store
+        )
+        if not holds_role(holder):
+            raise OmnigentError(
+                "Threads belong to a session that holds a role (see sys_role_take)",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        return source, holder, counterpart
+
+    @router.get("/sessions/threads")
+    async def list_role_threads(request: Request) -> dict[str, Any]:
+        """The calling role's thread index; ``sys_thread_list`` reads this."""
+        from omnigent.server.role_threads import PROMOTION_MESSAGE_THRESHOLD, thread_index
+
+        user_id = _require_user(request, auth_provider)
+
+        def _list() -> dict[str, Any]:
+            _, holder, _ = _thread_holder(request, user_id)
+            fresh = conversation_store.get_conversation(holder.id) or holder
+            return {
+                "threads": thread_index(fresh.labels),
+                "promotion_threshold_messages": PROMOTION_MESSAGE_THRESHOLD,
+            }
+
+        return await asyncio.to_thread(_list)
+
+    @router.get("/sessions/threads/history")
+    async def role_thread_history(
+        request: Request,
+        counterpart: str = Query(...),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Messages of one thread from every session that held the role."""
+        from omnigent.server.role_threads import thread_history, validate_counterpart
+
+        user_id = _require_user(request, auth_provider)
+
+        def _history() -> dict[str, Any]:
+            _, holder, _ = _thread_holder(request, user_id)
+            key = validate_counterpart(counterpart)
+            fresh = conversation_store.get_conversation(holder.id) or holder
+            rows = thread_history(conversation_store, fresh, key, user_id=user_id, limit=limit)
+            return {"counterpart": key, "messages": rows}
+
+        return await asyncio.to_thread(_history)
+
+    @router.post("/sessions/threads/note")
+    async def note_role_thread(request: Request, body: ThreadNoteRequest) -> dict[str, Any]:
+        """Set a thread's state or summary on the role holder; ``sys_thread_note`` calls this.
+
+        A side chat opened for a thread notes its own thread; the reply names the
+        holder session so the runner can send the holder a summary line.
+        """
+        from omnigent.server.role_threads import note_thread, validate_counterpart
+
+        user_id = _require_user(request, auth_provider)
+
+        def _note() -> dict[str, Any]:
+            _, holder, bound = _thread_holder(request, user_id)
+            key = bound or validate_counterpart(body.counterpart)
+            row = note_thread(
+                conversation_store, holder, key, state=body.state, summary=body.summary
+            )
+            return {"thread": row, "notify_session_id": holder.id if bound else None}
+
+        return await asyncio.to_thread(_note)
 
     @router.get("/sessions/aliases/resolve")
     async def resolve_session_alias(
@@ -3998,6 +4085,7 @@ def register_core_routes(
         # runner). The teardown sleeps past the Undo window, then re-reads the
         # archived flag and skips if undone, so undoing keeps the runner alive.
         if body.archived is True:
+            awaiting_input.schedule_clear(session_id)
             _finish_archive(
                 session_id,
                 conversation_store,
@@ -4725,6 +4813,8 @@ def register_core_routes(
         # in generic native-wrapper UI state. Drop it whenever the agent changes.
         if switching_agent:
             dropped_label_keys_set |= agent_switch_dropped_label_keys(source.labels)
+        # The thread index and role stamp belong to the role holder, not its forks.
+        dropped_label_keys_set |= {key for key in source.labels if key.startswith("thread.")}
         dropped_label_keys: frozenset[str] = frozenset(dropped_label_keys_set)
 
         # DANGEROUS codex full-bypass. The source's bypass label is always
@@ -4748,9 +4838,26 @@ def register_core_routes(
 
         # Side chats use the source for shared-runner routing and stay hidden
         # from the sidebar while appearing in the Workspace rail.
+        opened_thread: str | None = None
         if body.side_chat:
             extra_labels[SIDE_CHAT_LABEL_KEY] = "1"
             extra_labels[SIDE_CHAT_SOURCE_LABEL_KEY] = source_id
+            if body.thread is not None:
+                # Owner-started thread: the side chat speaks for one counterpart.
+                from omnigent.server.role_threads import (
+                    THREAD_OF_LABEL,
+                    holds_role,
+                    validate_counterpart,
+                )
+
+                if not holds_role(source):
+                    raise OmnigentError(
+                        "Threads can only be opened on a session that holds a role",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                counterpart = validate_counterpart(body.thread)
+                extra_labels[THREAD_OF_LABEL] = counterpart
+                opened_thread = counterpart
 
         # A managed fork's chosen sandbox host id is born with the row, as on a
         # create: the caller routes the fork by it until its host binds, so no
@@ -4962,6 +5069,19 @@ def register_core_routes(
                 file_id_map=fork_file_id_map,
                 created_by=user_id,
             )
+            if opened_thread is not None:
+                from omnigent.server.role_threads import note_thread, thread_index
+
+                fresh = conversation_store.get_conversation(source_id) or source
+                if all(row["counterpart"] != opened_thread for row in thread_index(fresh.labels)):
+                    await asyncio.to_thread(
+                        note_thread,
+                        conversation_store,
+                        source,
+                        opened_thread,
+                        state="open",
+                        summary="Thread opened by the owner",
+                    )
         except LookupError as exc:
             await drop_unused_copy()
             raise OmnigentError(

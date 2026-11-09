@@ -25,7 +25,10 @@ function describe(state: SessionState): Visual {
   switch (state.kind) {
     case "awaiting": {
       const tooltip =
-        state.count === 1 ? "1 approval prompt waiting" : `${state.count} approval prompts waiting`;
+        state.reason ??
+        (state.count === 1
+          ? "1 approval prompt waiting"
+          : `${state.count} approval prompts waiting`);
       return {
         kind: state.kind,
         ariaLabel: tooltip,
