@@ -214,6 +214,7 @@ def usage_labels(usage: Mapping[str, Any]) -> dict[str, str]:
     """Map a runner usage sample to ``omnigent.usage.*`` label updates."""
     fields = (
         ("memory_peak_bytes", "memory_peak_bytes"),
+        ("memory_current_bytes", "memory_current_bytes"),
         ("cpu_usage_usec", "cpu_usage_usec"),
         ("oom_kill_count", "oom_kills"),
     )

@@ -300,7 +300,10 @@ async def test_oversized_pane_snapshot_is_bounded(tmp_path: Path) -> None:
 
 
 def _required_terminal_exit(
-    session_was_idle: bool, expected_close: bool = False, closed_outside_omnigent: bool = False
+    session_was_idle: bool,
+    expected_close: bool = False,
+    closed_outside_omnigent: bool = False,
+    exit_status: int | None = None,
 ) -> TerminalExitEvent:
     """Build the exit the registry publishes when the session's Claude pane dies."""
     return TerminalExitEvent(
@@ -316,6 +319,7 @@ def _required_terminal_exit(
         session_was_idle=session_was_idle,
         expected_close=expected_close,
         closed_outside_omnigent=closed_outside_omnigent,
+        exit_status=exit_status,
     )
 
 
@@ -379,6 +383,45 @@ async def test_session_killed_outside_omnigent_names_that_cause() -> None:
     assert error["code"] == "required_terminal_exited"
     assert error["title"] == TERMINAL_CLOSED_OUTSIDE_OMNIGENT.title
     assert error["message"].startswith(TERMINAL_CLOSED_OUTSIDE_OMNIGENT.title)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_status", "scope_oom_kills", "expected_code"),
+    [
+        (None, 1, "out_of_memory"),  # tmux server killed too: no status captured
+        (137, 2, "out_of_memory"),
+        (0, 1, "required_terminal_exited"),  # a clean exit is not the OOM victim
+        (137, 0, "required_terminal_exited"),
+    ],
+)
+async def test_pane_killed_by_scope_oom_fails_as_out_of_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_status: int | None,
+    scope_oom_kills: int,
+    expected_code: str,
+) -> None:
+    """A pane the OOM killer took while the runner survived reports out_of_memory."""
+    from omnigent.host import runner_scope
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.launch_failure import TERMINAL_OUT_OF_MEMORY
+
+    monkeypatch.setattr(runner_scope, "own_scope_oom_kills", lambda: scope_oom_kills)
+    _session_event_queues_ref.pop(_CONV_ID, None)
+    app = _make_app(cause="unused")
+    publish = app.state.session_resource_registry._terminal_exit_publisher
+    try:
+        publish(_required_terminal_exit(session_was_idle=False, exit_status=exit_status))
+        statuses = _failed_statuses(_CONV_ID)
+    finally:
+        _session_event_queues_ref.pop(_CONV_ID, None)
+
+    assert len(statuses) == 1
+    error = statuses[0]["error"]
+    assert error["code"] == expected_code
+    assert (error.get("title") == TERMINAL_OUT_OF_MEMORY.title) == (
+        expected_code == "out_of_memory"
+    )
 
 
 @pytest.mark.asyncio

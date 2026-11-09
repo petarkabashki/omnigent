@@ -2676,7 +2676,12 @@ async def test_runner_usage_frame_writes_usage_labels_and_warns_on_new_oom(
 
     caplog.set_level("WARNING", logger="omnigent.server.app")
     _comm = await _report_runner_usage(
-        app, "runner_u", memory_peak_bytes=2048, cpu_usage_usec=77, oom_kill_count=1
+        app,
+        "runner_u",
+        memory_peak_bytes=2048,
+        memory_current_bytes=1024,
+        cpu_usage_usec=77,
+        oom_kill_count=1,
     )
     await poll_until_async(
         lambda: conv_store.get_conversation(bound.id).labels.get("omnigent.usage.oom_kills")
@@ -2684,6 +2689,7 @@ async def test_runner_usage_frame_writes_usage_labels_and_warns_on_new_oom(
 
     labels = conv_store.get_conversation(bound.id).labels
     assert labels["omnigent.usage.memory_peak_bytes"] == "2048"
+    assert labels["omnigent.usage.memory_current_bytes"] == "1024"
     assert labels["omnigent.usage.cpu_usage_usec"] == "77"
     assert labels["omnigent.usage.oom_kills"] == "1"
     assert "omnigent.usage.oom_kills" not in conv_store.get_conversation(other.id).labels
