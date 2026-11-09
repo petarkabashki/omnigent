@@ -1217,9 +1217,15 @@ index (state, summary, hop count) across compaction and relaunch.
 - Web: the sidebar lists a role session's threads under its row (urgent first,
   with unread counts). Clicking one opens the holder with that thread's side
   chat; reopening a thread reuses its side chat rather than forking another.
+  "Needs you" (`waiting_on_owner`) and "Blocked" sort first.
+- Web: the thread side chat shows your posts centred as "You" and has a Post
+  box with a To picker (Both, the holder, the counterpart; Ctrl+Enter posts).
+  The side chat's own composer below stays an aside to the holder. The hover
+  card's Post button opens the thread with the Post box focused.
 - Tests: `test_role_threads_index_history_guard_and_owner_thread` and
   `test_owner_posts_into_a_role_thread` in
   `tests/server/integration/test_session_orchestration.py`,
   `web/src/shell/HeaderConversationMenu.test.tsx`,
   `web/src/lib/sessionsApi.test.ts`, `web/src/lib/roleThreads.test.ts`,
-  `web/src/shell/RoleThreadRows.test.tsx`.
+  `web/src/shell/RoleThreadRows.test.tsx`,
+  `web/src/components/chat/RoleThreadHistory.test.tsx`.

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { roleHandlePath, roleThreadStateLabels, roleThreadsFromLabels } from "./roleThreads";
+import {
+  roleHandlePath,
+  roleThreadIsUrgent,
+  roleThreadStateLabels,
+  roleThreadStateText,
+  roleThreadsFromLabels,
+} from "./roleThreads";
 
 const ALIAS = { "omnigent.alias": "Product" };
 
@@ -22,6 +28,23 @@ describe("roleThreadsFromLabels", () => {
     expect(rows.map((row) => row.counterpart)).toEqual(["/Bench", "/Architect", "session:abc"]);
     expect(rows[0]).toMatchObject({ state: "waiting_on_us", unread: 2, summary: "Needs numbers" });
     expect(rows[1]).toMatchObject({ state: "open", unread: 0, messages: 4 });
+  });
+
+  it("puts a thread that needs the owner first, shown by name", () => {
+    const rows = roleThreadsFromLabels({
+      ...ALIAS,
+      "thread.aaaaaaaaaaaa.cp": "/Architect",
+      "thread.aaaaaaaaaaaa.state": "waiting_on_us",
+      "thread.aaaaaaaaaaaa.at": "300",
+      "thread.bbbbbbbbbbbb.cp": "/Bench",
+      "thread.bbbbbbbbbbbb.state": "waiting_on_owner",
+      "thread.bbbbbbbbbbbb.at": "100",
+    });
+    expect(rows.map((row) => row.counterpart)).toEqual(["/Bench", "/Architect"]);
+    expect(roleThreadStateText("waiting_on_owner")).toBe("Needs you");
+    expect(
+      ["waiting_on_owner", "blocked", "waiting_on_us", "open"].map(roleThreadIsUrgent),
+    ).toEqual([true, true, true, false]);
   });
 
   it("is empty for a session without a role or without a counterpart", () => {

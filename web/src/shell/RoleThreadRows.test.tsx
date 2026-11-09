@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import * as roleThreadsApi from "@/lib/roleThreads";
 import * as rolesApi from "@/lib/rolesApi";
 import * as sessionsApi from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
@@ -97,6 +98,24 @@ describe("RoleThreadRows", () => {
         parentId: "sess_product",
       }),
     );
+  });
+
+  it("opens the thread ready to post from the card's Post button", async () => {
+    const createSideChat = vi
+      .spyOn(sessionsApi, "createSideChat")
+      .mockResolvedValue({ childSessionId: "sess_thread" });
+    const focusRequest = vi.spyOn(roleThreadsApi, "requestRoleThreadPostFocus");
+    renderRows(holder({ "thread.aaaaaaaaaaaa.cp": "/Architect" }));
+
+    fireEvent.focus(screen.getByTestId("role-thread-row"));
+    const card = await screen.findByTestId("role-thread-card");
+    fireEvent.click(within(card).getByRole("button", { name: "Post" }));
+
+    expect(focusRequest).toHaveBeenCalled();
+    expect(await screen.findByTestId("holder-page")).toBeInTheDocument();
+    expect(createSideChat).toHaveBeenCalledWith("sess_product", undefined, {
+      thread: "/Architect",
+    });
   });
 
   it("shows a compact card with actions when a row is focused", async () => {

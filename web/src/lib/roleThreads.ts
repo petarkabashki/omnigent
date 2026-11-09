@@ -16,8 +16,17 @@ export interface RoleThread {
 }
 
 const INDEX_LABEL = /^thread\.([0-9a-f]{12})\.([a-z]+)$/;
-// Mirrors omnigent/server/role_threads.py: blocked, then waiting_on_us, then the rest.
-const URGENT_STATES: Record<string, number> = { blocked: 0, waiting_on_us: 1 };
+// Mirrors omnigent/server/role_threads.py: needs the owner or blocked, then our turn, then the rest.
+const URGENT_STATES: Record<string, number> = {
+  waiting_on_owner: 0,
+  blocked: 0,
+  waiting_on_us: 1,
+};
+
+/** States that call for attention in the sidebar: the state word is shown, not just its dot. */
+export function roleThreadIsUrgent(state: string): boolean {
+  return state in URGENT_STATES;
+}
 
 function toInt(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? "", 10);
@@ -60,6 +69,7 @@ const STATE_TEXT: Record<string, string> = {
   open: "Open",
   waiting_on_them: "Their turn",
   waiting_on_us: "Our turn",
+  waiting_on_owner: "Needs you",
   blocked: "Blocked",
   done: "Done",
 };
@@ -68,6 +78,7 @@ const STATE_TONE: Record<string, StateTone> = {
   open: "neutral",
   waiting_on_them: "blue",
   waiting_on_us: "amber",
+  waiting_on_owner: "yellow",
   blocked: "red",
   done: "green",
 };
@@ -81,6 +92,7 @@ const STATE_DESCRIPTION: Record<string, string> = {
   waiting_on_us: "The last message came in to us and hasn't been answered or closed.",
   waiting_on_them: "We sent the last message and expect a reply.",
   open: "Nobody owes a reply; the thread stays available.",
+  waiting_on_owner: "The roles are waiting for your answer or decision.",
   blocked: "Work can't continue until something outside this thread changes.",
   done: "The thread is finished; nothing further is expected.",
 };
@@ -117,9 +129,12 @@ export function roleThreadStateTone(state: string): StateTone {
   return STATE_TONE[state] ?? "neutral";
 }
 
-/** One message of a thread: `in` from the counterpart, `out` sent by the role. */
+/** Who wrote a thread message: `in` the counterpart, `out` the role, `owner` you. */
+export type RoleThreadDirection = "in" | "out" | "owner";
+
+/** One message of a thread, oldest first in a thread view. */
 export interface RoleThreadMessage {
-  direction: "in" | "out";
+  direction: RoleThreadDirection;
   sessionId: string;
   itemId: string;
   createdAt: number;
@@ -127,7 +142,7 @@ export interface RoleThreadMessage {
 }
 
 interface WireThreadMessage {
-  direction: "in" | "out";
+  direction: RoleThreadDirection;
   session_id: string;
   item_id: string;
   created_at: number;
@@ -152,4 +167,48 @@ export async function fetchRoleThreadMessages(
     createdAt: m.created_at,
     text: m.text,
   }));
+}
+
+/** Who an owner post goes to: both roles, only the thread's holder, or only its counterpart. */
+export type RoleThreadPostTarget = "both" | "holder" | "counterpart";
+
+/** `POST /v1/sessions/{id}/threads/post`: the owner's words, verbatim, into the thread. */
+export async function postRoleThreadMessage(
+  holderId: string,
+  counterpart: string,
+  message: string,
+  to: RoleThreadPostTarget,
+): Promise<{ messageId: string; delivered: string[] }> {
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(holderId)}/threads/post`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ counterpart, message, to }),
+    },
+  );
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  const body = (await res.json()) as { message_id: string; delivered: string[] };
+  return { messageId: body.message_id, delivered: body.delivered };
+}
+
+const POST_FOCUS_EVENT = "omnigent:role-thread-post-focus";
+let pendingPostFocus = false;
+
+/** Asks the thread composer to take focus, now or as soon as it mounts. */
+export function requestRoleThreadPostFocus(): void {
+  pendingPostFocus = true;
+  window.dispatchEvent(new Event(POST_FOCUS_EVENT));
+}
+
+/** Runs `focus` for a pending or future focus request; returns the unsubscribe. */
+export function onRoleThreadPostFocus(focus: () => void): () => void {
+  const handle = () => {
+    if (!pendingPostFocus) return;
+    pendingPostFocus = false;
+    focus();
+  };
+  handle();
+  window.addEventListener(POST_FOCUS_EVENT, handle);
+  return () => window.removeEventListener(POST_FOCUS_EVENT, handle);
 }

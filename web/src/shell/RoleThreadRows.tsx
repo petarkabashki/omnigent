@@ -9,6 +9,7 @@ import {
   MessageSquareTextIcon,
   MessagesSquareIcon,
   RotateCcwIcon,
+  SendIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,9 @@ import { relativeTime } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
 import { StateDot } from "@/components/StateDot";
 import {
+  requestRoleThreadPostFocus,
   roleHandlePath,
+  roleThreadIsUrgent,
   roleThreadStateDescription,
   roleThreadStateLabels,
   roleThreadStateText,
@@ -55,7 +58,7 @@ export function RoleThreadRows({ conversation }: { conversation: Conversation })
 function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThread }) {
   const navigate = useNavigate();
   const [opening, setOpening] = useState(false);
-  const urgent = thread.state === "blocked" || thread.state === "waiting_on_us";
+  const urgent = roleThreadIsUrgent(thread.state);
 
   const open = async () => {
     if (opening) return;
@@ -111,7 +114,15 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
           </button>
         </HoverCardTrigger>
         <HoverCardContent side="right" align="start" className="w-60 p-2">
-          <RoleThreadCard holderId={holderId} thread={thread} onOpen={() => void open()} />
+          <RoleThreadCard
+            holderId={holderId}
+            thread={thread}
+            onOpen={() => void open()}
+            onPost={() => {
+              requestRoleThreadPostFocus();
+              void open();
+            }}
+          />
         </HoverCardContent>
       </HoverCard>
     </li>
@@ -123,10 +134,12 @@ function RoleThreadCard({
   holderId,
   thread,
   onOpen,
+  onPost,
 }: {
   holderId: string;
   thread: RoleThread;
   onOpen: () => void;
+  onPost: () => void;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -193,6 +206,14 @@ function RoleThreadCard({
       <div className="flex flex-wrap gap-1 pt-0.5">
         <Button size="xs" variant="secondary" onClick={onOpen}>
           <MessagesSquareIcon aria-hidden /> Open
+        </Button>
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={onPost}
+          title="Write into the thread as yourself"
+        >
+          <SendIcon aria-hidden /> Post
         </Button>
         <Button
           size="xs"
