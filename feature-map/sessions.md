@@ -1204,13 +1204,21 @@ index (state, summary, hop count) across compaction and relaunch.
 - `POST /v1/sessions/{id}/fork` `{"side_chat": true, "thread": "<handle>"}`
   starts an owner thread with that counterpart; `thread` without `side_chat`
   is rejected.
+- `POST /v1/sessions/{id}/threads/post` `{"counterpart", "message", "to"}`
+  (owner only; `to` is `both`, `holder` or `counterpart`) delivers the owner's
+  words verbatim, headed `[Message from owner (message msg_...)] [thread K]`.
+  The thread view lists the post once with direction `owner`; a post resets
+  hops and clears `waiting_on_owner` ("Needs you") on both sides.
+- A thread side chat that messages the counterpart speaks as its holder, so
+  the reply is filed under the holder's thread on both sides.
 - Agents use `sys_thread_list`, `sys_thread_history` and `sys_thread_note`.
 - Web: the session header menu shows "Open thread..." only when the session
   holds a role alias. It asks for the counterpart handle and opens the side chat.
 - Web: the sidebar lists a role session's threads under its row (urgent first,
   with unread counts). Clicking one opens the holder with that thread's side
   chat; reopening a thread reuses its side chat rather than forking another.
-- Tests: `test_role_threads_index_history_guard_and_owner_thread` in
+- Tests: `test_role_threads_index_history_guard_and_owner_thread` and
+  `test_owner_posts_into_a_role_thread` in
   `tests/server/integration/test_session_orchestration.py`,
   `web/src/shell/HeaderConversationMenu.test.tsx`,
   `web/src/lib/sessionsApi.test.ts`, `web/src/lib/roleThreads.test.ts`,

@@ -2867,6 +2867,16 @@ class ClearCodexGoalResponse(BaseModel):
     cleared: bool
 
 
+class ThreadPostRequest(BaseModel):
+    """The owner posts into a role thread, to its holder, its counterpart, or both."""
+
+    counterpart: str = Field(max_length=200)
+    message: str = Field(min_length=1, max_length=8000)
+    to: Literal["both", "holder", "counterpart"] = "both"
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ThreadNoteRequest(BaseModel):
     """Set a role thread's state or summary (``sys_thread_note``)."""
 

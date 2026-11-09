@@ -1903,6 +1903,69 @@ async def _tool(client, session, name, **arguments):
     )
 
 
+async def test_owner_posts_into_a_role_thread(auth_client, peers, db_uri):
+    architect, product, _ = peers
+    _bind_runner(db_uri, product["id"])
+    for session, alias in ((architect, "Architect"), (product, "Product")):
+        assert (
+            await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        ).status_code == 200
+    assert (await _send(auth_client, architect, product, "Plan the API")).get("queued") is True
+    await _tool(
+        auth_client, product, "sys_thread_note", counterpart="/Architect", state="waiting_on_owner"
+    )
+
+    async def rows(session):
+        threads = (await _tool(auth_client, session, "sys_thread_list"))["threads"]
+        return {row["counterpart"]: row for row in threads}
+
+    async def post(**body):
+        return await auth_client.post(
+            f"/v1/sessions/{product['id']}/threads/post",
+            json={"counterpart": "/Architect", **body},
+        )
+
+    # A post to both sides is filed in the thread on each, and clears the wait on the owner.
+    posted = await post(message="Use v2")
+    assert posted.status_code == 202, posted.text
+    assert posted.json()["delivered"] == [product["id"], architect["id"]]
+    assert (await rows(product))["/Architect"]["state"] == "waiting_on_us"
+    assert (await rows(architect))["/Product"]["state"] == "waiting_on_us"
+    header = f"[Message from owner (message {posted.json()['message_id']})]"
+    product_items = (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+    architect_items = (await auth_client.get(f"/v1/sessions/{architect['id']}/items")).text
+    assert f"{header} [thread /Architect]" in product_items
+    assert f"{header} [thread /Product]" in architect_items
+
+    # The thread view shows the post once, as the owner's.
+    view = await auth_client.get(
+        f"/v1/sessions/{product['id']}/threads/messages", params={"counterpart": "/Architect"}
+    )
+    assert [(m["direction"], m["text"]) for m in view.json()["messages"]] == [
+        ("in", "Plan the API"),
+        ("owner", "Use v2"),
+    ]
+
+    # A post to one side reaches only that side.
+    await _tool(auth_client, product, "sys_thread_note", counterpart="/Architect", state="open")
+    nudge = await post(message="Architect, answer the schema question", to="counterpart")
+    assert nudge.json()["delivered"] == [architect["id"]]
+    assert (await rows(product))["/Architect"]["state"] == "open"
+    assert (await post(message="x", to="nobody")).status_code == 422
+
+    # A thread side chat writing to the counterpart speaks as its holder.
+    opened = await auth_client.post(
+        f"/v1/sessions/{product['id']}/fork", json={"side_chat": True, "thread": "/Architect"}
+    )
+    side = opened.json()
+    _bind_runner(db_uri, side["id"])
+    assert (await _send(auth_client, side, architect, "From the side chat")).get("queued") is True
+    architect_items = (await auth_client.get(f"/v1/sessions/{architect['id']}/items")).text
+    assert "[Message from /Product (session " in architect_items
+    assert (await rows(product))["/Architect"]["state"] == "waiting_on_them"
+    assert set(await rows(architect)) == {"/Product"}
+
+
 async def test_role_threads_index_history_guard_and_owner_thread(auth_client, peers, db_uri):
     architect, product, _ = peers
     other = await _create_session_as(auth_client, "", "alice")

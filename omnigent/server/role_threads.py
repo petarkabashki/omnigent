@@ -28,12 +28,13 @@ THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
 MAX_HOPS = 6
 HOP_RESET_SECONDS = 600  # a quiet thread starts counting hops again
 PROMOTION_MESSAGE_THRESHOLD = 20  # messages after which a thread is a promotion candidate
-THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "blocked", "done")
+THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "waiting_on_owner", "blocked", "done")
+OWNER_SENDER = "owner"  # sender name on a message the owner posted into a thread
 COUNTERPART_MAX_LEN = 200
 
 _INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z]+)")
 _THREAD_TAG = re.compile(r"^\[Message from [^\n]*?\] \[thread ([^\]\n]+)\]\n", re.ASCII)
-_URGENT_STATES = {"blocked": 0, "waiting_on_us": 1}
+_URGENT_STATES = {"waiting_on_owner": 0, "blocked": 0, "waiting_on_us": 1}
 
 
 def thread_hash(counterpart: str) -> str:
@@ -267,6 +268,26 @@ def note_thread(
     return next(row for row in thread_index(labels) if row["counterpart"] == counterpart)
 
 
+def owner_thread_message(message: object, thread: str | None, message_id: str) -> dict[str, Any]:
+    """A message the owner posts into a thread, as the ``data`` of a ``message`` event."""
+    if not isinstance(message, str) or not message.strip() or len(message) > 8000:
+        raise OmnigentError("Provide a message of 1–8000 characters", code=ErrorCode.INVALID_INPUT)
+    tag = f" [thread {thread}]" if thread else ""
+    header = f"[Message from {OWNER_SENDER} (message {message_id})]{tag}"
+    return {"role": "user", "content": [{"type": "input_text", "text": f"{header}\n{message}"}]}
+
+
+def settle_owner_wait(store: ConversationStore, holder: Conversation, counterpart: str) -> None:
+    """The owner answered in this thread, so it no longer waits on them."""
+    fields = _row_fields(holder.labels, counterpart)
+    if fields.get("state") == "waiting_on_owner":
+        store.set_labels(holder.id, {_label(counterpart, "state"): "open"})
+
+
+def _from_owner(row: Mapping[str, Any]) -> bool:
+    return str(row.get("header", "")).startswith(f"[Message from {OWNER_SENDER} (")
+
+
 def thread_of_header(text: str) -> str | None:
     """The thread key a delivered message header carries, if any."""
     match = _THREAD_TAG.match(text)
@@ -382,8 +403,17 @@ def thread_conversation(
     if role and not counterpart.startswith("session:"):
         receivers = _role_sessions(store, counterpart, user_id)
         rows += [{**row, "direction": "out"} for row in _tagged_messages(store, receivers, role)]
-    rows.sort(key=lambda row: row["created_at"])
-    return rows[-limit:]
+    # An owner post reaches both sides; show it once, as the owner's.
+    seen_owner_posts: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda row: row["created_at"]):
+        if _from_owner(row):
+            if row["message_id"] in seen_owner_posts:
+                continue
+            seen_owner_posts.add(row["message_id"])
+            row = {**row, "direction": OWNER_SENDER}
+        merged.append(row)
+    return merged[-limit:]
 
 
 def _item_text(data: Any) -> str | None:

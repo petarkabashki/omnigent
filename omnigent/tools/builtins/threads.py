@@ -6,7 +6,7 @@ from typing import Any
 
 from omnigent.tools.base import Tool
 
-_STATES = ["open", "waiting_on_them", "waiting_on_us", "blocked", "done"]
+_STATES = ["open", "waiting_on_them", "waiting_on_us", "waiting_on_owner", "blocked", "done"]
 
 
 class _ThreadTool(Tool):
@@ -49,9 +49,10 @@ class SysThreadListTool(_ThreadTool):
             "List your role's conversation threads, one per counterpart, from the hub's "
             "index (not from your context, so it is intact after compaction). Each row has "
             "counterpart, state, last_message_id, unread, messages, summary and "
-            "promotion_candidate (a long thread worth moving to its own side chat). Blocked "
-            "and waiting_on_us threads come first. Incoming messages carry a "
-            "'[thread <counterpart>]' tag."
+            "promotion_candidate (a long thread worth moving to its own side chat). "
+            "waiting_on_owner, blocked and waiting_on_us threads come first. Incoming messages "
+            "carry a '[thread <counterpart>]' tag; '[Message from owner ...]' is the owner "
+            "speaking in that thread, and both roles in it may see it."
         )
 
 
@@ -111,5 +112,6 @@ class SysThreadNoteTool(_ThreadTool):
             "Record a thread's state and/or one-line summary in the role's index. In a side "
             "chat opened for a thread, also sends the role's main session a "
             "'[thread note]' summary line; call it after any commitment, dependency, "
-            "conflict or blocker."
+            "conflict or blocker. Set state 'waiting_on_owner' when the thread needs the "
+            "owner's decision; the owner's next post in the thread clears it."
         )
