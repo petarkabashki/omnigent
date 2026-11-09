@@ -54,6 +54,15 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   automation can message the owner's other sessions or start workers. The
   Automations page's Jira/Slack/GitHub trigger templates rely on this: their
   kept session starts one worker per match (`docs/AUTOMATIONS.md`).
+- `messaging-rules`: the hub-wide `messaging_rules` policy (`omnigent.policies.builtins.messaging`)
+  allows, asks or denies `sys_session_message` by role handle from a YAML file; first match
+  wins. A rule may carry `until:` (ISO 8601 with timezone; expired rules are skipped, a bad
+  value keeps the last good parse) and `{project}` in `from`/`to` for the sender's project.
+  Its ASK approval offers "Always allow <from> -> <to>" and "... for 2 hours"; accepting one
+  inserts an allow rule at the top of `rules:` (comments kept, atomic write) from the
+  approval verdict handler only. Settings > Messaging (`/settings/messaging-rules`) edits
+  the file through admin-only `GET/PUT /v1/messaging-rules` (PUT rejects invalid text with
+  400) and `POST /v1/messaging-rules/test {from, to}`; delegated tokens cannot reach them.
 - `refusal`: disabled flag, another owner, edit-shared sender or wrong runner binding
   refuses the operation. Unsupported servers reject independent creation without
   falling back to ordinary creation. Timeouts, 408/429/5xx responses and invalid
