@@ -34,6 +34,7 @@ THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
 PROMOTION_MESSAGE_THRESHOLD = 20  # messages after which a thread is a promotion candidate
 THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "waiting_on_owner", "blocked", "done")
 OWNER_SENDER = "owner"  # sender name on a message the owner posted into a thread
+HUB_SENDER = "hub"  # sender name on a hub reminder about an unhandled thread
 COUNTERPART_MAX_LEN = 200
 
 _INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z0-9_]+)")
@@ -355,6 +356,11 @@ def schedule_inbound_classification(
     reply_classifier.submit(text, settle, audience="agent")
 
 
+def _reset_nudges(counterpart: str) -> dict[str, str]:
+    """Labels that clear a thread's reminder count once it is handled."""
+    return {_label(counterpart, "nudges"): "0", _label(counterpart, "nudged_at"): "0"}
+
+
 def record_outbound(
     store: ConversationStore,
     sender: Conversation,
@@ -377,6 +383,7 @@ def record_outbound(
         _label(counterpart, "sum"): preview(f"sent: {text}"),
         _label(counterpart, "hops"): str(hops),
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
+        **_reset_nudges(counterpart),
     }
     updates.update(_guard_labels(counterpart, verdict, recent=True))
     if message_id:
@@ -405,6 +412,7 @@ def note_thread(
         _label(counterpart, "cp"): counterpart,
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
         _label(counterpart, "unread"): "0",
+        **_reset_nudges(counterpart),
     }
     if state is not None:
         updates[_label(counterpart, "state")] = state
@@ -538,7 +546,7 @@ def thread_conversation(
     limit: int,
 ) -> list[dict[str, Any]]:
     """
-    Both sides of a thread, oldest first, each row tagged ``direction`` ``in`` or ``out``.
+    Both sides of a thread, oldest first; ``direction`` is ``in``, ``out``, ``owner`` or ``hub``.
 
     Sent messages are found where they were delivered: tagged with the holder's role
     on the counterpart role's sessions. A counterpart that holds no role (``session:<id>``)
@@ -559,6 +567,8 @@ def thread_conversation(
                 continue
             seen_owner_posts.add(row["message_id"])
             row = {**row, "direction": OWNER_SENDER}
+        elif str(row.get("header", "")).startswith(f"[Message from {HUB_SENDER} ("):
+            row = {**row, "direction": HUB_SENDER}
         merged.append(row)
     return merged[-limit:]
 

@@ -74,6 +74,8 @@ _executor: ThreadPoolExecutor | None = None
 # already logged, so repeats of either are suppressed. Unbounded like the
 # in-memory caches these writes mirror; entries live for the process.
 _last_status: WorkspaceScopedCache[str, str] = WorkspaceScopedCache()
+# Epoch seconds of each session's last real status transition (in memory only).
+_status_since: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
 # Last count persisted per session, for dedupe.
 _last_pending: WorkspaceScopedCache[str, int] = WorkspaceScopedCache()
 # Last parked reason persisted per session (``""`` = not parked), for dedupe.
@@ -104,6 +106,7 @@ def configure(
     _store = store
     _scheduled_task_store = scheduled_task_store
     _last_status.clear()
+    _status_since.clear()
     _last_pending.clear()
     _last_blocked_on.clear()
     _handoffs.clear()
@@ -190,6 +193,7 @@ def persist_live_status(session_id: str, status: str) -> None:
     if _last_status.get(session_id) == status:
         return
     _last_status[session_id] = status
+    _status_since[session_id] = int(time.time())
 
     def _evict() -> None:
         # A dropped write must not leave the dedupe cache asserting this
@@ -246,6 +250,12 @@ def forget_live_status(session_id: str) -> None:
     _handoffs[session_id] = _handoffs.get(session_id, 0) + 1
     _last_status.pop(session_id, None)
     _last_blocked_on.pop(session_id, None)
+    _status_since.pop(session_id, None)
+
+
+def status_since(session_id: str) -> int | None:
+    """Epoch seconds of this process's last observed status change, or ``None`` if unseen."""
+    return _status_since.get(session_id)
 
 
 def persist_scheduled_run_completion(

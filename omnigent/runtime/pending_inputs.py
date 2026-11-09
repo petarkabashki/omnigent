@@ -1002,6 +1002,28 @@ def snapshot_for(conversation_id: str) -> list[dict[str, Any]]:
         ]
 
 
+def queued_since(conversation_id: str) -> list[tuple[str, int, str]]:
+    """
+    Return ``(pending_id, enqueued_epoch_s, text)`` for each un-consumed message, oldest first.
+
+    :param conversation_id: Session id, e.g. ``"conv_abc123"``.
+    """
+    with _lock:
+        _evict_stale_locked(conversation_id, _now())
+        entries = list(_pending.get(conversation_id, {}).values())
+    wall = time.time()
+    age_base = _now()
+    return [
+        (
+            entry.pending_id,
+            int(wall - max(0.0, age_base - entry.created_at)),
+            _content_text(entry.content),
+        )
+        for entry in entries
+        if not entry.interrupted
+    ]
+
+
 def _drained_input(entry: _Entry) -> DrainedInput:
     """Copy a pending entry into the public drained shape."""
     return DrainedInput(

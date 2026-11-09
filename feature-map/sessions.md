@@ -1395,10 +1395,48 @@ index (state, summary, hop count) across compaction and relaunch.
 - Web: a thread with unhandled messages shows a bell on row hover, and its card
   has Nudge. Either sends the holder alone an owner post saying how many
   messages from whom are unhandled and for how long.
-- Tests: `test_role_threads_index_history_guard_and_owner_thread` and
+- Hub reminders: every `OMNIGENT_THREAD_REMINDER_INTERVAL_S` (120) the hub
+  checks role holders. A thread with unhandled messages, not done, quiet for
+  `OMNIGENT_THREAD_REMINDER_MINUTES` (20; 0 turns it off) on an idle holder
+  gets a message headed `[Message from hub (reminder <epoch>)] [thread K]`,
+  at most once per limit. It isn't counted as unhandled and shows in the
+  thread view as "Hub reminder". After `OMNIGENT_THREAD_REMINDER_MAX` (2)
+  reminders, or at once when the holder's runner is offline, the thread turns
+  `waiting_on_owner` ("Needs you"). Labels `thread.<hash>.nudges` and
+  `nudged_at` count reminders; noting or replying resets them.
+  Code: `omnigent/server/thread_reminders.py`, started in `app.py` lifespan.
+- Tests: `tests/server/test_thread_reminders.py`,
+  `test_role_threads_index_history_guard_and_owner_thread` and
   `test_owner_posts_into_a_role_thread` in
   `tests/server/integration/test_session_orchestration.py`,
   `web/src/shell/HeaderConversationMenu.test.tsx`,
   `web/src/lib/sessionsApi.test.ts`, `web/src/lib/roleThreads.test.ts`,
   `web/src/shell/RoleThreadRows.test.tsx`,
   `web/src/components/chat/RoleThreadHistory.test.tsx`.
+
+## Waiting on
+
+What a session is waiting on, where, and since when.
+
+- The hub records when each session's status last changed (in memory, so a
+  hub restart resets it to the first status seen). `GET /v1/sessions/{id}` and
+  list rows carry `status_since`. The snapshot still reports a parked session as
+  `running` but sets `waiting_reason` ("2 background shells", "1 approval").
+- `GET /v1/sessions/{id}/waiting` lists one session's open items, oldest first:
+  unanswered tool calls, open `sys_call_async` tasks (derived from the last 400
+  transcript items), background shells, running sub-agents, pending approvals,
+  queued messages, role threads waiting on us / the owner / blocked (or on them
+  past 20 min), and an offline runner. Each item has `since`, `where` (host),
+  `stale` and actions. Stale limits live in `omnigent/server/session_waiting.py`.
+- `GET /v1/sessions/waiting` does the same across the caller's busy, blocked or
+  role-holding sessions, oldest first.
+- Web: the session header shows a chip, "Running 12 min" or "Waiting 12 min ·
+  reason"; clicking it lists the items with Open, Nudge (threads) and Stop
+  (interrupts the current turn). The sidebar running dot's tooltip shows the
+  same age. The "Waiting" sidebar entry (and "Go to Waiting" in the command
+  palette) opens `/waiting`, every session's items oldest first, with stale ones
+  in amber and a stale count on the entry.
+- Tests: `tests/server/test_session_waiting.py`,
+  `tests/server/integration/test_session_waiting_routes.py`,
+  `tests/server/test_async_task_view.py`, `web/src/lib/waitingApi.test.ts`,
+  `web/src/components/waiting/waiting.test.tsx`.

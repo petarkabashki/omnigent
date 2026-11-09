@@ -2247,6 +2247,14 @@ def create_app(
                 app_inst.state.managed_sandbox_reaper = managed_sandbox_reaper
                 await managed_sandbox_reaper.start()
 
+        from omnigent.server.thread_reminders import start_checker
+
+        thread_reminder_task = start_checker(
+            app_inst,
+            conversation_store,
+            runner_online=lambda sid: _session_liveness(sid).runner_online is not False,
+            user_id=RESERVED_USER_LOCAL if auth_provider is not None else None,
+        )
         session_pull_requests.install_refresher(pull_request_refresher)
         try:
             with monitor_event_loop():
@@ -2263,6 +2271,10 @@ def create_app(
                 await scheduled_task_scheduler.stop()
             elif scheduled_task_scheduler is not None:
                 scheduled_task_scheduler.stop()
+            if thread_reminder_task is not None:
+                thread_reminder_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await thread_reminder_task
             if managed_sandbox_reaper is not None:
                 await managed_sandbox_reaper.shutdown()
             metrics_publish_task.cancel()

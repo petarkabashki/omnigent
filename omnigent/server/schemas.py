@@ -2336,6 +2336,11 @@ class SessionResponse(BaseModel):
         before building this snapshot; the literal stays a superset
         of what the runtime can produce so a server that forwards
         the raw status never 500s on serialization.
+    :param status_since: Epoch seconds of the last status transition this
+        server observed, e.g. ``1794260000``; ``None`` when none was seen.
+    :param waiting_reason: Why the loop is parked when the relay status is
+        ``"waiting"`` (the collapsed ``status`` reads ``"running"``), e.g.
+        ``"2 background shells"``; ``None`` otherwise.
     :param background_task_count: Background shells (claude-native) still
         running as of the last status edge, so a reload re-shows "N shells
         still running" even though the session has settled to ``"idle"``.
@@ -2589,6 +2594,8 @@ class SessionResponse(BaseModel):
     status: Literal["idle", "running", "waiting", "failed"]
     background_task_count: int | None = None
     background_tasks: list[BackgroundTaskInfo] | None = None
+    status_since: int | None = None
+    waiting_reason: str | None = None
     created_at: int
     updated_at: int | None = None
     title: str | None = None
@@ -3449,6 +3456,8 @@ class SessionListItem(BaseModel):
     agent_name: str | None = None
     harness: str | None = None
     status: Literal["idle", "running", "waiting", "failed"]
+    # Epoch seconds of this hub process's last observed status change.
+    status_since: int | None = None
     created_at: int
     updated_at: int
     title: str | None = None
