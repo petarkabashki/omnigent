@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,6 +11,8 @@ import pytest
 
 from omnigent.policies.builtins.messaging import (
     MessageRoute,
+    add_allow_rule,
+    insert_rule_text,
     messaging_rules,
     parse_rules,
     set_handle_resolver,
@@ -146,3 +149,94 @@ def test_server_resolver_names_both_ends_by_handle() -> None:
     )
     store.list_conversations.return_value = SimpleNamespace(data=[], has_more=False)
     assert resolve(SENDER_ID, "touchkey/Nobody", "user") is None
+
+
+NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+
+
+def test_rule_past_until_is_skipped_and_live_one_applies() -> None:
+    text = """
+default: deny
+rules:
+  - {from: "a/*", to: "b/*", action: allow, until: "2026-11-09T11:00:00+00:00"}
+  - {from: "a/*", to: "b/*", action: ask, until: "2026-11-09T13:00:00+00:00"}
+"""
+    decision = parse_rules(text).match(MessageRoute("a/X", "b/Y"), NOW)
+    assert (decision.action, decision.rule_index) == ("ASK", 2)
+    assert (
+        parse_rules(text).match(MessageRoute("a/X", "b/Y"), NOW + timedelta(hours=2)).action
+        == "DENY"
+    )
+
+
+def test_unquoted_yaml_timestamp_is_accepted() -> None:
+    rules = parse_rules(
+        "rules:\n  - {from: a, to: b, action: allow, until: 2026-11-09T11:00:00+00:00}"
+    )
+    assert rules.rules[0].until == datetime(2026, 11, 9, 11, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("until", ["2026-11-09T11:00:00", "tomorrow", "[1]"])
+def test_invalid_until_is_a_parse_error(until: str) -> None:
+    with pytest.raises(ValueError, match="until"):
+        parse_rules(f'rules:\n  - {{from: a, to: b, action: allow, until: "{until}"}}')
+
+
+def test_invalid_until_keeps_last_good_parse(tmp_path, routes) -> None:
+    routes["t"] = "touchkey/X"
+    _, policy = _policy(tmp_path)
+    assert policy(_message("t"))["result"] == "ALLOW"
+    path = tmp_path / "messaging-policy.yaml"
+    path.write_text("rules:\n  - {from: '*', to: '*', action: deny, until: nope}\n")
+    os.utime(path, (path.stat().st_mtime + 5,) * 2)
+    assert policy(_message("t"))["result"] == "ALLOW"
+
+
+def test_project_placeholder_means_the_senders_project() -> None:
+    rules = parse_rules(
+        'default: deny\nrules:\n  - {from: "*", to: "{project}/*", action: allow}\n'
+    )
+    assert rules.decide(MessageRoute("forthkit/A", "forthkit/B"))[0] == "ALLOW"
+    assert rules.decide(MessageRoute("forthkit/A", "touchkey/B"))[0] == "DENY"
+    assert rules.decide(MessageRoute("fo[x]/A", "fo[x]/B"))[0] == "ALLOW"
+
+
+COMMENTED = """# header
+default: ask   # fallback
+
+rules:  # first match wins
+  # keep this
+  - from: x/*
+    to: y/*
+    action: deny
+"""
+
+
+def test_insert_puts_rule_first_and_keeps_comments() -> None:
+    until = NOW + timedelta(hours=2)
+    text = insert_rule_text(COMMENTED, "a/B", "c/D", "allow", until)
+    assert text.startswith("# header\ndefault: ask   # fallback\n")
+    assert "  # keep this\n" in text and 'rules:  # first match wins\n  - from: "a/B"' in text
+    rules = parse_rules(text)
+    assert [(r.sender, r.until) for r in rules.rules] == [("a/B", until), ("x/*", None)]
+
+
+@pytest.mark.parametrize("start", ["", "default: ask\n", "rules: []\n", "rules:\n"])
+def test_insert_handles_missing_or_empty_rules(start: str) -> None:
+    rules = parse_rules(insert_rule_text(start, "a/B", "c/D", "allow"))
+    assert [(r.sender, r.target, r.action) for r in rules.rules] == [("a/B", "c/D", "ALLOW")]
+
+
+def test_add_allow_rule_writes_atomically_and_policy_sees_it(tmp_path, routes) -> None:
+    routes["k"] = "y/Q"
+    path, policy = _policy(tmp_path, COMMENTED)
+    path.chmod(0o640)
+    before = path.stat().st_ino
+    assert policy(_message("k"))["result"] == "ASK"
+    add_allow_rule(str(path), "forthkit/Product", "y/Q", hours=2)
+    assert path.stat().st_ino != before  # replaced via rename
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".messaging-rules-")]
+    os.utime(path, (path.stat().st_mtime + 5,) * 2)
+    assert policy(_message("k"))["result"] == "ALLOW"
+    assert "# keep this" in path.read_text()
