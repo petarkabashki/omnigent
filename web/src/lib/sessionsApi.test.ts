@@ -691,6 +691,16 @@ describe("createSideChat", () => {
     },
   );
 
+  it("passes the counterpart handle as the fork's thread", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockJsonResponse(source))
+      .mockResolvedValueOnce(mockJsonResponse(fork))
+      .mockResolvedValueOnce(mockJsonResponse({ ...fork, runner_id: source.runner_id }));
+    await createSideChat(source.id, undefined, { thread: "Architect" });
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ side_chat: true, thread: "Architect" });
+  });
+
   it.each(["worktree-from-another-machine", "main", null])(
     "relaunches a stopped parent and reuses its runner without requiring saved branch %s",
     async (gitBranch) => {
