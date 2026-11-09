@@ -4781,6 +4781,20 @@ async def _forward_available_status_events(
                         exc_info=True,
                         extra={"session_id": session_id},
                     )
+            if record.input_answered and not _is_subagent_hook_record(
+                record, parent_claude_session_ids=parent_claude_session_ids
+            ):
+                try:
+                    await _post_external_session_awaiting_input(
+                        client, session_id=session_id, message=None
+                    )
+                except httpx.HTTPError:
+                    _logger.warning(
+                        "Failed to forward Claude dialog answer; session=%s",
+                        session_id,
+                        exc_info=True,
+                        extra={"session_id": session_id},
+                    )
             if record.event_name == "TaskCreated" and record.task_id is not None:
                 if record.task_id not in task_subjects:
                     task_order.append(record.task_id)
@@ -7416,19 +7430,21 @@ async def _post_external_session_awaiting_input(
     client: httpx.AsyncClient,
     *,
     session_id: str,
-    message: str,
+    message: str | None,
 ) -> None:
     """
     Post one ``external_session_awaiting_input`` event to the Sessions API.
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
-    :param message: Why Claude is waiting, e.g. ``"Claude needs your permission to use Bash"``.
+    :param message: Why Claude is waiting, e.g. ``"Claude needs your permission to use Bash"``;
+        ``None`` reports that the user answered in the terminal.
     :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
     """
+    data = {"message": message} if message is not None else {"answered": True}
     resp = await client.post(
         f"/v1/sessions/{session_id}/events",
-        json={"type": "external_session_awaiting_input", "data": {"message": message}},
+        json={"type": "external_session_awaiting_input", "data": data},
     )
     resp.raise_for_status()
 

@@ -3027,6 +3027,9 @@ def _pin_claude_permission_launch_args(
     return [*stripped, "--permission-mode", mode]
 
 
+_CLAUDE_IDLE_PROMPT_MESSAGE = "Claude is waiting for your input"
+
+
 async def _handle_external_session_awaiting_input(
     session_id: str,
     body: SessionEventInput,
@@ -3037,10 +3040,16 @@ async def _handle_external_session_awaiting_input(
 
     :param session_id: Session/conversation identifier.
     :param body: ``external_session_awaiting_input`` event; ``data.message`` is
-        the reason shown to the user, e.g. ``"Claude needs your permission to use Bash"``.
+        the reason shown to the user, e.g. ``"Claude needs your permission to use Bash"``,
+        and ``data.answered`` reports the user answered it in the terminal.
     :param conversation_store: Store holding the awaiting-input label.
     :raises OmnigentError: If ``data.message`` is not a non-empty string.
     """
+    if body.data.get("answered") is True:
+        await asyncio.to_thread(
+            awaiting_input.mark_answered, conversation_store, session_id, approval=False
+        )
+        return
     message = body.data.get("message")
     if not isinstance(message, str) or not message.strip():
         raise OmnigentError(
@@ -3048,6 +3057,10 @@ async def _handle_external_session_awaiting_input(
             code=ErrorCode.INVALID_INPUT,
         )
     reason = " ".join(message.split())
+    # Runners started before 2026-11-09 still forward Claude's idle prompt, which
+    # fires after any idle minute. @deprecated: remove in 0.23.
+    if reason == _CLAUDE_IDLE_PROMPT_MESSAGE:
+        return
     await asyncio.to_thread(
         awaiting_input.set_awaiting_input, conversation_store, session_id, reason
     )

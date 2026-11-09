@@ -1175,6 +1175,8 @@ class ClaudeHookRecord:
     failure_message: str | None = None
     failure_context: FailureContext | None = None
     awaiting_input_message: str | None = None
+    # A dialog tool the user answered in the terminal (``AskUserQuestion``).
+    input_answered: bool = False
 
 
 @dataclass(frozen=True)
@@ -2652,6 +2654,8 @@ def build_hook_settings(
             {"matcher": "TodoWrite", "hooks": [hook]},
             {"matcher": "TaskUpdate", "hooks": [hook]},
             {"matcher": "EnterWorktree|ExitWorktree", "hooks": [hook]},
+            # The user answered a terminal dialog: clear the awaiting-input flag.
+            {"matcher": "AskUserQuestion|ExitPlanMode", "hooks": [hook]},
         ],
         # ``PreCompact`` fires right before Claude compacts its own
         # context — for both a manual ``/compact`` (web-UI button or
@@ -4421,6 +4425,11 @@ def _hook_record_from_jsonl_record(record: _JsonlRecord) -> ClaudeHookRecord:
         failure_message=failure_message,
         failure_context=failure_context,
         awaiting_input_message=awaiting_input_message,
+        input_answered=(
+            event_name == "PostToolUse"
+            and isinstance(payload, dict)
+            and payload.get("tool_name") in _USER_DIALOG_TOOLS
+        ),
     )
 
 
@@ -4431,6 +4440,8 @@ _AWAITING_INPUT_NOTIFICATIONS = {
     "elicitation_dialog": "Claude is asking you a question",
 }
 _AWAITING_INPUT_MESSAGE_MAX_CHARS = 256
+# Tools whose PostToolUse means the user just answered a terminal dialog.
+_USER_DIALOG_TOOLS = ("AskUserQuestion", "ExitPlanMode")
 
 # Bounds on ``StopFailure`` text copied into the failed status edge.
 _FAILURE_CATEGORY_MAX_CHARS = 100

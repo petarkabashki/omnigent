@@ -893,6 +893,24 @@ async def test_user_message_and_archive_clear_awaiting_input(
     assert (_awaiting_label(route, sid), _answered_label(route, sid)) == ("", "")
 
 
+async def test_dialog_answered_in_the_terminal_marks_input_answered(
+    status_route: _StatusRoute,
+) -> None:
+    route = status_route
+    sid = route.parent_id
+    await _post_event(route, sid, "external_session_awaiting_input", {"message": "Pick one"})
+    await _post_event(route, sid, "external_session_awaiting_input", {"answered": True})
+    assert (_awaiting_label(route, sid), _answered_label(route, sid)) == ("", "Pick one")
+    # An older runner's idle prompt is not a request.
+    await _post_event(
+        route,
+        sid,
+        "external_session_awaiting_input",
+        {"message": "Claude is waiting for your input"},
+    )
+    assert _awaiting_label(route, sid) == ""
+
+
 async def test_awaiting_input_event_requires_a_message(status_route: _StatusRoute) -> None:
     route = status_route
     response = await route.client.post(
