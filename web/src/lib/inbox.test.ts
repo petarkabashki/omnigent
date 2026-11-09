@@ -336,6 +336,25 @@ describe("collectUnreadInboxItems", () => {
     ]);
   });
 
+  it("lists an acknowledge row only while unread, and awaiting wins over it", () => {
+    const ackLabels = { "omnigent.awaiting_ack": "Report ready" };
+    const rows = [
+      makeRow({ id: "ack-unread", status: "idle", updated_at: 2_000, labels: ackLabels }),
+      makeRow({ id: "ack-read", status: "idle", updated_at: 500, labels: ackLabels }),
+      makeRow({
+        id: "ack-and-asking",
+        status: "idle",
+        updated_at: 1_500,
+        labels: { ...ackLabels, "omnigent.awaiting_input": "Which option?" },
+      }),
+    ];
+    const items = collectUnreadInboxItems(rows, unseenAfter(1_000));
+    expect(items.map((i) => [i.row.id, i.kind, i.reason])).toEqual([
+      ["ack-unread", "ack", "Report ready"],
+      ["ack-and-asking", "awaiting", "Which option?"],
+    ]);
+  });
+
   it("skips archived rows and rows already listed as approvals", () => {
     // A session with a pending prompt shows as its approval card; listing it
     // again as unread would put one session in the inbox twice.

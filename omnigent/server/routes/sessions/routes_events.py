@@ -1366,6 +1366,7 @@ def register_events_routes(
                 next_hops,
                 record_inbound,
                 record_outbound,
+                schedule_inbound_classification,
             )
             from omnigent.server.session_aliases import session_handle
             from omnigent.server.session_orchestration import orchestration_message
@@ -1402,6 +1403,8 @@ def register_events_routes(
                 keep_state=THREAD_OF_LABEL in source.labels,
             ):
                 return {"queued": False, "duplicate": True}
+            if thread_key is not None and THREAD_OF_LABEL not in source.labels:
+                schedule_inbound_classification(conv.id, thread_key, peer_message_id, peer_text)
             if holds_role(source):
                 await asyncio.to_thread(
                     record_outbound,

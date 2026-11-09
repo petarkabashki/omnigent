@@ -16,6 +16,7 @@ from typing import Any
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server import reply_classifier, session_live_state
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -166,6 +167,46 @@ def record_inbound(
         updates[THREAD_ROLE_LABEL] = holder_handle
     store.set_labels(holder.id, updates)
     return True
+
+
+def settle_inbound_kind(
+    store: ConversationStore,
+    holder_id: str,
+    counterpart: str,
+    message_id: str,
+    kind: reply_classifier.ReplyKind,
+) -> None:
+    """An inbound message that needs nothing leaves its thread open, not waiting on us."""
+    conv = store.get_conversation(holder_id)
+    if conv is None or kind != "info":
+        return
+    fields = _row_fields(conv.labels, counterpart)
+    if fields.get("last") == message_id and fields.get("state") == "waiting_on_us":
+        store.set_labels(holder_id, {_label(counterpart, "state"): "open"})
+
+
+def schedule_inbound_classification(
+    holder_id: str, counterpart: str, message_id: str | None, text: object
+) -> None:
+    """Classify a delivered thread message off-loop and settle the thread's state."""
+    store = session_live_state.conversation_store()
+    if store is None or not message_id or not isinstance(text, str):
+        return
+    if not reply_classifier.enabled():
+        return
+
+    def settle(result: reply_classifier.ReplyClass) -> None:
+        session_live_state.submit(
+            "role_threads",
+            settle_inbound_kind,
+            store,
+            holder_id,
+            counterpart,
+            message_id,
+            result.kind,
+        )
+
+    reply_classifier.submit(text, settle, audience="agent")
 
 
 def record_outbound(

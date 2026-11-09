@@ -199,7 +199,13 @@ the header menu), and each place is a separate entry point.
   is not set when the turn answered another session's `[Message from …]`, since
   that question is for the sending agent. A reply or a resolved approval moves
   it to `omnigent.input_answered`, shown as a green "Answered" row while the
-  agent works; the turn's end clears it. Inbox rows keep read state (bold title
+  agent works; the turn's end clears it. Label `omnigent.awaiting_ack` (a short reason) marks a
+  result to look at with nothing to decide: a blue "Acknowledge" row shown only
+  while unread, so reading it acknowledges it; it is not in "Needs input". With `OPENROUTER_API_KEY` in the
+  hub environment, `omnigent/server/reply_classifier.py` (model `typesafe/jev-router`,
+  override `OMNIGENT_REPLY_CLASSIFIER_MODEL`, disable `OMNIGENT_REPLY_CLASSIFIER_OFF=1`)
+  sets these from the final message and settles "info" thread messages to `open`;
+  without a key the question heuristic decides. Inbox rows keep read state (bold title
   and blue dot) separate from input state (the coloured label). To try: ask an
   agent "End your reply by asking me which option I prefer", wait for the turn
   to end, and check the sidebar and Inbox. Inbox titles name role sessions by

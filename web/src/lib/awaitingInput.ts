@@ -6,6 +6,7 @@
 export const AWAITING_INPUT_LABEL_KEY = "omnigent.awaiting_input";
 /** Set by the server once a wait is answered, until the agent's next turn ends. */
 export const INPUT_ANSWERED_LABEL_KEY = "omnigent.input_answered";
+export const AWAITING_ACK_LABEL_KEY = "omnigent.awaiting_ack";
 /** The answered value for a resolved approval, which has no question text. */
 export const ANSWERED_APPROVAL = "approval";
 
@@ -27,6 +28,12 @@ export function awaitingInputReason(session: AwaitingInputFields): string | unde
 export function inputAnsweredReason(session: AwaitingInputFields): string | undefined {
   if (session.runner_online === false) return undefined;
   return session.labels?.[INPUT_ANSWERED_LABEL_KEY] || undefined;
+}
+
+/** Why the agent's result wants an acknowledgement (nothing to decide), if it does. */
+export function awaitingAckReason(session: AwaitingInputFields): string | undefined {
+  if (session.runner_online === false) return undefined;
+  return session.labels?.[AWAITING_ACK_LABEL_KEY] || undefined;
 }
 
 /** Whether the session needs a response from the user, by either signal. */
