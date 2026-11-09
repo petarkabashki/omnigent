@@ -22,7 +22,7 @@ session, while session-linked failures keep their existing session Inbox entry.
   cards show the warning. With the detail page enabled, open the card for run history.
 - **Inbox:** open Inbox from the sidebar or visit `/inbox`. Expand an Automation
   failed item, then choose Open automation or Mark as read. These items appear in
-  All and Unread, and do not appear in Awaiting response.
+  All and Unread, and do not appear in Needs input.
 - **Command palette:** open Search or press Cmd+K (Mac) / Ctrl+K (Linux/Windows),
   then choose Go to Inbox or Go to Automations.
 - **Narrow screens / embedded UI:** the same Automations and Inbox pages are

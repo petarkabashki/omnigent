@@ -4,6 +4,10 @@
 // Every "Needs response" surface reads these helpers so they agree.
 
 export const AWAITING_INPUT_LABEL_KEY = "omnigent.awaiting_input";
+/** Set by the server once a wait is answered, until the agent's next turn ends. */
+export const INPUT_ANSWERED_LABEL_KEY = "omnigent.input_answered";
+/** The answered value for a resolved approval, which has no question text. */
+export const ANSWERED_APPROVAL = "approval";
 
 /** The row fields the predicate reads; every row shape (session, child) fits. */
 export interface AwaitingInputFields {
@@ -17,6 +21,12 @@ export function awaitingInputReason(session: AwaitingInputFields): string | unde
   // A dead runner can't be answered; the server zeroes its approval count too.
   if (session.runner_online === false) return undefined;
   return session.labels?.[AWAITING_INPUT_LABEL_KEY] || undefined;
+}
+
+/** What the user answered (a question, or `"approval"`) while the agent works on it. */
+export function inputAnsweredReason(session: AwaitingInputFields): string | undefined {
+  if (session.runner_online === false) return undefined;
+  return session.labels?.[INPUT_ANSWERED_LABEL_KEY] || undefined;
 }
 
 /** Whether the session needs a response from the user, by either signal. */

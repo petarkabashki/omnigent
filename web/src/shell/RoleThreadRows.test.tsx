@@ -17,6 +17,7 @@ function holder(labels: Record<string, string>): Conversation {
     labels: { "omnigent.alias": "Product", ...labels },
     archived: false,
     agent_name: "Claude",
+    permission_level: null,
   } as Conversation;
 }
 

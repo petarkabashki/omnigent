@@ -5,7 +5,7 @@
 
 import type { Comment } from "@/hooks/useComments";
 import type { Conversation } from "@/hooks/useConversations";
-import { awaitingInputReason, needsResponseCount } from "./awaitingInput";
+import { awaitingInputReason, inputAnsweredReason, needsResponseCount } from "./awaitingInput";
 import type { ElicitationRequest } from "./events";
 import { parseEvent } from "./sse";
 
@@ -64,41 +64,48 @@ export function collectInboxItems(sources: InboxSource[]): InboxItem[] {
   return items;
 }
 
-/** A session whose agent output the viewer hasn't opened yet (the sidebar's unread dot). */
+/**
+ * A session row in the inbox. Two independent states: `kind` is the input
+ * state (needs input, answered, or a finished turn), `unread` the read state.
+ */
 export interface UnreadInboxItem {
   row: Conversation;
-  /** `"awaiting"` when the session asks for input, `"error"` when the unseen turn failed, else `"done"`. */
-  kind: "done" | "error" | "awaiting";
-  /** Why the session waits on the user; set for `awaiting` items. */
+  /**
+   * `"awaiting"`: the session asks for input. `"answered"`: the user answered and
+   * the agent is working on it. Otherwise the unseen turn's outcome.
+   */
+  kind: "done" | "error" | "awaiting" | "answered";
+  /** The question awaiting an answer, or the one answered (`"approval"` for approvals). */
   reason?: string;
+  /** Whether the viewer has unseen agent output in the session (the sidebar dot). */
+  unread: boolean;
 }
 
 /**
- * Collect sessions with unseen agent output, newest first.
+ * Collect inbox session rows, newest first.
  *
  * `isUnseen` is the sidebar dot's predicate (injected to keep this module
  * free of the read-state store), so both surfaces agree on what's unread.
  * Rows with pending approvals are skipped — they're already listed as
- * approval items, and one session shouldn't appear twice. Rows flagged as
- * awaiting input (no approval dialog) are listed as `awaiting` items, seen or not.
+ * approval items, and one session shouldn't appear twice. Rows awaiting
+ * input or with an answer in progress are listed read or not; finished
+ * turns only while unread.
  */
 export function collectUnreadInboxItems(
   rows: Conversation[],
   isUnseen: (id: string, updatedAt: number, status: string | undefined) => boolean,
 ): UnreadInboxItem[] {
-  return rows
-    .filter(
-      (row) =>
-        !row.archived &&
-        (row.pending_elicitations_count ?? 0) === 0 &&
-        (awaitingInputReason(row) !== undefined || isUnseen(row.id, row.updated_at, row.status)),
-    )
-    .sort((a, b) => b.updated_at - a.updated_at)
-    .map((row): UnreadInboxItem => {
-      const reason = awaitingInputReason(row);
-      if (reason) return { row, kind: "awaiting", reason };
-      return { row, kind: row.status === "failed" ? "error" : "done" };
-    });
+  const items: UnreadInboxItem[] = [];
+  for (const row of rows) {
+    if (row.archived || (row.pending_elicitations_count ?? 0) > 0) continue;
+    const unread = isUnseen(row.id, row.updated_at, row.status);
+    const awaiting = awaitingInputReason(row);
+    const answered = inputAnsweredReason(row);
+    if (awaiting) items.push({ row, kind: "awaiting", reason: awaiting, unread });
+    else if (answered) items.push({ row, kind: "answered", reason: answered, unread });
+    else if (unread) items.push({ row, kind: row.status === "failed" ? "error" : "done", unread });
+  }
+  return items.sort((a, b) => b.row.updated_at - a.row.updated_at);
 }
 
 /** One unseen file comment, paired with the session that owns it. */

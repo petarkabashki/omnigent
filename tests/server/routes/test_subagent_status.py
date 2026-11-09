@@ -797,6 +797,12 @@ def _awaiting_label(route: _StatusRoute, sid: str) -> str:
     return conv.labels.get("omnigent.awaiting_input", "")
 
 
+def _answered_label(route: _StatusRoute, sid: str) -> str:
+    conv = route.store.get_conversation(sid)
+    assert conv is not None
+    return conv.labels.get("omnigent.input_answered", "")
+
+
 def _append_message(route: _StatusRoute, sid: str, role: str, text: str) -> None:
     block_type = "output_text" if role == "assistant" else "input_text"
     route.store.append(
@@ -824,12 +830,39 @@ async def test_turn_ending_with_a_question_sets_awaiting_input_until_next_turn(
     await _post_event(route, sid, "external_session_status", {"status": "idle"})
     assert _awaiting_label(route, sid) == "Should I push this?"
 
+    # Answering moves the question to the answered label until the turn ends.
     await _post_event(route, sid, "external_session_status", {"status": "running"})
     assert _awaiting_label(route, sid) == ""
+    assert _answered_label(route, sid) == "Should I push this?"
 
     _append_message(route, sid, "assistant", "Pushed.")
     await _post_event(route, sid, "external_session_status", {"status": "idle"})
+    assert (_awaiting_label(route, sid), _answered_label(route, sid)) == ("", "")
+
+    # A resolved approval (waiting -> running) is answered too.
+    await _post_event(route, sid, "external_session_status", {"status": "waiting"})
+    await _post_event(route, sid, "external_session_status", {"status": "running"})
+    assert _answered_label(route, sid) == "approval"
+    await _post_event(route, sid, "external_session_status", {"status": "failed"})
+    assert _answered_label(route, sid) == ""
+
+
+async def test_question_answering_another_session_does_not_await_the_user(
+    status_route: _StatusRoute,
+) -> None:
+    route = status_route
+    sid = route.parent_id
+    _append_message(route, sid, "user", "[Message from acme/Product (session s1)]\nShip it?")
+    _append_message(route, sid, "assistant", "Checked.\n\nShould I also tag the release?")
+    await _post_event(route, sid, "external_session_status", {"status": "idle"})
     assert _awaiting_label(route, sid) == ""
+
+    # The same question after the owner's own message does wait on the owner.
+    await _post_event(route, sid, "external_session_status", {"status": "running"})
+    _append_message(route, sid, "user", "Ship it")
+    _append_message(route, sid, "assistant", "Shipped.\n\nShould I also tag the release?")
+    await _post_event(route, sid, "external_session_status", {"status": "idle"})
+    assert _awaiting_label(route, sid) == "Should I also tag the release?"
 
 
 async def test_user_message_and_archive_clear_awaiting_input(
@@ -846,6 +879,7 @@ async def test_user_message_and_archive_clear_awaiting_input(
         route, sid, "message", {"role": "user", "content": [{"type": "input_text", "text": "go"}]}
     )
     assert _awaiting_label(route, sid) == ""
+    assert _answered_label(route, sid) == "Claude is waiting for you"
 
     agent_id = uuid4().hex
     SqlAlchemyAgentStore(db_uri).create(
@@ -856,7 +890,7 @@ async def test_user_message_and_archive_clear_awaiting_input(
     response = await route.client.patch(f"/v1/sessions/{sid}", json={"archived": True})
     assert response.status_code == 200, response.text
     await _flush_live_state()
-    assert _awaiting_label(route, sid) == ""
+    assert (_awaiting_label(route, sid), _answered_label(route, sid)) == ("", "")
 
 
 async def test_awaiting_input_event_requires_a_message(status_route: _StatusRoute) -> None:

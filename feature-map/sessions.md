@@ -191,13 +191,18 @@ the header menu), and each place is a separate entry point.
   keep their own touch handling.
 - `awaiting-input`: a session blocked on the user without an approval dialog
   shows as "Needs response" like a pending approval: sidebar badge and count,
-  Inbox "Awaiting response" tab (the reason is the row preview), and an
+  Inbox "Needs input" tab (the reason is the row preview), and an
   immediate OS notification. The server sets label `omnigent.awaiting_input`
   (reason, 256 chars) when a turn ends on a question or request to the user, or
   when Claude Code's `Notification` hook reports a permission or idle prompt. It
-  clears when the user sends a message, a new turn starts, or the session is
-  archived. To try: ask an agent "End your reply by asking me which option I
-  prefer", wait for the turn to end, and check the sidebar and Inbox.
+  is not set when the turn answered another session's `[Message from …]`, since
+  that question is for the sending agent. A reply or a resolved approval moves
+  it to `omnigent.input_answered`, shown as a green "Answered" row while the
+  agent works; the turn's end clears it. Inbox rows keep read state (bold title
+  and blue dot) separate from input state (the coloured label). To try: ask an
+  agent "End your reply by asking me which option I prefer", wait for the turn
+  to end, and check the sidebar and Inbox. Inbox titles name role sessions by
+  their `project/Role` handle.
 
 ## How to get to it (user POV)
 

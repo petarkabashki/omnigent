@@ -307,6 +307,35 @@ describe("collectUnreadInboxItems", () => {
     ]);
   });
 
+  it("keeps the read state separate from the input state", () => {
+    const rows = [
+      makeRow({
+        id: "answered-read",
+        status: "running",
+        updated_at: 500,
+        labels: { "omnigent.input_answered": "Ship it?" },
+      }),
+      makeRow({
+        id: "asking-unread",
+        status: "idle",
+        updated_at: 2_000,
+        labels: { "omnigent.awaiting_input": "Which option?" },
+      }),
+      makeRow({
+        id: "answered-offline",
+        status: "idle",
+        updated_at: 400,
+        runner_online: false,
+        labels: { "omnigent.input_answered": "approval" },
+      }),
+    ];
+    const items = collectUnreadInboxItems(rows, unseenAfter(1_000));
+    expect(items.map((i) => [i.row.id, i.kind, i.reason, i.unread])).toEqual([
+      ["asking-unread", "awaiting", "Which option?", true],
+      ["answered-read", "answered", "Ship it?", false],
+    ]);
+  });
+
   it("skips archived rows and rows already listed as approvals", () => {
     // A session with a pending prompt shows as its approval card; listing it
     // again as unread would put one session in the inbox twice.

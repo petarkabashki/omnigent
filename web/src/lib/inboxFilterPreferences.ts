@@ -1,5 +1,5 @@
 // Persisted, per-device preference for which Inbox tab is selected ("All" /
-// "Unread" / "Awaiting response"), so a viewer who only wants approvals — or
+// "Unread" / "Needs input"), so a viewer who only wants approvals — or
 // only new agent replies — lands on that view after a reload.
 
 const STORAGE_KEY = "omnigent:inbox-filter";

@@ -1617,7 +1617,7 @@ def register_events_routes(
                 raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
         if body.type == "message" and body.data.get("role", "user") == "user":
             if conv.labels.get(awaiting_input.AWAITING_INPUT_LABEL_KEY):
-                awaiting_input.schedule_clear(session_id)
+                awaiting_input.schedule_answered(session_id)
             from omnigent.harnesses.claude_native.bridge import is_auth_slash_command
 
             if is_auth_slash_command(_extract_user_text_from_event(body)) and (

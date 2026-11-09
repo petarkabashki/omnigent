@@ -34,7 +34,7 @@
  * items sort newest first under recency headers ("Just now", "Earlier
  * today", …). Only the newest approval starts expanded; manual toggles are
  * keyed by item, so they stick as new items arrive. Tabs narrow the list
- * to "Unread" (comments + unread sessions) or "Awaiting response"
+ * to "Unread" (comments + unread sessions) or "Needs input"
  * (approvals); the pick persists per device.
  *
  * Deliberately NOT here: dismissing approvals and mentions — neither
@@ -48,7 +48,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import type { Query } from "@tanstack/react-query";
 import type { Session } from "@/lib/types";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
@@ -58,6 +58,7 @@ import {
   CircleAlertIcon,
   CircleCheckIcon,
   MessageCircleQuestionIcon,
+  ReplyIcon,
   HandIcon,
   InboxIcon,
   Loader2Icon,
@@ -126,6 +127,10 @@ import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
 import { FileViewerContext } from "@/shell/FileViewerContext";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
+import { type Conversation, useProjects } from "@/hooks/useConversations";
+import { ANSWERED_APPROVAL } from "@/lib/awaitingInput";
+import { projectPathOf } from "@/lib/projectTree";
+import { sessionRoleHandle } from "@/lib/rolesApi";
 
 /** Optimistic verdicts keyed by elicitation id, mirroring the chat store's flip. */
 type RespondedMap = Record<
@@ -159,7 +164,7 @@ const HOST_OFFLINE_REPLY_MESSAGE =
 const INBOX_TABS: { value: InboxFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "unread", label: "Unread" },
-  { value: "awaiting", label: "Awaiting response" },
+  { value: "awaiting", label: "Needs input" },
 ];
 
 const EMPTY_STATES: Record<InboxFilter, { title: string; body: string }> = {
@@ -172,8 +177,8 @@ const EMPTY_STATES: Record<InboxFilter, { title: string; body: string }> = {
     body: "New agent replies and unseen file comments will show up here.",
   },
   awaiting: {
-    title: "No approvals waiting",
-    body: "When an agent needs your input, it will show up here.",
+    title: "Nothing needs your input",
+    body: "When an agent asks you something or needs an approval, it will show up here.",
   },
 };
 
@@ -192,7 +197,29 @@ const TILE_TONES = {
   yellow: "bg-status-yellow/12 text-status-yellow",
   gray: "bg-status-gray/12 text-status-gray",
   red: "bg-status-red/12 text-status-red",
+  green: "bg-status-green/12 text-status-green",
 } as const;
+
+// The input-state label beside the tile, coloured to match it.
+const LABEL_TONES: Record<keyof typeof TILE_TONES, string> = {
+  yellow: "text-status-yellow",
+  gray: "text-muted-foreground",
+  red: "text-status-red",
+  green: "text-status-green",
+};
+
+/**
+ * Who sent an inbox item: the project-qualified role handle for a role session
+ * (``acme/Product``), else the project path before the title.
+ */
+function inboxSenderLabel(row: Conversation, projectPaths: Map<string, string>): string {
+  const title = conversationDisplayLabel(row);
+  const projectPath = row.project_id != null ? (projectPaths.get(row.project_id) ?? null) : null;
+  const handle = sessionRoleHandle(row.labels, projectPath, row.project_id != null);
+  const alias = row.labels?.["omnigent.alias"]?.trim();
+  if (handle) return title === alias ? handle : `${handle} · ${title}`;
+  return projectPath ? `${projectPath} · ${title}` : title;
+}
 
 // Compact action buttons inside an expanded card.
 const OUTLINE_ACTION =
@@ -214,6 +241,14 @@ export function InboxPage() {
   } = useSidebarData();
   const taskDetailsEnabled = isFeatureEnabled(useServerInfo(), "automations_v2");
   const [filter, setFilter] = useState<InboxFilter>(readInboxFilter);
+  const { data: projects = [] } = useProjects();
+  const projectPaths = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const project of projects) {
+      if (project.id !== null) map.set(project.id, projectPathOf(project));
+    }
+    return map;
+  }, [projects]);
   const [responded, setResponded] = useState<RespondedMap>({});
   const pendingSubmissions = useRef(new Map<string, RespondedMap[string]>());
   // Manual expand/collapse toggles keyed by entry key. Anything not in
@@ -318,7 +353,10 @@ export function InboxPage() {
 
   const visibleApprovals = showApprovals ? items : [];
   const visibleComments = showUnread ? commentInbox.items : [];
-  const visibleUnread = showUnread ? unreadItems : unreadItems.filter((i) => i.kind === "awaiting");
+  // Unread is the read state; Needs input is the input state. All shows both.
+  const visibleUnread = unreadItems.filter((i) =>
+    filter === "all" ? true : filter === "unread" ? i.unread : i.kind === "awaiting",
+  );
   const visibleAutomations = showUnread ? automationInbox.items : [];
   const visibleCount =
     visibleApprovals.length +
@@ -327,11 +365,16 @@ export function InboxPage() {
     visibleAutomations.length;
   const totalCount =
     items.length + commentInbox.items.length + unreadItems.length + automationInbox.items.length;
+  const needsInputCount = unreadItems.filter((i) => i.kind === "awaiting").length;
+  const answeredCount = unreadItems.filter((i) => i.kind === "answered").length;
+  const unreadSessionCount = unreadItems.filter((i) => i.unread).length;
   const summary = [
     items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
     commentInbox.items.length > 0 &&
       (commentInbox.items.length === 1 ? "1 comment" : `${commentInbox.items.length} comments`),
-    unreadItems.length > 0 && `${unreadItems.length} unread`,
+    needsInputCount > 0 && `${needsInputCount} need input`,
+    answeredCount > 0 && `${answeredCount} answered`,
+    unreadSessionCount > 0 && `${unreadSessionCount} unread`,
     automationInbox.items.length > 0 &&
       (automationInbox.items.length === 1
         ? "1 failed automation"
@@ -400,7 +443,7 @@ export function InboxPage() {
 
   // "Settled" gating for the empty state: while the session list is
   // still paging or ANY snapshot is in flight, an empty `items` only
-  // means "not assembled yet" — showing "No approvals waiting" then
+  // means "not assembled yet" — showing "Nothing needs your input" then
   // would be a lie. Failed snapshots also block the empty state (their
   // approvals exist, we just couldn't fetch them) and get a banner.
   const assembling =
@@ -524,7 +567,7 @@ export function InboxPage() {
         </InboxCard>
       );
     }
-    const title = conversationDisplayLabel(entry.item.row);
+    const title = inboxSenderLabel(entry.item.row, projectPaths);
 
     if (entry.kind === "approval") {
       const { item } = entry;
@@ -675,10 +718,16 @@ export function InboxPage() {
     const sessionId = item.row.id;
     const isError = item.kind === "error";
     const isAwaiting = item.kind === "awaiting";
+    const isAnswered = item.kind === "answered";
+    const tone = isError ? "red" : isAwaiting ? "yellow" : isAnswered ? "green" : "gray";
     const previewQuery = previewBySession.get(sessionId);
     const output = previewQuery?.data ?? undefined;
     // An awaiting session leads with what it asks, not its latest output.
-    const preview = item.reason ?? output?.preview;
+    const preview = isAnswered
+      ? item.reason === ANSWERED_APPROVAL
+        ? "Approval given · agent working"
+        : `You answered: ${item.reason} · agent working`
+      : (item.reason ?? output?.preview);
     const markRead = () => {
       // Drop the toggle so a later reply re-surfaces the row collapsed, and
       // the reply state so it can't come back stale with the row.
@@ -774,27 +823,38 @@ export function InboxPage() {
         tile={
           <KindTile
             icon={
-              isError ? CircleAlertIcon : isAwaiting ? MessageCircleQuestionIcon : CircleCheckIcon
+              isError
+                ? CircleAlertIcon
+                : isAwaiting
+                  ? MessageCircleQuestionIcon
+                  : isAnswered
+                    ? ReplyIcon
+                    : CircleCheckIcon
             }
-            tone={isError ? "red" : isAwaiting ? "yellow" : "gray"}
+            tone={tone}
           />
         }
-        kindLabel={isError ? "Error" : isAwaiting ? "Needs response" : "Done"}
+        kindLabel={
+          isError ? "Error" : isAwaiting ? "Needs input" : isAnswered ? "Answered" : "Done"
+        }
+        kindTone={tone}
         title={title}
         preview={preview}
         at={entry.at}
-        unread
+        unread={item.unread}
         expanded={expanded}
         onToggle={onToggle}
         rowActions={
           <>
-            <RowAction
-              label="Mark as read"
-              icon={CheckIcon}
-              onClick={markRead}
-              disabled={replySending}
-              componentId="inbox.unread.row_mark_read"
-            />
+            {item.unread && (
+              <RowAction
+                label="Mark as read"
+                icon={CheckIcon}
+                onClick={markRead}
+                disabled={replySending}
+                componentId="inbox.unread.row_mark_read"
+              />
+            )}
             {/* Opening is reading, as with the card's Open session. */}
             <RowAction
               label="Open session"
@@ -838,17 +898,19 @@ export function InboxPage() {
           </p>
         )}
         <InboxActions>
-          <Button
-            variant="outline"
-            size="xs"
-            className={OUTLINE_ACTION}
-            disabled={replySending}
-            onClick={markRead}
-            componentId="inbox.unread.mark_read"
-          >
-            <CheckIcon className="size-3.5" />
-            Mark as read
-          </Button>
+          {item.unread && (
+            <Button
+              variant="outline"
+              size="xs"
+              className={OUTLINE_ACTION}
+              disabled={replySending}
+              onClick={markRead}
+              componentId="inbox.unread.mark_read"
+            >
+              <CheckIcon className="size-3.5" />
+              Mark as read
+            </Button>
+          )}
           {/* One live primary action: Send once there's a draft, else Open session. */}
           <Button
             asChild
@@ -1051,6 +1113,7 @@ function InboxCard({
   dataKind,
   tile,
   kindLabel,
+  kindTone,
   title,
   preview,
   at,
@@ -1064,6 +1127,8 @@ function InboxCard({
   dataKind?: string;
   tile: ReactNode;
   kindLabel: string;
+  /** Colours the label to match the tile; plain muted text when unset. */
+  kindTone?: keyof typeof TILE_TONES;
   title: string;
   preview: ReactNode;
   /** Epoch seconds. */
@@ -1092,7 +1157,7 @@ function InboxCard({
         <button
           type="button"
           aria-expanded={expanded}
-          aria-label={`${kindLabel}: ${title}`}
+          aria-label={`${kindLabel}: ${title}${unread ? " (unread)" : ""}`}
           onClick={onToggle}
           className="flex min-w-0 flex-1 cursor-pointer items-center gap-3.5 p-2 text-left"
         >
@@ -1102,7 +1167,11 @@ function InboxCard({
               // The tile already signals the kind, so narrow screens drop the
               // label column to keep room for the title.
               "hidden w-[140px] shrink-0 truncate text-ui sm:block",
-              expanded ? "text-foreground" : "text-muted-foreground",
+              kindTone
+                ? cn("font-medium", LABEL_TONES[kindTone])
+                : expanded
+                  ? "text-foreground"
+                  : "text-muted-foreground",
             )}
           >
             {kindLabel}
@@ -1110,8 +1179,11 @@ function InboxCard({
           {expanded ? (
             <span className="flex-1" />
           ) : (
-            <span className="min-w-0 flex-1 truncate text-ui">
-              <span className="font-medium">{title}</span>
+            <span
+              className={cn("min-w-0 flex-1 truncate text-ui", !unread && "text-muted-foreground")}
+            >
+              {/* Bold title and the dot mark unread; read rows are plain and muted. */}
+              <span className={unread ? "font-semibold text-foreground" : undefined}>{title}</span>
               {preview && <span className="text-muted-foreground"> — {preview}</span>}
             </span>
           )}
@@ -1123,10 +1195,10 @@ function InboxCard({
             <span
               role="img"
               aria-label="Unread"
-              className="size-1.5 shrink-0 rounded-full bg-foreground"
+              className="size-2 shrink-0 rounded-full bg-status-blue"
             />
           ) : (
-            <span aria-hidden className="w-1.5 shrink-0" />
+            <span aria-hidden className="w-2 shrink-0" />
           )}
         </button>
         {showRowActions && (

@@ -80,6 +80,7 @@ vi.mock("@/components/blocks/ApprovalCard", async (importActual) => {
 vi.mock("@/hooks/useConversations", async (importActual) => ({
   ...(await importActual<typeof conversationsHook>()),
   useConversations: vi.fn(),
+  useProjects: vi.fn(() => ({ data: [] })),
 }));
 vi.mock("@/hooks/useAutomationInbox", () => ({ useAutomationInbox: vi.fn() }));
 vi.mock("@/hooks/useCommentInbox", () => ({ useCommentInbox: vi.fn() }));
@@ -185,6 +186,9 @@ function automationInboxStub(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.mocked(automationInboxHook.useAutomationInbox).mockReturnValue(automationInboxStub());
   vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([]));
+  vi.mocked(conversationsHook.useProjects).mockReturnValue({
+    data: [],
+  } as unknown as ReturnType<typeof conversationsHook.useProjects>);
   vi.mocked(commentInboxHook.useCommentInbox).mockReturnValue(commentInboxStub());
   vi.mocked(sessionsApi.getSession).mockResolvedValue({
     pendingElicitations: [],
@@ -662,6 +666,59 @@ describe("InboxPage unread sessions", () => {
 
     expect(await screen.findByText("Nothing waiting on you")).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument();
+  });
+
+  it("shows read and input state separately: a read question still needs input", async () => {
+    const asking = conversation({
+      id: "sess_asking",
+      title: "Asking",
+      status: "idle",
+      pending_elicitations_count: 0,
+      labels: { "omnigent.awaiting_input": "Which option?" },
+    });
+    const answered = unreadConversation({
+      id: "sess_answered",
+      title: "Shipper",
+      status: "running",
+      labels: { "omnigent.input_answered": "Ship it?" },
+    });
+    seedReadState([
+      { id: asking.id, viewer_last_seen: asking.updated_at },
+      { id: answered.id, viewer_last_seen: answered.updated_at - 100 },
+    ]);
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(
+      conversationsStub([asking, answered]),
+    );
+    renderPage();
+
+    const rows = await screen.findAllByTestId("inbox-unread");
+    const askingRow = rows.find((r) => r.getAttribute("data-kind") === "awaiting")!;
+    const answeredRow = rows.find((r) => r.getAttribute("data-kind") === "answered")!;
+    expect(within(askingRow).getByText("Needs input")).toBeInTheDocument();
+    expect(within(askingRow).queryByRole("img", { name: "Unread" })).not.toBeInTheDocument();
+    expect(within(askingRow).queryByRole("button", { name: "Mark as read" })).toBeNull();
+    expect(within(answeredRow).getByText("Answered")).toBeInTheDocument();
+    expect(within(answeredRow).getByText(/You answered: Ship it\?/)).toBeInTheDocument();
+    expect(screen.getByText("1 need input · 1 answered")).toBeInTheDocument();
+
+    selectTab("Needs input");
+    expect(screen.getAllByTestId("inbox-unread").map((r) => r.dataset.kind)).toEqual(["awaiting"]);
+  });
+
+  it("names the sender with its project-qualified role handle", async () => {
+    vi.mocked(conversationsHook.useProjects).mockReturnValue({
+      data: [{ id: "proj_1", name: "forthkit", path: "forthkit" }],
+    } as unknown as ReturnType<typeof conversationsHook.useProjects>);
+    const row = unreadConversation({
+      title: "Product",
+      project_id: "proj_1",
+      labels: { "omnigent.alias": "Product" },
+    });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    const item = await screen.findByTestId("inbox-unread");
+    expect(within(item).getByText("forthkit/Product")).toBeInTheDocument();
   });
 
   it("expands to the session actions and drops the row on Mark as read", async () => {
@@ -1479,7 +1536,7 @@ describe("InboxPage filter tabs", () => {
     expect(screen.getByTestId("inbox-unread")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "All" })).toHaveAttribute("aria-selected", "true");
 
-    selectTab("Awaiting response");
+    selectTab("Needs input");
     expect(screen.getByTestId("inbox-item")).toBeInTheDocument();
     expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument();
 
@@ -1508,8 +1565,8 @@ describe("InboxPage filter tabs", () => {
     await screen.findByText("Nothing waiting on you");
     selectTab("Unread");
     expect(screen.getByText("You’re all caught up")).toBeInTheDocument();
-    selectTab("Awaiting response");
-    expect(screen.getByText("No approvals waiting")).toBeInTheDocument();
+    selectTab("Needs input");
+    expect(screen.getByText("Nothing needs your input")).toBeInTheDocument();
   });
 });
 
@@ -1644,7 +1701,9 @@ describe("automation failures", () => {
         }),
       );
       renderPage(undefined, taskDetailsEnabled);
-      fireEvent.click(screen.getByRole("button", { name: "Automation failed: Daily report" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "Automation failed: Daily report (unread)" }),
+      );
       expect(screen.getByText("Host · The host was offline.")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: /Open automation/ })).toHaveAttribute(
         "href",
@@ -1652,7 +1711,7 @@ describe("automation failures", () => {
       );
       fireEvent.click(screen.getByRole("button", { name: "Mark as read" }));
       expect(markRead).toHaveBeenCalledWith("run");
-      selectTab("Awaiting response");
+      selectTab("Needs input");
       expect(screen.queryByTestId("inbox-automation-item")).toBeNull();
       selectTab("Unread");
       expect(screen.getByTestId("inbox-automation-item")).toBeInTheDocument();

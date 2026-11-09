@@ -5067,7 +5067,10 @@ def _publish_status(
     _session_status_cache[session_id] = status
     if previous_status != status:
         _publish_child_status_to_parent(session_id, status)
-        if status in ("running", "failed"):
+        if status == "running":
+            # A reply or a resolved approval set the agent going: the wait is answered.
+            awaiting_input.schedule_answered(session_id, approval=previous_status == "waiting")
+        elif status == "failed":
             awaiting_input.schedule_clear(session_id)
     if status == "idle" and previous_status in ("running", "waiting") and persist_live_status:
         # A turn can open or merge a PR while nobody watches; refresh what the server

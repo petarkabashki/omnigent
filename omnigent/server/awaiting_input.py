@@ -5,10 +5,15 @@ waiting on the user for something other than a formal approval dialog: the
 agent ended its turn by asking a question, or a native TUI reported a
 ``Notification`` hook. An empty value means not awaiting (labels are
 upsert-only).
+
+``omnigent.input_answered`` records that the wait was answered (a reply, or an
+approval resolved) until the agent's next turn ends, so the inbox can tell
+"input given" apart from "needs input" and from plain read state.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
@@ -17,6 +22,9 @@ from omnigent.server import session_live_state
 from omnigent.stores.conversation_store import ConversationStore
 
 AWAITING_INPUT_LABEL_KEY = "omnigent.awaiting_input"
+INPUT_ANSWERED_LABEL_KEY = "omnigent.input_answered"
+# The answered label for an approval, which has no question text of its own.
+ANSWERED_APPROVAL = "approval"
 
 _FENCED_CODE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
@@ -71,20 +79,40 @@ def detect_awaiting_input(text: str) -> str | None:
     return last
 
 
+# Prefix of a message another session sent (see ``session_orchestration``).
+_AGENT_MESSAGE_PREFIX = "[Message from "
+
+
+def _message_text(data: MessageData) -> str:
+    return "\n".join(
+        block["text"]
+        for block in data.content
+        if block.get("type") in ("output_text", "input_text")
+        and isinstance(block.get("text"), str)
+    )
+
+
 def _latest_assistant_text(store: ConversationStore, session_id: str) -> str:
-    """Return the newest visible message's text when it is the assistant's, else ``""``."""
-    page = store.list_items(session_id, limit=5, order="desc", type="message")
+    """
+    Return the newest visible message's text when it is the assistant's, else ``""``.
+
+    A turn that answered another session's message returns ``""``: its closing
+    question is for that agent, not the user.
+    """
+    page = store.list_items(session_id, limit=20, order="desc", type="message")
+    final = ""
     for item in page.data:
         if not isinstance(item.data, MessageData) or item.data.is_meta:
             continue
-        if item.data.role != "assistant":
+        if item.data.role == "assistant":
+            final = final or _message_text(item.data) or " "
+            continue
+        if not final:
             return ""
-        return "\n".join(
-            block["text"]
-            for block in item.data.content
-            if block.get("type") == "output_text" and isinstance(block.get("text"), str)
-        )
-    return ""
+        if _message_text(item.data).startswith(_AGENT_MESSAGE_PREFIX):
+            return ""
+        return final.strip()
+    return final.strip()
 
 
 def set_awaiting_input(store: ConversationStore, session_id: str, reason: str) -> None:
@@ -96,10 +124,41 @@ def set_awaiting_input(store: ConversationStore, session_id: str, reason: str) -
     store.set_labels(session_id, {AWAITING_INPUT_LABEL_KEY: reason})
 
 
+def _write(store: ConversationStore, session_id: str, awaiting: str, answered: str) -> None:
+    conv = store.get_conversation(session_id)
+    if conv is None:
+        return
+    updates = {
+        key: value[:LABEL_VALUE_MAX_LEN]
+        for key, value in (
+            (AWAITING_INPUT_LABEL_KEY, awaiting),
+            (INPUT_ANSWERED_LABEL_KEY, answered),
+        )
+        if conv.labels.get(key, "") != value[:LABEL_VALUE_MAX_LEN]
+    }
+    if updates:
+        store.set_labels(session_id, updates)
+
+
 def refresh_after_turn(store: ConversationStore, session_id: str) -> None:
-    """Set or clear the label from the turn's final assistant message."""
+    """Set or clear the label from the turn's final assistant message; the answer is consumed."""
     reason = detect_awaiting_input(_latest_assistant_text(store, session_id)) or ""
-    set_awaiting_input(store, session_id, reason)
+    _write(store, session_id, reason, "")
+
+
+def mark_answered(store: ConversationStore, session_id: str, *, approval: bool) -> None:
+    """Move a pending wait to answered: the awaiting question, or an approval resolved."""
+    conv = store.get_conversation(session_id)
+    if conv is None:
+        return
+    question = conv.labels.get(AWAITING_INPUT_LABEL_KEY, "")
+    if question or approval:
+        _write(store, session_id, "", question or ANSWERED_APPROVAL)
+
+
+def clear(store: ConversationStore, session_id: str) -> None:
+    """Drop both the awaiting and the answered labels."""
+    _write(store, session_id, "", "")
 
 
 def schedule_refresh_after_turn(session_id: str) -> None:
@@ -110,7 +169,15 @@ def schedule_refresh_after_turn(session_id: str) -> None:
 
 
 def schedule_clear(session_id: str) -> None:
-    """Clear the label off-loop on the live-state worker."""
+    """Clear the awaiting and answered labels off-loop on the live-state worker."""
     store = session_live_state.conversation_store()
     if store is not None:
-        session_live_state.submit("awaiting_input", set_awaiting_input, store, session_id, "")
+        session_live_state.submit("awaiting_input", clear, store, session_id)
+
+
+def schedule_answered(session_id: str, *, approval: bool = False) -> None:
+    """Mark the wait answered off-loop on the live-state worker."""
+    store = session_live_state.conversation_store()
+    if store is not None:
+        answered = functools.partial(mark_answered, approval=approval)
+        session_live_state.submit("awaiting_input", answered, store, session_id)
