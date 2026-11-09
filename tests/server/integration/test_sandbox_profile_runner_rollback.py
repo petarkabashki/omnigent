@@ -23,7 +23,7 @@ from tests.server.integration._sandbox_profile_support import (
 )
 
 
-@pytest.mark.parametrize("failure", ["profile", "runner", "tunnel"])
+@pytest.mark.parametrize("failure", ["profile", "runner", "capacity", "tunnel"])
 @pytest.mark.parametrize("relaunch", [False, True])
 async def test_failed_runner_preserves_only_persistent_host_affinity(
     env: _Env,
@@ -60,13 +60,18 @@ async def test_failed_runner_preserves_only_persistent_host_affinity(
         assert release_clear.wait(timeout=10)
         return clear_host(*args, **kwargs)
 
+    refusal_code, refusal_message = {
+        "runner": ("harness_not_configured", "harness is unavailable"),
+        "capacity": ("host_capacity", "host memory is exhausted"),
+    }.get(failure, (None, None))
+
     async def launch_runner(conv: Conversation, *_args: object) -> object:
         runner_id = uuid.uuid4().hex
         env.conversations.replace_runner_id(conv.id, runner_id)
         return sessions_routes._HostLaunchAttempt(
             runner_id=runner_id,
-            error_code="harness_not_configured" if failure == "runner" else None,
-            error="harness is unavailable" if failure == "runner" else None,
+            error_code=refusal_code,
+            error=refusal_message,
         )
 
     if failure == "profile":
@@ -109,6 +114,8 @@ async def test_failed_runner_preserves_only_persistent_host_affinity(
                 await asyncio.wait_for(task, timeout=10)
 
     assert launch.settled.is_set() and launch.error is not None
+    if refusal_message is not None:
+        assert launch.error == refusal_message
     assert env.catalog.get_session_snapshot(session_id) == snapshot
     session = env.conversations.get_conversation(session_id)
     assert session is not None

@@ -5054,6 +5054,10 @@ async def _bind_and_launch_managed_runner(
                         reason = (
                             launch_attempt.error or "harness not configured on the sandbox host"
                         )
+                    elif launch_attempt.error_code == _HOST_CAPACITY_ERROR_CODE:
+                        # The runner will never connect; fail now with the host's cause
+                        # instead of waiting out the tunnel timeout.
+                        reason = launch_attempt.error or "the sandbox host is at capacity"
                 except OmnigentError as exc:
                     reason = str(exc)
                 except Exception as exc:  # noqa: BLE001 — admission can fail after provisioning
