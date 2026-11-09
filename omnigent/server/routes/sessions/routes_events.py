@@ -358,6 +358,7 @@ from omnigent.telemetry.request_headers import (
     parse_installation_id_header as _tel_parse_installation_id,
 )
 from omnigent.tools.client_specified import parse_client_side_tool_specs
+from omnigent.util.external_task import is_external_task
 from omnigent.util.session_lifecycle import (
     CLOSED_LABEL_KEY,
     CLOSED_LABEL_VALUE,
@@ -1330,6 +1331,11 @@ def register_events_routes(
                 _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
             ),
         )
+        if is_external_task(conv.labels):
+            raise OmnigentError(
+                "This session mirrors work outside Omnigent and is read-only",
+                code=ErrorCode.CONFLICT,
+            )
         start_fire_stage("input_validation", session_id=session_id)
         peer_message = body.type == "session_message"
         if peer_message:

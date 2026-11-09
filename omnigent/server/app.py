@@ -124,6 +124,7 @@ from omnigent.server.routes.default_policies import create_default_policies_rout
 from omnigent.server.routes.dictation import create_dictation_router
 from omnigent.server.routes.extension_assets import create_extension_assets_router
 from omnigent.server.routes.extensions import create_extensions_router
+from omnigent.server.routes.external_tasks import create_external_tasks_router
 from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
@@ -3810,6 +3811,18 @@ def create_app(
         ),
         prefix="/v1",
         tags=["imports"],
+    )
+    app.include_router(
+        create_external_tasks_router(
+            conversation_store,
+            agent_store,
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+            project_store=project_store,
+            host_store=host_store,
+        ),
+        prefix="/v1",
+        tags=["external_tasks"],
     )
     # Per-user LLM cost report (omni usage). User-scoped, not session-scoped,
     # so it gets its own router rather than living under /sessions.

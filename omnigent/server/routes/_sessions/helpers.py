@@ -337,6 +337,7 @@ from omnigent.util.cost_plan import (
     COST_CONTROL_LABEL_NAMESPACE,
     reserved_cost_control_keys,
 )
+from omnigent.util.external_task import is_external_task
 from omnigent.util.reasoning_effort import (
     EFFORT_VALUES,
     validate_effort,
@@ -6361,6 +6362,11 @@ async def _launch_runner_on_host_impl(
     :returns: The :class:`_HostLaunchAttempt` — the new runner id plus any
         structured refusal from the host.
     """
+    if is_external_task(conv.labels):
+        raise OmnigentError(
+            "This session mirrors work outside Omnigent and has no runner to launch",
+            code=ErrorCode.CONFLICT,
+        )
     lock = _relaunch_locks.setdefault(conv.id, asyncio.Lock())
     previous_attempt = _relaunch_last_attempt.get(conv.id)
     async with lock:
