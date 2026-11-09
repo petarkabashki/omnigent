@@ -194,7 +194,8 @@ the header menu), and each place is a separate entry point.
   Inbox "Needs input" tab (the reason is the row preview), and an
   immediate OS notification. The server sets label `omnigent.awaiting_input`
   (reason, 256 chars) when a turn ends on a question or request to the user, or
-  when Claude Code's `Notification` hook reports a permission or idle prompt. It
+  when Claude Code's `Notification` hook reports a permission prompt or dialog
+  (not its idle prompt, which follows every finished turn). It
   is not set when the turn answered another session's `[Message from …]`, since
   that question is for the sending agent. A reply or a resolved approval moves
   it to `omnigent.input_answered`, shown as a green "Answered" row while the

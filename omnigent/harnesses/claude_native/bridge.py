@@ -4425,9 +4425,9 @@ def _hook_record_from_jsonl_record(record: _JsonlRecord) -> ClaudeHookRecord:
 
 
 # ``Notification`` types meaning Claude is blocked on the user, with a fallback reason.
+# ``idle_prompt`` is left out: it fires after any idle minute, question or not.
 _AWAITING_INPUT_NOTIFICATIONS = {
     "permission_prompt": "Claude needs your permission",
-    "idle_prompt": "Claude is waiting for your input",
     "elicitation_dialog": "Claude is asking you a question",
 }
 _AWAITING_INPUT_MESSAGE_MAX_CHARS = 256

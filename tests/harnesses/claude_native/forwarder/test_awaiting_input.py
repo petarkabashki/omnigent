@@ -70,7 +70,7 @@ async def _forward_and_collect_awaiting_input(
             {"notification_type": "permission_prompt", "message": "Claude needs permission: Bash"},
             "Claude needs permission: Bash",
         ),
-        ({"notification_type": "idle_prompt"}, "Claude is waiting for your input"),
+        ({"notification_type": "elicitation_dialog"}, "Claude is asking you a question"),
     ],
 )
 async def test_notification_hook_posts_awaiting_input(
@@ -82,7 +82,11 @@ async def test_notification_hook_posts_awaiting_input(
 
 @pytest.mark.asyncio
 async def test_non_blocking_notification_is_not_forwarded(tmp_path: Path) -> None:
-    ignored = {"notification_type": "auth_success", "message": "Signed in"}
-    followed_by = {"notification_type": "idle_prompt", "message": "Waiting"}
-    body = await _forward_and_collect_awaiting_input(tmp_path, [ignored, followed_by])
+    # An idle prompt follows every finished turn, so it is not a request either.
+    ignored = [
+        {"notification_type": "auth_success", "message": "Signed in"},
+        {"notification_type": "idle_prompt", "message": "Claude is waiting for your input"},
+    ]
+    followed_by = {"notification_type": "permission_prompt", "message": "Waiting"}
+    body = await _forward_and_collect_awaiting_input(tmp_path, [*ignored, followed_by])
     assert body["data"] == {"message": "Waiting"}
