@@ -109,6 +109,8 @@ import {
 } from "@dnd-kit/sortable";
 import { useProjectOrder, useSaveProjectOrder } from "@/hooks/useProjectOrder";
 import { useIsMutating, useQueryClient } from "@tanstack/react-query";
+import { waitingChipLabel } from "@/components/waiting/WaitingStatusChip";
+import { WaitingNavButton } from "@/components/waiting/WaitingNavButton";
 import { PIN_WRITE_MUTATION_KEY } from "@/lib/sessionListCache";
 import {
   Link,
@@ -563,6 +565,7 @@ interface SidebarProps {
 function useActiveNavItem(): {
   isNewChatPage: boolean;
   isInboxPage: boolean;
+  isWaitingPage: boolean;
   isCanvasPage: boolean;
   isTasksPage: boolean;
   isUsagePage: boolean;
@@ -581,6 +584,7 @@ function useActiveNavItem(): {
   const leaf = segments.at(-1);
   const isExtensionRoute = extensionPathParts(location.pathname) !== null;
   const isInboxPage = !isExtensionRoute && leaf === "inbox";
+  const isWaitingPage = !isExtensionRoute && leaf === "waiting";
   const isCanvasPage =
     !isExtensionRoute && isCanvasPathname(location.pathname, rebasePath("/canvas"));
   // True for both /tasks (list) and /tasks/:taskId (detail). Basename-agnostic:
@@ -593,6 +597,7 @@ function useActiveNavItem(): {
     activeConversationId == null &&
     (gridId == null || !isFeatureEnabled(serverInfo, "grid_sessions_display_ui")) &&
     !isInboxPage &&
+    !isWaitingPage &&
     !isCanvasPage &&
     !isTasksPage &&
     !isUsagePage &&
@@ -608,6 +613,7 @@ function useActiveNavItem(): {
   return {
     isNewChatPage,
     isInboxPage,
+    isWaitingPage,
     isCanvasPage,
     isTasksPage,
     isUsagePage,
@@ -893,6 +899,7 @@ function SidebarImpl({
   const {
     isNewChatPage,
     isInboxPage,
+    isWaitingPage,
     isCanvasPage,
     isTasksPage,
     isUsagePage,
@@ -1378,6 +1385,7 @@ function SidebarImpl({
                   )}
                 </Link>
               </Button>
+              <WaitingNavButton active={isWaitingPage} onNavClick={onNavClick} />
               {canvasEnabled && (
                 <PrimaryNavLink
                   to={canvasDestination.pathname + canvasDestination.search}
@@ -6111,7 +6119,18 @@ function ConversationRowImpl({
           )}
         >
           {sessionState !== null ? (
-            <SessionStateBadge state={sessionState} />
+            <SessionStateBadge
+              state={sessionState}
+              tooltip={
+                sessionState.kind === "running" && conversation.status_since
+                  ? waitingChipLabel(
+                      conversation.status === "waiting" ? "waiting" : "running",
+                      conversation.status_since,
+                      null,
+                    )
+                  : undefined
+              }
+            />
           ) : (
             <span
               role="img"

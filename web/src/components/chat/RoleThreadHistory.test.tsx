@@ -31,6 +31,7 @@ describe("RoleThreadHistory", () => {
       { direction: "in", sessionId: "sess_product", itemId: "i1", createdAt: 1, text: "Plan it" },
       { direction: "owner", sessionId: "sess_product", itemId: "i3", createdAt: 3, text: "Use v2" },
       { direction: "out", sessionId: "sess_arch", itemId: "i2", createdAt: 4, text: "Done" },
+      { direction: "hub", sessionId: "sess_product", itemId: "i4", createdAt: 5, text: "Nudge" },
     ]);
     renderHistory();
 
@@ -41,6 +42,7 @@ describe("RoleThreadHistory", () => {
       ["in", "/Architect"],
       ["owner", "You"],
       ["out", "Product"],
+      ["hub", "Hub reminder"],
     ]);
     expect(roleThreadsApi.fetchRoleThreadMessages).toHaveBeenCalledWith(
       "sess_product",

@@ -32,6 +32,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { WaitingStatusChip } from "@/components/waiting/WaitingStatusChip";
 import { AgentInfoButton } from "@/components/AgentInfo";
 import { openSessionGraph } from "@/hooks/useSessionGraphTrigger";
 import { isMacPlatform } from "@/lib/hotkeys";
@@ -662,6 +663,14 @@ export function ChatHeader({
         {pending && <PendingHeaderActions isMobile={isMobile} />}
         {/* Agent info: tools & policies for the bound agent. Desktop-only
             popover; self-hides when the agent has neither configured. */}
+        {!pending && conversationId && actionConversation && !isMobile && (
+          <WaitingStatusChip
+            sessionId={conversationId}
+            status={actionConversation.status}
+            statusSince={actionConversation.status_since}
+            waitingReason={actionConversation.waiting_reason}
+          />
+        )}
         {!pending && conversationId && (
           <AgentInfoButton
             agent={boundAgent}

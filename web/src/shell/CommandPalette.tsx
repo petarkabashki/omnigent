@@ -7,6 +7,7 @@ import { defaultFilter } from "cmdk";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClockIcon,
+  HourglassIcon,
   InboxIcon,
   type LucideIcon,
   NetworkIcon,
@@ -207,6 +208,13 @@ export function CommandPalette({
         icon: InboxIcon,
         keywords: ["notifications", "comments", "needs response"],
         run: () => navigate("/inbox"),
+      },
+      {
+        id: "go-waiting",
+        label: "Go to Waiting",
+        icon: HourglassIcon,
+        keywords: ["stuck", "stale", "background", "blocked", "waiting on"],
+        run: () => navigate("/waiting"),
       },
       {
         id: "go-tasks",

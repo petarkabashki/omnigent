@@ -25,6 +25,12 @@ const MESSAGE_STYLE: Record<RoleThreadDirection, string> = {
   in: "self-start",
   out: "self-end bg-muted",
   owner: "self-center border-primary/40 bg-primary/5",
+  hub: "self-center border-dashed text-muted-foreground",
+};
+
+const SENDER_TEXT: Partial<Record<RoleThreadDirection, string>> = {
+  owner: "You",
+  hub: "Hub reminder",
 };
 
 /**
@@ -83,11 +89,8 @@ export function RoleThreadHistory({
           )}
         >
           <p className="mb-1 text-xs text-muted-foreground">
-            {message.direction === "owner"
-              ? "You"
-              : message.direction === "out"
-                ? holderName
-                : counterpart}{" "}
+            {SENDER_TEXT[message.direction] ??
+              (message.direction === "out" ? holderName : counterpart)}{" "}
             · {relativeTime(message.createdAt * 1000)}
           </p>
           <p className="break-words whitespace-pre-wrap">{message.text}</p>

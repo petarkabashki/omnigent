@@ -136,6 +136,10 @@ interface SessionResponseWire {
    */
   archived?: boolean;
   status: SessionStatus;
+  /** Epoch seconds of the last status transition. */
+  status_since?: number | null;
+  /** Why the session is waiting, e.g. ``"3 background shells"``. */
+  waiting_reason?: string | null;
   /**
    * Background shells (claude-native) still running as of the last status
    * edge, so a reload re-shows "N background tasks still running" after the session

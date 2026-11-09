@@ -183,7 +183,11 @@ export interface Conversation {
   harness?: string | null;
   /** Outstanding approval prompts — powers the sidebar "needs attention" badge. */
   pending_elicitations_count?: number;
-  status?: "idle" | "running" | "failed";
+  status?: "idle" | "running" | "waiting" | "failed";
+  /** Epoch seconds of the last status transition. */
+  status_since?: number | null;
+  /** Why the session is waiting, e.g. ``"3 background shells"``. */
+  waiting_reason?: string | null;
   /**
    * Whether the session's runner is reachable, matching `GET /health`.
    * `GET /v1/sessions` and the `WS /v1/sessions/updates` stream include
@@ -520,6 +524,8 @@ export async function fetchConversationById(id: string): Promise<Conversation | 
     harness: wire.harness ?? null,
     pending_elicitations_count: wire.pending_elicitations_count ?? 0,
     status: wire.status ?? "idle",
+    status_since: wire.status_since ?? null,
+    waiting_reason: wire.waiting_reason ?? null,
     runner_online: wire.runner_online ?? undefined,
     host_online: wire.host_online ?? undefined,
     git_branch: wire.git_branch ?? null,
