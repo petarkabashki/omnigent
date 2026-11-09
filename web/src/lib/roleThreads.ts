@@ -252,3 +252,22 @@ export function onRoleThreadPostFocus(focus: () => void): () => void {
   window.addEventListener(POST_FOCUS_EVENT, handle);
   return () => window.removeEventListener(POST_FOCUS_EVENT, handle);
 }
+
+/** The reminder a nudge sends the role: what's unhandled, from whom, and for how long. */
+export function roleThreadNudgeText(
+  thread: RoleThread,
+  now = Math.floor(Date.now() / 1000),
+): string {
+  const count = thread.unread === 1 ? "1 message" : `${thread.unread} messages`;
+  const minutes = thread.updatedAt > 0 ? Math.max(0, Math.round((now - thread.updatedAt) / 60)) : 0;
+  const since = minutes > 0 ? `, waiting ${minutes} min` : "";
+  return (
+    `Reminder: ${count} from ${thread.counterpart} in this thread still unhandled${since}. ` +
+    "Please reply or act on them, then record the thread with sys_thread_note."
+  );
+}
+
+/** Nudges the thread's holder alone, as an owner post into the thread. */
+export function nudgeRoleThread(holderId: string, thread: RoleThread): Promise<unknown> {
+  return postRoleThreadMessage(holderId, thread.counterpart, roleThreadNudgeText(thread), "holder");
+}

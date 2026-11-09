@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRightIcon,
+  BellRingIcon,
   CheckIcon,
   ClockIcon,
   MailOpenIcon,
@@ -21,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { HeldThreadMessage } from "@/components/chat/HeldThreadMessage";
 import { StateDot } from "@/components/StateDot";
 import {
+  nudgeRoleThread,
   requestRoleThreadPostFocus,
   roleHandlePath,
   roleThreadIsUrgent,
@@ -59,7 +61,22 @@ export function RoleThreadRows({ conversation }: { conversation: Conversation })
 function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThread }) {
   const navigate = useNavigate();
   const [opening, setOpening] = useState(false);
+  const [nudging, setNudging] = useState(false);
   const urgent = roleThreadIsUrgent(thread.state);
+  const nudgeable = thread.unread > 0 && thread.state !== "done";
+
+  const nudge = async () => {
+    if (nudging) return;
+    setNudging(true);
+    try {
+      await nudgeRoleThread(holderId, thread);
+      toast.success(`Nudged about ${thread.counterpart}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Couldn't nudge the role.");
+    } finally {
+      setNudging(false);
+    }
+  };
 
   const open = async () => {
     if (opening) return;
@@ -78,7 +95,7 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
   };
 
   return (
-    <li>
+    <li className="group/thread flex items-center">
       <HoverCard openDelay={400} closeDelay={150}>
         <HoverCardTrigger asChild>
           <button
@@ -124,9 +141,24 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
               requestRoleThreadPostFocus();
               void open();
             }}
+            onNudge={nudgeable ? () => void nudge() : undefined}
+            nudging={nudging}
           />
         </HoverCardContent>
       </HoverCard>
+      {nudgeable && (
+        <button
+          type="button"
+          data-testid="role-thread-nudge"
+          aria-label={`Nudge about ${thread.counterpart}`}
+          title="Remind the role to handle this thread"
+          disabled={nudging}
+          onClick={() => void nudge()}
+          className="ml-0.5 flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 group-hover/thread:opacity-100 hover:bg-accent hover:text-foreground focus-visible:opacity-100 disabled:opacity-50"
+        >
+          <BellRingIcon aria-hidden className="size-3" />
+        </button>
+      )}
     </li>
   );
 }
@@ -137,11 +169,15 @@ function RoleThreadCard({
   thread,
   onOpen,
   onPost,
+  onNudge,
+  nudging,
 }: {
   holderId: string;
   thread: RoleThread;
   onOpen: () => void;
   onPost: () => void;
+  onNudge?: () => void;
+  nudging: boolean;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -245,6 +281,17 @@ function RoleThreadCard({
             onClick={() => void setLabels({ [`thread.${thread.key}.unread`]: "0" })}
           >
             <MailOpenIcon aria-hidden /> Handled
+          </Button>
+        )}
+        {onNudge && (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={nudging}
+            title="Remind the role to handle this thread"
+            onClick={onNudge}
+          >
+            <BellRingIcon aria-hidden /> Nudge
           </Button>
         )}
         <Button

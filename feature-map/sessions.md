@@ -1392,6 +1392,9 @@ index (state, summary, hop count) across compaction and relaunch.
   box with a To picker (Both, the holder, the counterpart; Ctrl+Enter posts).
   The side chat's own composer below stays an aside to the holder. The hover
   card's Post button opens the thread with the Post box focused.
+- Web: a thread with unhandled messages shows a bell on row hover, and its card
+  has Nudge. Either sends the holder alone an owner post saying how many
+  messages from whom are unhandled and for how long.
 - Tests: `test_role_threads_index_history_guard_and_owner_thread` and
   `test_owner_posts_into_a_role_thread` in
   `tests/server/integration/test_session_orchestration.py`,
