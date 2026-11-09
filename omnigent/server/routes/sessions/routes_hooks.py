@@ -104,6 +104,7 @@ from omnigent.server.routing_outcomes import ACTOR_UNKNOWN, record_override
 from omnigent.server.schemas import (
     ElicitationRequestParams,
 )
+from omnigent.spec import AgentSpec
 from omnigent.spec.types import (
     Phase,
     PolicyAction,
@@ -920,15 +921,14 @@ def register_hooks_routes(
                 media_type="application/json",
             )
         agent = agent_store.get(conv.agent_id) if conv.agent_id else None
-        if agent is None:
-            # No agent — no policies. Return unspecified (pass-through).
-            return Response(
-                content=json.dumps({"result": "POLICY_ACTION_UNSPECIFIED"}),
-                media_type="application/json",
-            )
-
-        loaded = _sf.get_agent_cache().load(
-            agent.id, agent.bundle_location, expand_env=agent.operator_authored
+        # An agent-less session still gets session and server-wide policies;
+        # only agent-spec policies are absent.
+        hook_spec = (
+            _sf.get_agent_cache()
+            .load(agent.id, agent.bundle_location, expand_env=agent.operator_authored)
+            .spec
+            if agent is not None
+            else AgentSpec(spec_version=1, name="policy-no-spec")
         )
 
         _caps = _sf.get_caps()
@@ -943,7 +943,7 @@ def register_hooks_routes(
         # _no_policy_allow_body) expires.
         policy_store = get_policy_store()
         if not any_policies_apply(
-            spec=loaded.spec,
+            spec=hook_spec,
             conversation_id=session_id,
             default_policies=_caps.default_policies,
             policy_store=policy_store,
@@ -980,13 +980,13 @@ def register_hooks_routes(
                 persisted state for ``session_id``.
             """
             return build_policy_engine(
-                spec=loaded.spec,
+                spec=hook_spec,
                 conversation_id=session_id,
                 conversation_store=conversation_store,
                 conversation=preloaded_conv,
                 # ``agent`` below was resolved from conv.agent_id; the builder
                 # re-reads the row and fails closed if it was rebound since.
-                expected_agent_id=agent.id,
+                expected_agent_id=agent.id if agent is not None else None,
                 default_policies=_caps.default_policies,
                 policy_store=get_policy_store(),
                 server_llm=_caps.llm,

@@ -19,6 +19,8 @@ from omnigent.entities import Conversation, ConversationItem
 from omnigent.entities.agent import Agent, LoadedAgent
 from omnigent.entities.conversation import FunctionCallData
 from omnigent.policies.types import EvaluationContext, PolicyAction, PolicyResult
+from omnigent.runtime import get_caps
+from omnigent.runtime.caps import RuntimeCaps
 from omnigent.server.routes._sessions.orchestration import (
     _evaluate_policy_with_fresh_engine,
 )
@@ -31,7 +33,8 @@ from omnigent.server.routes.sessions import (
 )
 from omnigent.server.schemas import SessionEventInput
 from omnigent.spec import AgentSpec
-from omnigent.spec.types import Phase, PolicySpec
+from omnigent.spec.types import FunctionPolicySpec, FunctionRef, Phase, PolicySpec
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 
 # ── Stub stores ──────────────────────────────────────────────
 
@@ -443,32 +446,50 @@ async def test_pending_verdict_carries_per_policy_ask_timeout():
     assert result["ask_timeout"] == 86400
 
 
+def _deny_shell_tool(_event: dict[str, Any]) -> dict[str, Any]:
+    """Deny every tool call, standing in for a server-wide admin policy."""
+    return {"result": "DENY", "reason": "blocked by server policy"}
+
+
+def _agentless_session(db_uri: str) -> tuple[SqlAlchemyConversationStore, Conversation]:
+    """Create a persisted session with no agent binding."""
+    store = SqlAlchemyConversationStore(db_uri)
+    return store, store.create_conversation(agent_id=None)
+
+
 @pytest.mark.asyncio
-async def test_no_agent_binding_skips_policy():
-    """When the session has no agent_id, policy evaluation is
-    skipped and the function_call is persisted with allow verdict.
-    """
-    conv_store = _FakeConversationStore()
-    agent_store = _FakeAgentStore(agent=None)
-    conv = Conversation(
-        id="sess_1",
-        created_at=1,
-        updated_at=1,
-        root_conversation_id="sess_1",
-        agent_id=None,
-    )
-    body = _make_function_call_body()
+async def test_no_agent_binding_without_policies_allows(db_uri: str):
+    """A session with no agent_id and no policies configured is allowed."""
+    store, conv = _agentless_session(db_uri)
 
     result = await _evaluate_tool_call_policy(
-        "sess_1",
-        conv,
-        body,
-        conv_store,
-        agent_store,
-        None,
+        conv.id, conv, _make_function_call_body(), store, _FakeAgentStore(agent=None), None
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_no_agent_binding_still_enforces_server_wide_policy(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Server-wide default policies deny tool calls even with no agent spec."""
+    deny_policy = FunctionPolicySpec(
+        name="admin__deny_all",
+        on=None,
+        function=FunctionRef(path=f"{__name__}._deny_shell_tool"),
+    )
+    caps = RuntimeCaps(
+        execution_timeout=get_caps().execution_timeout, default_policies=[deny_policy]
+    )
+    monkeypatch.setattr("omnigent.server.routes._sessions.helpers.get_caps", lambda: caps)
+    store, conv = _agentless_session(db_uri)
+
+    result = await _evaluate_tool_call_policy(
+        conv.id, conv, _make_function_call_body(), store, _FakeAgentStore(agent=None), None
+    )
+
+    assert result == {"verdict": "deny", "reason": "blocked by server policy"}
 
 
 # ── INPUT policy tests (step 5.6) ───────────────────────────

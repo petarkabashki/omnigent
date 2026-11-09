@@ -300,6 +300,7 @@ from omnigent.server.routes._sessions.helpers import (
     _load_agent_spec_for_session,
     _load_model_options,
     _load_model_options_from_host,
+    _load_policy_spec_for_session,
     _mcp_error_response,
     _mcp_input_required_response,
     _mcp_ok_response,
@@ -5049,11 +5050,10 @@ async def _bind_and_launch_managed_runner(
                         host_conn,
                     )
                     runner_id = launch_attempt.runner_id
-                    reason = (
-                        launch_attempt.error or "harness not configured on the sandbox host"
-                        if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE
-                        else None
-                    )
+                    if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
+                        reason = (
+                            launch_attempt.error or "harness not configured on the sandbox host"
+                        )
                 except OmnigentError as exc:
                     reason = str(exc)
                 except Exception as exc:  # noqa: BLE001 — admission can fail after provisioning
@@ -10646,9 +10646,7 @@ async def _evaluate_tool_call_policy(
 
     # Resolve agent spec + build engine off the event loop (blocking
     # DB/IO). Tool-call policy always evaluates (no guardrails skip).
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
-    if spec is None:
-        return None
+    spec = await asyncio.to_thread(_load_policy_spec_for_session, conv, agent_store)
     try:
         args_payload = json.loads(arguments_str)
     except (ValueError, TypeError):
@@ -10771,9 +10769,7 @@ async def _evaluate_input_policy(
     # Resolve the agent spec off the event loop (blocking DB + cold-cache
     # bundle fetch). Spec only, so the cheap skip check below runs before
     # the more expensive engine build.
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
-    if spec is None:
-        return None
+    spec = await asyncio.to_thread(_load_policy_spec_for_session, conv, agent_store)
     # Skip only when there are no agent guardrails AND no server-wide
     # default policies AND no session policies. Without this, default/
     # session policies (e.g. deny_pii_in_llm_request added via the UI)

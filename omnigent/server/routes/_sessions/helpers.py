@@ -9279,6 +9279,16 @@ def _load_agent_spec_for_session_impl(
     return selected_mcp_spec(spec, conv.labels)
 
 
+def _load_policy_spec_for_session(conv: Conversation, agent_store: AgentStore) -> AgentSpec:
+    """Resolve the spec policies run against; a session with no spec gets an empty one.
+
+    Server-wide default and session policies still apply to a session whose
+    agent is unbound or gone; the placeholder just contributes no agent policies.
+    """
+    spec = _load_agent_spec_for_session(conv, agent_store)
+    return spec if spec is not None else AgentSpec(spec_version=1, name="policy-no-spec")
+
+
 def _build_policy_engine_from_spec(*args: Any, **kwargs: Any) -> PolicyEngine:
     """Call-time proxy so a facade patch of this symbol is honored here."""
     from omnigent.server.routes import sessions as _facade
@@ -9380,9 +9390,7 @@ async def _apply_pending_policy_ask_writes(
     # Resolve the agent spec + build the engine off the event loop: the
     # lookup, cold-cache bundle fetch, and engine construction are all
     # blocking DB/IO.
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
-    if spec is None:
-        return
+    spec = await asyncio.to_thread(_load_policy_spec_for_session, conv, agent_store)
     try:
         engine = await asyncio.to_thread(
             _build_policy_engine_from_spec, spec, session_id, conversation_store, conv
@@ -9795,9 +9803,7 @@ async def _evaluate_output_policy(
     # Resolve the agent spec off the event loop (blocking DB + cold-cache
     # bundle fetch). Spec only, so the cheap skip check below runs before
     # the more expensive engine build.
-    spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
-    if spec is None:
-        return None
+    spec = await asyncio.to_thread(_load_policy_spec_for_session, conv, agent_store)
     if not spec.guardrails and not get_caps().default_policies and get_policy_store() is None:
         return None
 
@@ -12470,6 +12476,7 @@ __all__ = [
     "_load_agent_spec_for_session",
     "_load_model_options",
     "_load_model_options_from_host",
+    "_load_policy_spec_for_session",
     "_mcp_error_response",
     "_mcp_input_required_response",
     "_mcp_ok_response",
