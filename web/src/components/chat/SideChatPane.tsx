@@ -1,6 +1,11 @@
 import { SelectionPopup } from "./SelectionPopup";
 import { SideChatSettings } from "./SideChatSettings";
 import {
+  RoleThreadHistory,
+  SIDE_CHAT_SOURCE_LABEL_KEY,
+  THREAD_OF_LABEL_KEY,
+} from "./RoleThreadHistory";
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -165,6 +170,8 @@ export function SideChatPane({
   const { session } = useSession(pending ? null : childId);
   const { session: draftSource } = useSession(pending ? (selectionParentId ?? null) : null);
   const readOnly = restoredReadOnly || session?.labels?.["omnigent.closed"] === "true";
+  const threadCounterpart = session?.labels?.[THREAD_OF_LABEL_KEY];
+  const threadHolderId = session?.labels?.[SIDE_CHAT_SOURCE_LABEL_KEY];
   useLayoutEffect(() => {
     if (!selectionParentId || readOnly || starting) return;
     const target = { childId, parentId: selectionParentId };
@@ -348,6 +355,9 @@ export function SideChatPane({
               {state.loadingMoreHistory ? "Loading…" : "Load earlier messages"}
             </Button>
           )}
+          {threadCounterpart && threadHolderId && (
+            <RoleThreadHistory holderId={threadHolderId} counterpart={threadCounterpart} />
+          )}
           {loadFailed ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
               <TriangleAlertIcon className="size-6 text-muted-foreground" />
@@ -371,7 +381,7 @@ export function SideChatPane({
             <p role="status" className="m-auto text-sm text-muted-foreground">
               Loading session…
             </p>
-          ) : isEmpty ? (
+          ) : isEmpty && threadCounterpart ? null : isEmpty ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
               <MessagesSquareIcon className="size-6 text-muted-foreground" />
               <p className="text-ui font-medium text-foreground">
