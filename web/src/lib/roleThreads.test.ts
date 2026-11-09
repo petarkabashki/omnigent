@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { roleThreadsFromLabels } from "./roleThreads";
+import { roleHandlePath, roleThreadStateLabels, roleThreadsFromLabels } from "./roleThreads";
 
 const ALIAS = { "omnigent.alias": "Product" };
 
@@ -28,5 +28,33 @@ describe("roleThreadsFromLabels", () => {
     expect(roleThreadsFromLabels({ "thread.aaaaaaaaaaaa.cp": "/Architect" })).toEqual([]);
     expect(roleThreadsFromLabels({ ...ALIAS, "thread.aaaaaaaaaaaa.n": "3" })).toEqual([]);
     expect(roleThreadsFromLabels(undefined)).toEqual([]);
+  });
+});
+
+describe("roleThreadStateLabels", () => {
+  const thread = roleThreadsFromLabels({ ...ALIAS, "thread.aaaaaaaaaaaa.cp": "/Bench" })[0];
+
+  it.each([
+    [
+      "done",
+      {
+        "thread.aaaaaaaaaaaa.state": "done",
+        "thread.aaaaaaaaaaaa.at": "9",
+        "thread.aaaaaaaaaaaa.unread": "0",
+      },
+    ],
+    ["open", { "thread.aaaaaaaaaaaa.state": "open", "thread.aaaaaaaaaaaa.at": "9" }],
+  ])("sets %s on the thread's own keys", (state, expected) => {
+    expect(roleThreadStateLabels(thread, state, 9)).toEqual(expected);
+  });
+});
+
+describe("roleHandlePath", () => {
+  it.each([
+    ["forthkit/Product", "forthkit"],
+    ["/Bench", ""],
+    ["a/b/Role", "a/b"],
+  ])("%s is in %j", (handle, path) => {
+    expect(roleHandlePath(handle)).toBe(path);
   });
 });

@@ -5,6 +5,8 @@ import { apiErrorFromResponse } from "@/lib/sessionsApi";
 
 /** One row of a role holder's thread index, read from its `thread.<hash>.*` labels. */
 export interface RoleThread {
+  /** The `<hash>` in this thread's `thread.<hash>.*` label keys. */
+  key: string;
   counterpart: string;
   state: string;
   unread: number;
@@ -36,9 +38,10 @@ export function roleThreadsFromLabels(
     grouped.set(match[1], fields);
   }
   const rows: RoleThread[] = [];
-  for (const fields of grouped.values()) {
+  for (const [key, fields] of grouped) {
     if (!fields.cp) continue;
     rows.push({
+      key,
       counterpart: fields.cp,
       state: fields.state ?? "open",
       unread: toInt(fields.unread),
@@ -85,6 +88,28 @@ const STATE_DESCRIPTION: Record<string, string> = {
 /** What a thread state means, for its tooltip; empty for unknown states. */
 export function roleThreadStateDescription(state: string): string {
   return STATE_DESCRIPTION[state] ?? "";
+}
+
+/**
+ * Labels that set a thread's state from the web, as `note_thread` in
+ * omnigent/server/role_threads.py does: closing or handing over clears unread.
+ */
+export function roleThreadStateLabels(
+  thread: RoleThread,
+  state: string,
+  now = Math.floor(Date.now() / 1000),
+): Record<string, string> {
+  const labels: Record<string, string> = {
+    [`thread.${thread.key}.state`]: state,
+    [`thread.${thread.key}.at`]: String(now),
+  };
+  if (state === "done" || state === "waiting_on_them") labels[`thread.${thread.key}.unread`] = "0";
+  return labels;
+}
+
+/** The namespace path of a role handle: `forthkit/Product` → `forthkit`, `/Bench` → `""`. */
+export function roleHandlePath(handle: string): string {
+  return handle.slice(0, Math.max(0, handle.lastIndexOf("/")));
 }
 
 /** Colour of a thread state's mark; unknown states are neutral. */

@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import * as rolesApi from "@/lib/rolesApi";
 import * as sessionsApi from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { RoleThreadRows } from "./RoleThreadRows";
@@ -96,5 +97,55 @@ describe("RoleThreadRows", () => {
         parentId: "sess_product",
       }),
     );
+  });
+
+  it("shows a compact card with actions when a row is focused", async () => {
+    vi.spyOn(rolesApi, "listNamespaceRoles").mockResolvedValue([
+      {
+        roleId: "r1",
+        name: "Architect",
+        handle: "/Architect",
+        path: "",
+        permanent: true,
+        state: "held",
+        holderSessionId: "sess_architect",
+      },
+    ]);
+    const updateSession = vi
+      .spyOn(sessionsApi, "updateSession")
+      .mockResolvedValue({} as Awaited<ReturnType<typeof sessionsApi.updateSession>>);
+    renderRows(
+      holder({
+        "thread.aaaaaaaaaaaa.cp": "/Architect",
+        "thread.aaaaaaaaaaaa.state": "waiting_on_us",
+        "thread.aaaaaaaaaaaa.unread": "2",
+        "thread.aaaaaaaaaaaa.n": "7",
+        "thread.aaaaaaaaaaaa.sum": "Asked for the schema review",
+      }),
+    );
+
+    fireEvent.focus(screen.getByTestId("role-thread-row"));
+    const card = await screen.findByTestId("role-thread-card");
+    expect(card).toHaveTextContent("/ArchitectOur turn");
+    expect(card).toHaveTextContent("2 new");
+    expect(within(card).getByTitle("Messages")).toHaveTextContent("7");
+    expect(card).toHaveTextContent("Asked for the schema review");
+
+    const goTo = within(card).getByRole("button", { name: "Go to" });
+    await waitFor(() => expect(goTo).toBeEnabled());
+
+    fireEvent.click(within(card).getByRole("button", { name: "Done" }));
+    await waitFor(() =>
+      expect(updateSession).toHaveBeenCalledWith("sess_product", {
+        labels: expect.objectContaining({
+          "thread.aaaaaaaaaaaa.state": "done",
+          "thread.aaaaaaaaaaaa.unread": "0",
+        }),
+        silent: true,
+      }),
+    );
+
+    fireEvent.click(goTo);
+    expect(await screen.findByTestId("holder-page")).toBeInTheDocument();
   });
 });
