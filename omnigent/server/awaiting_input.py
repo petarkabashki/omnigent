@@ -9,20 +9,29 @@ upsert-only).
 ``omnigent.input_answered`` records that the wait was answered (a reply, or an
 approval resolved) until the agent's next turn ends, so the inbox can tell
 "input given" apart from "needs input" and from plain read state.
+
+``omnigent.awaiting_ack`` holds what to acknowledge when the turn handed over a
+result; the inbox shows it while unread, so reading it is the acknowledgement.
+With a classifier key set, the turn's final message is classified by
+``reply_classifier`` and the regex heuristic is the fallback.
 """
 
 from __future__ import annotations
 
 import functools
+import logging
 import re
 
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import MessageData
-from omnigent.server import session_live_state
+from omnigent.server import reply_classifier, session_live_state
 from omnigent.stores.conversation_store import ConversationStore
+
+_logger = logging.getLogger(__name__)
 
 AWAITING_INPUT_LABEL_KEY = "omnigent.awaiting_input"
 INPUT_ANSWERED_LABEL_KEY = "omnigent.input_answered"
+AWAITING_ACK_LABEL_KEY = "omnigent.awaiting_ack"
 # The answered label for an approval, which has no question text of its own.
 ANSWERED_APPROVAL = "approval"
 
@@ -124,26 +133,70 @@ def set_awaiting_input(store: ConversationStore, session_id: str, reason: str) -
     store.set_labels(session_id, {AWAITING_INPUT_LABEL_KEY: reason})
 
 
-def _write(store: ConversationStore, session_id: str, awaiting: str, answered: str) -> None:
+def _write(
+    store: ConversationStore,
+    session_id: str,
+    awaiting: str,
+    answered: str,
+    ack: str | None = None,
+) -> None:
+    """Upsert the changed labels; ``ack=None`` leaves the acknowledgement as is."""
     conv = store.get_conversation(session_id)
     if conv is None:
         return
+    values = {AWAITING_INPUT_LABEL_KEY: awaiting, INPUT_ANSWERED_LABEL_KEY: answered}
+    if ack is not None:
+        values[AWAITING_ACK_LABEL_KEY] = ack
     updates = {
         key: value[:LABEL_VALUE_MAX_LEN]
-        for key, value in (
-            (AWAITING_INPUT_LABEL_KEY, awaiting),
-            (INPUT_ANSWERED_LABEL_KEY, answered),
-        )
+        for key, value in values.items()
         if conv.labels.get(key, "") != value[:LABEL_VALUE_MAX_LEN]
     }
     if updates:
         store.set_labels(session_id, updates)
 
 
+def _apply_heuristic(store: ConversationStore, session_id: str, text: str) -> None:
+    _write(store, session_id, detect_awaiting_input(text) or "", "", "")
+
+
+def apply_classification(
+    store: ConversationStore,
+    session_id: str,
+    text: str,
+    result: reply_classifier.ReplyClass | None,
+) -> None:
+    """Write a classification of ``text``, unless the session has moved on since."""
+    if _latest_assistant_text(store, session_id) != text:
+        return
+    if result is None:
+        _apply_heuristic(store, session_id, text)
+        return
+    awaiting = (result.reason or "Needs your input") if result.kind == "input" else ""
+    ack = (result.reason or "Ready for review") if result.kind == "ack" else ""
+    _logger.info(
+        "reply classifier session=%s kind=%s heuristic=%s",
+        session_id,
+        result.kind,
+        "input" if detect_awaiting_input(text) else "none",
+    )
+    _write(store, session_id, awaiting, "", ack)
+
+
 def refresh_after_turn(store: ConversationStore, session_id: str) -> None:
-    """Set or clear the label from the turn's final assistant message; the answer is consumed."""
-    reason = detect_awaiting_input(_latest_assistant_text(store, session_id)) or ""
-    _write(store, session_id, reason, "")
+    """Set or clear the labels from the turn's final assistant message; the answer is consumed."""
+    text = _latest_assistant_text(store, session_id)
+    if not text or not reply_classifier.enabled():
+        _apply_heuristic(store, session_id, text)
+        return
+    _write(store, session_id, "", "", "")
+
+    def write(result: reply_classifier.ReplyClass | None) -> None:
+        session_live_state.submit(
+            "awaiting_input", apply_classification, store, session_id, text, result
+        )
+
+    reply_classifier.submit(text, write, on_failure=lambda: write(None))
 
 
 def mark_answered(store: ConversationStore, session_id: str, *, approval: bool) -> None:
@@ -157,8 +210,8 @@ def mark_answered(store: ConversationStore, session_id: str, *, approval: bool) 
 
 
 def clear(store: ConversationStore, session_id: str) -> None:
-    """Drop both the awaiting and the answered labels."""
-    _write(store, session_id, "", "")
+    """Drop the awaiting, answered and acknowledgement labels."""
+    _write(store, session_id, "", "", "")
 
 
 def schedule_refresh_after_turn(session_id: str) -> None:

@@ -668,6 +668,27 @@ describe("InboxPage unread sessions", () => {
     expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument();
   });
 
+  it("lists an acknowledge row with its reason and counts it in the summary", async () => {
+    const ack = unreadConversation({
+      id: "sess_ack",
+      title: "Reporter",
+      status: "idle",
+      labels: { "omnigent.awaiting_ack": "Report ready" },
+    });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([ack]));
+    renderPage();
+
+    const row = (await screen.findAllByTestId("inbox-unread")).find(
+      (r) => r.getAttribute("data-kind") === "ack",
+    )!;
+    expect(within(row).getByText("Acknowledge")).toBeInTheDocument();
+    expect(within(row).getAllByText(/Report ready/).length).toBeGreaterThan(0);
+    expect(screen.getByText("1 to acknowledge · 1 unread")).toBeInTheDocument();
+
+    selectTab("Needs input");
+    expect(screen.queryAllByTestId("inbox-unread")).toHaveLength(0);
+  });
+
   it("shows read and input state separately: a read question still needs input", async () => {
     const asking = conversation({
       id: "sess_asking",

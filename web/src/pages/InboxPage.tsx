@@ -57,6 +57,7 @@ import {
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
+  EyeIcon,
   MessageCircleQuestionIcon,
   ReplyIcon,
   HandIcon,
@@ -198,6 +199,7 @@ const TILE_TONES = {
   gray: "bg-status-gray/12 text-status-gray",
   red: "bg-status-red/12 text-status-red",
   green: "bg-status-green/12 text-status-green",
+  blue: "bg-status-blue/12 text-status-blue",
 } as const;
 
 // The input-state label beside the tile, coloured to match it.
@@ -206,6 +208,7 @@ const LABEL_TONES: Record<keyof typeof TILE_TONES, string> = {
   gray: "text-muted-foreground",
   red: "text-status-red",
   green: "text-status-green",
+  blue: "text-status-blue",
 };
 
 /**
@@ -367,6 +370,7 @@ export function InboxPage() {
     items.length + commentInbox.items.length + unreadItems.length + automationInbox.items.length;
   const needsInputCount = unreadItems.filter((i) => i.kind === "awaiting").length;
   const answeredCount = unreadItems.filter((i) => i.kind === "answered").length;
+  const ackCount = unreadItems.filter((i) => i.kind === "ack").length;
   const unreadSessionCount = unreadItems.filter((i) => i.unread).length;
   const summary = [
     items.length > 0 && (items.length === 1 ? "1 approval" : `${items.length} approvals`),
@@ -374,6 +378,7 @@ export function InboxPage() {
       (commentInbox.items.length === 1 ? "1 comment" : `${commentInbox.items.length} comments`),
     needsInputCount > 0 && `${needsInputCount} need input`,
     answeredCount > 0 && `${answeredCount} answered`,
+    ackCount > 0 && `${ackCount} to acknowledge`,
     unreadSessionCount > 0 && `${unreadSessionCount} unread`,
     automationInbox.items.length > 0 &&
       (automationInbox.items.length === 1
@@ -719,7 +724,16 @@ export function InboxPage() {
     const isError = item.kind === "error";
     const isAwaiting = item.kind === "awaiting";
     const isAnswered = item.kind === "answered";
-    const tone = isError ? "red" : isAwaiting ? "yellow" : isAnswered ? "green" : "gray";
+    const isAck = item.kind === "ack";
+    const tone = isError
+      ? "red"
+      : isAwaiting
+        ? "yellow"
+        : isAnswered
+          ? "green"
+          : isAck
+            ? "blue"
+            : "gray";
     const previewQuery = previewBySession.get(sessionId);
     const output = previewQuery?.data ?? undefined;
     // An awaiting session leads with what it asks, not its latest output.
@@ -829,13 +843,23 @@ export function InboxPage() {
                   ? MessageCircleQuestionIcon
                   : isAnswered
                     ? ReplyIcon
-                    : CircleCheckIcon
+                    : isAck
+                      ? EyeIcon
+                      : CircleCheckIcon
             }
             tone={tone}
           />
         }
         kindLabel={
-          isError ? "Error" : isAwaiting ? "Needs input" : isAnswered ? "Answered" : "Done"
+          isError
+            ? "Error"
+            : isAwaiting
+              ? "Needs input"
+              : isAnswered
+                ? "Answered"
+                : isAck
+                  ? "Acknowledge"
+                  : "Done"
         }
         kindTone={tone}
         title={title}

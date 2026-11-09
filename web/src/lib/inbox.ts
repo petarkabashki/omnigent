@@ -5,7 +5,12 @@
 
 import type { Comment } from "@/hooks/useComments";
 import type { Conversation } from "@/hooks/useConversations";
-import { awaitingInputReason, inputAnsweredReason, needsResponseCount } from "./awaitingInput";
+import {
+  awaitingAckReason,
+  awaitingInputReason,
+  inputAnsweredReason,
+  needsResponseCount,
+} from "./awaitingInput";
 import type { ElicitationRequest } from "./events";
 import { parseEvent } from "./sse";
 
@@ -72,10 +77,11 @@ export interface UnreadInboxItem {
   row: Conversation;
   /**
    * `"awaiting"`: the session asks for input. `"answered"`: the user answered and
-   * the agent is working on it. Otherwise the unseen turn's outcome.
+   * the agent is working on it. `"ack"`: a result to look at, nothing to decide
+   * (reading it acknowledges it). Otherwise the unseen turn's outcome.
    */
-  kind: "done" | "error" | "awaiting" | "answered";
-  /** The question awaiting an answer, or the one answered (`"approval"` for approvals). */
+  kind: "done" | "error" | "awaiting" | "answered" | "ack";
+  /** The question awaiting an answer, the one answered, or the ack reason (`"approval"` for approvals). */
   reason?: string;
   /** Whether the viewer has unseen agent output in the session (the sidebar dot). */
   unread: boolean;
@@ -89,7 +95,7 @@ export interface UnreadInboxItem {
  * Rows with pending approvals are skipped — they're already listed as
  * approval items, and one session shouldn't appear twice. Rows awaiting
  * input or with an answer in progress are listed read or not; finished
- * turns only while unread.
+ * turns and acknowledge rows only while unread.
  */
 export function collectUnreadInboxItems(
   rows: Conversation[],
@@ -101,9 +107,13 @@ export function collectUnreadInboxItems(
     const unread = isUnseen(row.id, row.updated_at, row.status);
     const awaiting = awaitingInputReason(row);
     const answered = inputAnsweredReason(row);
+    const ack = awaitingAckReason(row);
     if (awaiting) items.push({ row, kind: "awaiting", reason: awaiting, unread });
     else if (answered) items.push({ row, kind: "answered", reason: answered, unread });
-    else if (unread) items.push({ row, kind: row.status === "failed" ? "error" : "done", unread });
+    else if (unread && ack && row.status !== "failed") {
+      items.push({ row, kind: "ack", reason: ack, unread });
+    } else if (unread)
+      items.push({ row, kind: row.status === "failed" ? "error" : "done", unread });
   }
   return items.sort((a, b) => b.row.updated_at - a.row.updated_at);
 }
