@@ -148,8 +148,8 @@ export function roleThreadStateTone(state: string): StateTone {
   return STATE_TONE[state] ?? "neutral";
 }
 
-/** Who wrote a thread message: `in` the counterpart, `out` the role, `owner` you. */
-export type RoleThreadDirection = "in" | "out" | "owner";
+/** Who wrote a thread message: `in` the counterpart, `out` the role, `owner` you, `hub` a reminder. */
+export type RoleThreadDirection = "in" | "out" | "owner" | "hub";
 
 /** One message of a thread, oldest first in a thread view. */
 export interface RoleThreadMessage {

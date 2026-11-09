@@ -8,6 +8,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   CalendarClockIcon,
+  HourglassIcon,
   InboxIcon,
   MessagesSquareIcon,
   type LucideIcon,
@@ -233,6 +234,13 @@ export function CommandPalette({
         icon: MessagesSquareIcon,
         keywords: ["group", "roles", "discussion", "conversation"],
         run: () => navigate("/threads"),
+      },
+      {
+        id: "go-waiting",
+        label: "Go to Waiting",
+        icon: HourglassIcon,
+        keywords: ["stuck", "stale", "background", "blocked", "waiting on"],
+        run: () => navigate("/waiting"),
       },
       {
         id: "go-tasks",

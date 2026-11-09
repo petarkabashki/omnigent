@@ -13,6 +13,8 @@ import { CircleAlertIcon } from "lucide-react";
 
 export interface SessionStateBadgeProps {
   state: SessionState;
+  /** Replaces the default tooltip, e.g. "Running 12 min". */
+  tooltip?: string;
 }
 
 interface Visual {
@@ -106,7 +108,7 @@ function Dot({ tone }: { tone: string }) {
   return <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", tone)} />;
 }
 
-export function SessionStateBadge({ state }: SessionStateBadgeProps) {
+export function SessionStateBadge({ state, tooltip }: SessionStateBadgeProps) {
   const visual = describe(state);
   return (
     <Tooltip>
@@ -123,7 +125,7 @@ export function SessionStateBadge({ state }: SessionStateBadgeProps) {
       </TooltipTrigger>
       {/* Opens left: the badge sits at the right edge of the narrow
           sidebar, so a right-opening tooltip would overflow the panel. */}
-      <TooltipContent side="left">{visual.tooltip}</TooltipContent>
+      <TooltipContent side="left">{tooltip ?? visual.tooltip}</TooltipContent>
     </Tooltip>
   );
 }

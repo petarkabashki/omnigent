@@ -58,6 +58,10 @@ const ThreadsPage = withPageView(
   "threads",
   lazy(() => import("@/pages/ThreadsPage").then((m) => ({ default: m.ThreadsPage }))),
 );
+const WaitingPage = withPageView(
+  "waiting",
+  lazy(() => import("@/pages/WaitingPage").then((m) => ({ default: m.WaitingPage }))),
+);
 // The shell owns the board so selecting a conversation never unmounts it.
 const CanvasLandingPage = withPageView("canvas", () => null);
 const GridPage = withPageView("grid", () => null);
@@ -196,6 +200,7 @@ function AppRoutes({ basename }: AppProps) {
           <Route path={`${prefix}/inbox`} element={<InboxPage />} />
           <Route path={`${prefix}/threads`} element={<ThreadsPage />} />
           <Route path={`${prefix}/threads/:threadKey`} element={<ThreadsPage />} />
+          <Route path={`${prefix}/waiting`} element={<WaitingPage />} />
           <Route
             path={`${prefix}/canvas`}
             element={

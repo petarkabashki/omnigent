@@ -215,7 +215,11 @@ export interface Conversation {
    * when no web card exists for the prompt.
    */
   blocked_on?: string | null;
-  status?: "idle" | "running" | "failed";
+  status?: "idle" | "running" | "waiting" | "failed";
+  /** Epoch seconds of the last status transition. */
+  status_since?: number | null;
+  /** Why the session is waiting, e.g. ``"3 background shells"``. */
+  waiting_reason?: string | null;
   /**
    * Whether the session's runner is reachable, matching `GET /health`.
    * `GET /v1/sessions` and the `WS /v1/sessions/updates` stream include
