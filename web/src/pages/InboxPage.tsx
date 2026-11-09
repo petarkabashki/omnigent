@@ -73,6 +73,7 @@ import { Button } from "@/components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { showToast } from "@/components/ui/toast";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
@@ -482,6 +483,22 @@ export function InboxPage() {
           unread
           expanded={expanded}
           onToggle={onToggle}
+          rowActions={
+            <>
+              <RowAction
+                label="Mark as read"
+                icon={CheckIcon}
+                onClick={() => automationInbox.markRead(item.runId)}
+                componentId="inbox.automation.row_mark_read"
+              />
+              <RowAction
+                label="Open automation"
+                icon={ArrowRightIcon}
+                to={taskDetailsEnabled ? `/tasks/${item.taskId}` : "/tasks"}
+                componentId="inbox.automation.row_open"
+              />
+            </>
+          }
         >
           <p className="text-ui font-medium">{item.taskName}</p>
           <p className="mt-2 text-ui text-muted-foreground">{reason}</p>
@@ -535,6 +552,14 @@ export function InboxPage() {
           unread={false}
           expanded={expanded}
           onToggle={onToggle}
+          rowActions={
+            <RowAction
+              label="Open session"
+              icon={ArrowRightIcon}
+              to={`/c/${item.row.id}`}
+              componentId="inbox.approval.row_open_session"
+            />
+          }
         >
           <SessionLine title={title} detail={agentLabel !== title ? agentLabel : undefined} />
           <ApprovalCard
@@ -761,6 +786,26 @@ export function InboxPage() {
         unread
         expanded={expanded}
         onToggle={onToggle}
+        rowActions={
+          <>
+            <RowAction
+              label="Mark as read"
+              icon={CheckIcon}
+              onClick={markRead}
+              disabled={replySending}
+              componentId="inbox.unread.row_mark_read"
+            />
+            {/* Opening is reading, as with the card's Open session. */}
+            <RowAction
+              label="Open session"
+              icon={ArrowRightIcon}
+              to={`/c/${sessionId}`}
+              onClick={markRead}
+              disabled={replySending}
+              componentId="inbox.unread.row_open_session"
+            />
+          </>
+        }
       >
         <div>
           <SessionLine title={title} />
@@ -1012,6 +1057,7 @@ function InboxCard({
   unread,
   expanded,
   onToggle,
+  rowActions,
   children,
 }: {
   testId: string;
@@ -1025,8 +1071,11 @@ function InboxCard({
   unread: boolean;
   expanded: boolean;
   onToggle: () => void;
+  /** Icon buttons on the collapsed row; the expanded card has its own actions. */
+  rowActions?: ReactNode;
   children: ReactNode;
 }) {
+  const showRowActions = !expanded && rowActions != null;
   return (
     <div
       data-testid={testId}
@@ -1039,48 +1088,113 @@ function InboxCard({
           : "rounded-xl bg-transparent",
       )}
     >
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-label={`${kindLabel}: ${title}`}
-        onClick={onToggle}
-        className="flex w-full cursor-pointer items-center gap-3.5 p-2 text-left"
-      >
-        <span className="shrink-0">{tile}</span>
-        <span
-          className={cn(
-            // The tile already signals the kind, so narrow screens drop the
-            // label column to keep room for the title.
-            "hidden w-[140px] shrink-0 truncate text-ui sm:block",
-            expanded ? "text-foreground" : "text-muted-foreground",
-          )}
+      <div className={cn("flex items-center", showRowActions && "pr-2")}>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-label={`${kindLabel}: ${title}`}
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-3.5 p-2 text-left"
         >
-          {kindLabel}
-        </span>
-        {expanded ? (
-          <span className="flex-1" />
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-ui">
-            <span className="font-medium">{title}</span>
-            {preview && <span className="text-muted-foreground"> — {preview}</span>}
+          <span className="shrink-0">{tile}</span>
+          <span
+            className={cn(
+              // The tile already signals the kind, so narrow screens drop the
+              // label column to keep room for the title.
+              "hidden w-[140px] shrink-0 truncate text-ui sm:block",
+              expanded ? "text-foreground" : "text-muted-foreground",
+            )}
+          >
+            {kindLabel}
+          </span>
+          {expanded ? (
+            <span className="flex-1" />
+          ) : (
+            <span className="min-w-0 flex-1 truncate text-ui">
+              <span className="font-medium">{title}</span>
+              {preview && <span className="text-muted-foreground"> — {preview}</span>}
+            </span>
+          )}
+          <span className="min-w-8 shrink-0 text-right text-sm text-muted-foreground">
+            {/* Server timestamps are epoch seconds; relativeTime takes ms. */}
+            {relativeTime(at * 1000)}
+          </span>
+          {unread ? (
+            <span
+              role="img"
+              aria-label="Unread"
+              className="size-1.5 shrink-0 rounded-full bg-foreground"
+            />
+          ) : (
+            <span aria-hidden className="w-1.5 shrink-0" />
+          )}
+        </button>
+        {showRowActions && (
+          <span data-testid="inbox-row-actions" className="flex shrink-0 items-center gap-0.5">
+            {rowActions}
           </span>
         )}
-        <span className="min-w-8 shrink-0 text-right text-sm text-muted-foreground">
-          {/* Server timestamps are epoch seconds; relativeTime takes ms. */}
-          {relativeTime(at * 1000)}
-        </span>
-        {unread ? (
-          <span
-            role="img"
-            aria-label="Unread"
-            className="size-1.5 shrink-0 rounded-full bg-foreground"
-          />
-        ) : (
-          <span aria-hidden className="w-1.5 shrink-0" />
-        )}
-      </button>
+      </div>
       {expanded && <div className="flex flex-col gap-3 pr-4 pb-4 pl-[58px]">{children}</div>}
     </div>
+  );
+}
+
+/** A collapsed row's icon action: a button, or a link when `to` is set. */
+function RowAction({
+  label,
+  icon: Icon,
+  componentId,
+  to,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  icon: LucideIcon;
+  componentId: string;
+  to?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  const icon = <Icon aria-hidden className="size-3.5" />;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {to ? (
+          <Button asChild variant="ghost" size="icon-xs" className="text-muted-foreground">
+            <Link
+              to={to}
+              aria-label={label}
+              aria-disabled={disabled}
+              onClick={(event) => {
+                if (disabled) {
+                  event.preventDefault();
+                  return;
+                }
+                onClick?.();
+              }}
+              componentId={componentId}
+            >
+              {icon}
+            </Link>
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground"
+            aria-label={label}
+            disabled={disabled}
+            onClick={onClick}
+            componentId={componentId}
+          >
+            {icon}
+          </Button>
+        )}
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

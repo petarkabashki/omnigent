@@ -18,6 +18,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { InboxPage } from "./InboxPage";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import type * as approvalCard from "@/components/blocks/ApprovalCard";
@@ -158,7 +159,9 @@ function renderPage(
       >
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            <TooltipProvider>
+              <InboxPage />
+            </TooltipProvider>
           </MemoryRouter>
         </SidebarDataProvider>
       </CapabilitiesProvider>
@@ -484,7 +487,9 @@ describe("InboxPage approval items", () => {
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            <TooltipProvider>
+              <InboxPage />
+            </TooltipProvider>
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>,
@@ -508,7 +513,9 @@ describe("InboxPage approval items", () => {
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            <TooltipProvider>
+              <InboxPage />
+            </TooltipProvider>
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>,
@@ -678,6 +685,32 @@ describe("InboxPage unread sessions", () => {
     expect(screen.getByText("Nothing waiting on you")).toBeInTheDocument();
   });
 
+  it("offers Mark as read and Open session as icons on the collapsed row", async () => {
+    // WHY: the row's icons act without expanding; expanded, the card's own
+    // buttons take over so each action appears once.
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    const item = await screen.findByTestId("inbox-unread");
+    const rowActions = within(item).getByTestId("inbox-row-actions");
+    expect(within(rowActions).getByRole("link", { name: "Open session" })).toHaveAttribute(
+      "href",
+      "/c/sess_unread",
+    );
+    const toggle = within(item).getByRole("button", { name: /Unread Session/ });
+    fireEvent.click(toggle);
+    expect(within(item).queryByTestId("inbox-row-actions")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+
+    fireEvent.click(
+      within(within(item).getByTestId("inbox-row-actions")).getByRole("button", {
+        name: "Mark as read",
+      }),
+    );
+    await waitFor(() => expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument());
+  });
+
   it("clears an explicitly marked-unread session when opened from the inbox", async () => {
     // WHY: a freshly mounted chat keeps an explicit "Mark as unread" override,
     // so Open session must mark the session read itself or the row lingers.
@@ -709,7 +742,9 @@ describe("InboxPage unread sessions", () => {
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            <TooltipProvider>
+              <InboxPage />
+            </TooltipProvider>
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>
@@ -818,7 +853,9 @@ describe("InboxPage replies", () => {
       <QueryClientProvider client={queryClient}>
         <SidebarDataProvider>
           <MemoryRouter>
-            <InboxPage />
+            <TooltipProvider>
+              <InboxPage />
+            </TooltipProvider>
           </MemoryRouter>
         </SidebarDataProvider>
       </QueryClientProvider>
