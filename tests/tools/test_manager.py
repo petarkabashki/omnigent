@@ -68,6 +68,10 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_role_list",
         "sys_role_take",
         "sys_role_release",
+        # Role thread reads and notes ride with the role tools.
+        "sys_thread_list",
+        "sys_thread_history",
+        "sys_thread_note",
         "sys_session_rename",
         # Peer messaging is advertised for every agent; the server
         # enforces the orchestration flag and source authorization.
