@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
@@ -254,6 +254,49 @@ def find_thread_side_chat(
     return None
 
 
+def _role_sessions(
+    store: ConversationStore, role: str, user_id: str | None
+) -> dict[str, Conversation]:
+    """Every session that held ``role``, by its ``thread.role`` label."""
+    sessions: dict[str, Conversation] = {}
+    after: str | None = None
+    for _ in range(20):
+        page = store.list_conversations(
+            limit=100,
+            after=after,
+            owned_by=user_id,
+            has_label=THREAD_ROLE_LABEL,
+            include_archived=True,
+            kind=None,
+        )
+        for session in page.data:
+            if session.labels.get(THREAD_ROLE_LABEL) == role:
+                sessions.setdefault(session.id, session)
+        if not page.has_more:
+            break
+        after = page.last_id
+    return sessions
+
+
+def _tagged_messages(
+    store: ConversationStore, session_ids: Iterable[str], counterpart: str
+) -> list[dict[str, Any]]:
+    """Messages in ``session_ids`` delivered with the ``[thread counterpart]`` tag."""
+    found: list[dict[str, Any]] = []
+    for session_id in session_ids:
+        cursor: str | None = None
+        for _ in range(20):
+            page = store.list_items(session_id, limit=100, after=cursor, type="message")
+            for item in page.data:
+                text = _item_text(item.data)
+                if text is not None and thread_of_header(text) == counterpart:
+                    found.append(_history_row(session_id, item.id, item.created_at, text))
+            if not page.has_more:
+                break
+            cursor = page.last_id
+    return found
+
+
 def thread_history(
     store: ConversationStore,
     holder: Conversation,
@@ -270,36 +313,36 @@ def thread_history(
     role = holder.labels.get(THREAD_ROLE_LABEL)
     sessions = {holder.id: holder}
     if role:
-        after: str | None = None
-        for _ in range(20):
-            page = store.list_conversations(
-                limit=100,
-                after=after,
-                owned_by=user_id,
-                has_label=THREAD_ROLE_LABEL,
-                include_archived=True,
-                kind=None,
-            )
-            for session in page.data:
-                if session.labels.get(THREAD_ROLE_LABEL) == role:
-                    sessions.setdefault(session.id, session)
-            if not page.has_more:
-                break
-            after = page.last_id
-    found: list[dict[str, Any]] = []
-    for session_id in sessions:
-        cursor: str | None = None
-        for _ in range(20):
-            page = store.list_items(session_id, limit=100, after=cursor, type="message")
-            for item in page.data:
-                text = _item_text(item.data)
-                if text is not None and thread_of_header(text) == counterpart:
-                    found.append(_history_row(session_id, item.id, item.created_at, text))
-            if not page.has_more:
-                break
-            cursor = page.last_id
+        for session_id, session in _role_sessions(store, role, user_id).items():
+            sessions.setdefault(session_id, session)
+    found = _tagged_messages(store, sessions, counterpart)
     found.sort(key=lambda row: row["created_at"])
     return found[-limit:]
+
+
+def thread_conversation(
+    store: ConversationStore,
+    holder: Conversation,
+    counterpart: str,
+    *,
+    user_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """
+    Both sides of a thread, oldest first, each row tagged ``direction`` ``in`` or ``out``.
+
+    Sent messages are found where they were delivered: tagged with the holder's role
+    on the counterpart role's sessions. A counterpart that holds no role (``session:<id>``)
+    has no tagged copies, so only its inbound side is shown.
+    """
+    inbound = thread_history(store, holder, counterpart, user_id=user_id, limit=limit)
+    rows = [{**row, "direction": "in"} for row in inbound]
+    role = holder.labels.get(THREAD_ROLE_LABEL)
+    if role and not counterpart.startswith("session:"):
+        receivers = _role_sessions(store, counterpart, user_id)
+        rows += [{**row, "direction": "out"} for row in _tagged_messages(store, receivers, role)]
+    rows.sort(key=lambda row: row["created_at"])
+    return rows[-limit:]
 
 
 def _item_text(data: Any) -> str | None:

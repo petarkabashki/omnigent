@@ -1,4 +1,6 @@
+import { authenticatedFetch } from "@/lib/identity";
 import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
+import { apiErrorFromResponse } from "@/lib/sessionsApi";
 
 /** One row of a role holder's thread index, read from its `thread.<hash>.*` labels. */
 export interface RoleThread {
@@ -61,4 +63,41 @@ const STATE_TEXT: Record<string, string> = {
 /** Human text for a thread state; unknown states show as sent. */
 export function roleThreadStateText(state: string): string {
   return STATE_TEXT[state] ?? state;
+}
+
+/** One message of a thread: `in` from the counterpart, `out` sent by the role. */
+export interface RoleThreadMessage {
+  direction: "in" | "out";
+  sessionId: string;
+  itemId: string;
+  createdAt: number;
+  text: string;
+}
+
+interface WireThreadMessage {
+  direction: "in" | "out";
+  session_id: string;
+  item_id: string;
+  created_at: number;
+  text: string;
+}
+
+/** `GET /v1/sessions/{id}/threads/messages`: both sides of one thread, oldest first. */
+export async function fetchRoleThreadMessages(
+  holderId: string,
+  counterpart: string,
+): Promise<RoleThreadMessage[]> {
+  const params = new URLSearchParams({ counterpart });
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(holderId)}/threads/messages?${params}`,
+  );
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  const body = (await res.json()) as { messages?: WireThreadMessage[] };
+  return (body.messages ?? []).map((m) => ({
+    direction: m.direction,
+    sessionId: m.session_id,
+    itemId: m.item_id,
+    createdAt: m.created_at,
+    text: m.text,
+  }));
 }
