@@ -1150,3 +1150,23 @@ selection, visibility, and stop failure.
 - Grouping and ordering apply to the loaded pages only: an older session joins
   its group once it is paged in. Grouped views hide Projects, so dragging a
   session onto the list never removes it from its project there.
+
+## External task rows
+
+Read-only session rows for work that runs outside Omnigent, such as ag-fleet
+`fk-gate-N` systemd units. No runner, no transcript, no chat.
+
+- `POST /v1/external-tasks` `{title, unit, host_id?, project_id?, labels?, status?}`
+  creates the row (201) or returns the existing one (200), keyed on
+  (owner, host_id, unit). `PATCH /v1/external-tasks/{id}`
+  `{status, exit_code?, detail?, host_id?}` updates it; last write wins.
+- Status `queued`, `done` and `stopped` show as idle, `running` as running,
+  `failed` as failed. The raw state, exit code, result, unit and host are in
+  `omnigent.external.*` labels. Delete uses the normal session DELETE.
+- Messages, `sys_session_message` and runner launches on such a row return 409.
+  The host lives in a label, so the row never counts in host session counts.
+- Web: open the row from the sidebar. It shows a status panel (state, exit
+  code, result, host, unit) and a read-only composer.
+- Tests: `tests/server/routes/test_external_tasks.py`,
+  `tests/test_python_client_external_tasks.py`,
+  `web/src/components/ExternalTaskPanel.test.tsx`.

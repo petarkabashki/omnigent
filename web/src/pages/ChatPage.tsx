@@ -279,7 +279,8 @@ import { ResumeWithDirectoryDialog } from "@/shell/ResumeWithDirectoryDialog";
 import { useSessionReconnect } from "@/hooks/useSessionReconnect";
 import { ReconnectSessionDialog } from "@/shell/ReconnectSessionDialog";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
-import { readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
+import { isExternalTaskLabels, readOnlyReasonForSessionLabels } from "@/lib/sessionCapabilities";
+import { ExternalTaskPanel } from "@/components/ExternalTaskPanel";
 import {
   effortAfterModelChange,
   effortLevelsForConv,
@@ -853,7 +854,9 @@ export function ChatPage() {
         // Skip the cold-boot grace for imports (nothing is booting) so the
         // resume picker shows at once. Snapshot labels win; sidebar row is the
         // fallback for an off-page session.
-        imported: Boolean((activeSession?.labels ?? activeConv.labels)?.[IMPORT_SOURCE_LABEL_KEY]),
+        imported:
+          Boolean((activeSession?.labels ?? activeConv.labels)?.[IMPORT_SOURCE_LABEL_KEY]) ||
+          isExternalTaskLabels(activeSession?.labels ?? activeConv.labels),
       }
     : livenessRowFromSession(activeSession);
   // Host-switch launch marker; see the store field. Keeps this surface's
@@ -1885,6 +1888,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             />
           )}
 
+          <ExternalTaskPanel conversationId={conversationId} />
           <Composer
             ref={composerRef}
             disabled={disabled}

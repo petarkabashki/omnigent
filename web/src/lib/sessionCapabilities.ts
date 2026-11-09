@@ -106,6 +106,14 @@ export function supportsEffortControl(
   );
 }
 
+/** Label marking a read-only row that mirrors work outside Omnigent. */
+export const EXTERNAL_KIND_LABEL_KEY = "omnigent.external.kind";
+
+/** True when labels mark an external task row (no runner, no composer). */
+export function isExternalTaskLabels(labels: Record<string, string | null> | null | undefined) {
+  return Boolean(labels?.[EXTERNAL_KIND_LABEL_KEY]);
+}
+
 type LabelSource = { labels?: Record<string, string | null> | null } | null | undefined;
 
 /**
@@ -141,6 +149,9 @@ export function readOnlyReasonForSessionLabels(
       return "This side chat has ended and can't receive new messages";
     }
     return "This sub-agent session is closed";
+  }
+  if (isExternalTaskLabels(activeSession?.labels ?? activeConv?.labels)) {
+    return "This row mirrors work outside Omnigent and is read-only";
   }
   const wrapper =
     activeSession?.labels?.["omnigent.wrapper"] ?? activeConv?.labels?.["omnigent.wrapper"];
