@@ -1967,6 +1967,87 @@ def register_core_routes(
             )
         return source, holder, counterpart
 
+    def _waiting_payload(conv: Conversation, liveness: SessionLiveness | None) -> dict[str, Any]:
+        """One session's waiting view from the live caches (blocking; run in a thread)."""
+        from omnigent.server import session_live_state
+        from omnigent.server.routes._sessions.common import (
+            _session_background_tasks_cache,
+        )
+        from omnigent.server.session_waiting import build_session_waiting
+
+        raw = _session_status_cache.get(conv.id, conv.live_status) or "idle"
+        return build_session_waiting(
+            conversation_store,
+            conv,
+            status=raw,
+            status_since=session_live_state.status_since(conv.id),
+            runner_online=liveness.runner_online if liveness is not None else None,
+            shells=_session_background_tasks_cache.get(conv.id) or [],
+            child_status_of=lambda child: (
+                _session_status_cache.get(child.id, child.live_status) or "idle"
+            ),
+        )
+
+    @router.get("/sessions/waiting")
+    async def list_waiting_sessions(request: Request) -> dict[str, Any]:
+        """What each of the caller's busy or blocked sessions is waiting on."""
+        from omnigent.runtime import pending_elicitations
+        from omnigent.server.role_threads import THREAD_ROLE_LABEL
+
+        user_id = _get_user_id(request, auth_provider)
+
+        def _collect() -> list[Conversation]:
+            candidates: list[Conversation] = []
+            after: str | None = None
+            for _ in range(5):
+                page = conversation_store.list_conversations(
+                    limit=100, after=after, owned_by=user_id, kind=None
+                )
+                candidates.extend(page.data)
+                if not page.has_more:
+                    break
+                after = page.last_id
+            pending = set(pending_elicitations.pending_session_ids())
+            return [
+                conv
+                for conv in candidates
+                if (_session_status_cache.get(conv.id, conv.live_status) or "idle")
+                in ("running", "waiting")
+                or conv.id in pending
+                or THREAD_ROLE_LABEL in conv.labels
+            ]
+
+        convs = await asyncio.to_thread(_collect)
+        liveness = liveness_lookup([conv.id for conv in convs]) if liveness_lookup else {}
+        payloads = await asyncio.gather(
+            *(asyncio.to_thread(_waiting_payload, conv, liveness.get(conv.id)) for conv in convs)
+        )
+        shown = [p for p in payloads if p["items"] or p["status"] in ("running", "waiting")]
+
+        def _oldest(payload: dict[str, Any]) -> int:
+            stamps = [i["since"] for i in payload["items"] if i["since"] is not None]
+            if payload["status_since"] is not None:
+                stamps.append(payload["status_since"])
+            return min(stamps) if stamps else 2**62
+
+        shown.sort(key=_oldest)
+        return {"sessions": shown}
+
+    @router.get("/sessions/{session_id}/waiting")
+    async def get_session_waiting(session_id: str, request: Request) -> dict[str, Any]:
+        """What one session is waiting on, where, and since when."""
+        user_id = _get_user_id(request, auth_provider)
+        access = await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        liveness = liveness_lookup([session_id]).get(session_id) if liveness_lookup else None
+        conv = access.conversation
+        if conv is None:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is None:
+            raise _session_not_found()
+        return await asyncio.to_thread(_waiting_payload, conv, liveness)
+
     @router.get("/sessions/threads")
     async def list_role_threads(request: Request) -> dict[str, Any]:
         """The calling role's thread index; ``sys_thread_list`` reads this."""

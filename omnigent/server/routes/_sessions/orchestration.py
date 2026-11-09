@@ -404,6 +404,7 @@ from omnigent.server.schemas import (
     SessionStatusEvent,
     SessionUsageEvent,
 )
+from omnigent.server.session_waiting import waiting_reason
 from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     StartupInputContext,
@@ -1358,6 +1359,7 @@ def _build_session_list_item(
         project_id=conv.project_id,
         pull_request=pull_request,
         pull_requests_synced=pull_requests_synced,
+        status_since=session_live_state.status_since(conv.id),
     )
 
 
@@ -14303,6 +14305,12 @@ async def _get_session_snapshot(
         viewer_id=viewer_id,
         agent_store=agent_store,
         agent_cache=agent_cache,
+    )
+    response.status_since = session_live_state.status_since(session_id)
+    response.waiting_reason = waiting_reason(
+        _session_status_cache.get(session_id, conv.live_status) or "idle",
+        shell_count=_session_background_task_count_cache.get(session_id, 0),
+        approvals=pending_elicitations.count_for(session_id),
     )
     response.side_chat_settings_supported = await _runner_supports_side_chat_settings(
         conv, conv_store, getattr(request.app.state, "tunnel_registry", None) if request else None
