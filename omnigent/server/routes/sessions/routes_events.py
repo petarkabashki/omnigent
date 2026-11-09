@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import re
 import secrets
 import time
 import weakref
@@ -1196,7 +1197,12 @@ def register_events_routes(
         """
         if body.type != "session_message":
             return await _dispatch_event(request, session_id, body, in_flight)
-        message_id = f"msg_{secrets.token_hex(16)}"
+        supplied = body.data.get("message_id")
+        message_id = (
+            supplied
+            if isinstance(supplied, str) and re.fullmatch(r"msg_[0-9a-f]{32}", supplied)
+            else f"msg_{secrets.token_hex(16)}"
+        )
         ack = await _dispatch_event(
             request, session_id, body, in_flight, peer_message_id=message_id
         )
@@ -1351,13 +1357,60 @@ def register_events_routes(
                 permission_store,
                 target_id=session_id,
             )
+            from omnigent.server.role_threads import (
+                THREAD_OF_LABEL,
+                holds_role,
+                inbound_thread_key,
+                next_hops,
+                record_inbound,
+                record_outbound,
+            )
             from omnigent.server.session_aliases import session_handle
             from omnigent.server.session_orchestration import orchestration_message
 
             sender_handle = await asyncio.to_thread(session_handle, source, project_store, user_id)
+            peer_text = body.data.get("message")
+            thread_key = None
+            target_handle: str | None = None
+            hops = 0
+            if holds_role(source) or holds_role(conv):
+                target_handle = await asyncio.to_thread(
+                    session_handle, conv, project_store, user_id
+                )
+                if holds_role(source):
+                    hops = next_hops(source, target_handle or f"session:{conv.id}")
+            if holds_role(conv):
+                thread_key = inbound_thread_key(source, sender_handle)
             body = orchestration_message(
-                source.id, body.data.get("message"), sender_handle, message_id=peer_message_id
+                source.id,
+                peer_text,
+                sender_handle,
+                message_id=peer_message_id,
+                thread=thread_key,
             )
+            if thread_key is not None and not await asyncio.to_thread(
+                record_inbound,
+                conversation_store,
+                conv,
+                thread_key,
+                target_handle,
+                peer_message_id,
+                peer_text,
+                hops or 1,
+                keep_state=THREAD_OF_LABEL in source.labels,
+            ):
+                return {"queued": False, "duplicate": True}
+            if holds_role(source):
+                await asyncio.to_thread(
+                    record_outbound,
+                    conversation_store,
+                    source,
+                    target_handle or f"session:{conv.id}",
+                    sender_handle,
+                    peer_message_id,
+                    peer_text,
+                    hops,
+                )
         native_shell_authorized = False
         if (
             body.type == "message"

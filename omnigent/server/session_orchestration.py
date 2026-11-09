@@ -114,20 +114,25 @@ def orchestration_message(
     sender_handle: str | None = None,
     *,
     message_id: str | None = None,
+    thread: str | None = None,
 ) -> SessionStartupInput:
     """Build a text-only task with a display label, not proof of message origin.
 
     ``sender_handle`` (``project/Role``) lets the receiver reply by name;
-    ``message_id`` lets the sender find the delivered message in history.
+    ``message_id`` lets the sender find the delivered message in history. ``thread``
+    (set when the receiver holds a role) adds a ``[thread <counterpart>]`` tag.
     """
     if not isinstance(message, str) or not message.strip() or len(message) > 8000:
         raise OmnigentError("Provide a message of 1–8000 characters", code=ErrorCode.INVALID_INPUT)
     origin = f"session {source_id}" + (f", message {message_id}" if message_id else "")
     sender = f"{sender_handle} ({origin})" if sender_handle else origin
+    tag = f" [thread {thread}]" if thread else ""
     return SessionStartupInput(
         type="message",
         data={
             "role": "user",
-            "content": [{"type": "input_text", "text": f"[Message from {sender}]\n{message}"}],
+            "content": [
+                {"type": "input_text", "text": f"[Message from {sender}]{tag}\n{message}"}
+            ],
         },
     )
