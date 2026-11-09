@@ -119,7 +119,13 @@ from omnigent.runtime import (
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.engine import PolicyEngine
 from omnigent.runtime.tool_output import cap_tool_output
-from omnigent.server import presence, session_live_state, session_pull_requests, shutdown_state
+from omnigent.server import (
+    awaiting_input,
+    presence,
+    session_live_state,
+    session_pull_requests,
+    shutdown_state,
+)
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_parked_elicitations,
@@ -3021,6 +3027,32 @@ def _pin_claude_permission_launch_args(
     return [*stripped, "--permission-mode", mode]
 
 
+async def _handle_external_session_awaiting_input(
+    session_id: str,
+    body: SessionEventInput,
+    conversation_store: ConversationStore,
+) -> None:
+    """
+    Record that a native TUI is waiting on the user.
+
+    :param session_id: Session/conversation identifier.
+    :param body: ``external_session_awaiting_input`` event; ``data.message`` is
+        the reason shown to the user, e.g. ``"Claude needs your permission to use Bash"``.
+    :param conversation_store: Store holding the awaiting-input label.
+    :raises OmnigentError: If ``data.message`` is not a non-empty string.
+    """
+    message = body.data.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise OmnigentError(
+            "external_session_awaiting_input requires a non-empty data.message",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    reason = " ".join(message.split())
+    await asyncio.to_thread(
+        awaiting_input.set_awaiting_input, conversation_store, session_id, reason
+    )
+
+
 async def _handle_external_session_todos(
     session_id: str,
     body: SessionEventInput,
@@ -5035,10 +5067,13 @@ def _publish_status(
     _session_status_cache[session_id] = status
     if previous_status != status:
         _publish_child_status_to_parent(session_id, status)
+        if status in ("running", "failed"):
+            awaiting_input.schedule_clear(session_id)
     if status == "idle" and previous_status in ("running", "waiting") and persist_live_status:
         # A turn can open or merge a PR while nobody watches; refresh what the server
         # stores. Stops and archives publish idle without persisting it, and skip this.
         session_pull_requests.notify_turn_end(session_id)
+        awaiting_input.schedule_refresh_after_turn(session_id)
     # Mirror the transition onto the conversation row (best-effort,
     # deduplicated, off-loop) so replicas that don't hold this session's
     # runner tunnel serve the same sidebar status.
@@ -12484,6 +12519,7 @@ __all__ = [
     "_get_runner_client_for_resource_access",
     "_grant_default_public",
     "_handle_advise_models_mcp",
+    "_handle_external_session_awaiting_input",
     "_handle_external_session_todos",
     "_handle_mcp_tools_list",
     "_host_model_options_via_registry",

@@ -84,7 +84,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.server import presence
+from omnigent.server import awaiting_input, presence
 from omnigent.server import session_pull_requests as server_prs
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -157,6 +157,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
     _EXTERNAL_PULL_REQUESTS_TYPE,
     _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
+    _EXTERNAL_SESSION_AWAITING_INPUT_TYPE,
     _EXTERNAL_SESSION_INTERRUPTED_TYPE,
     _EXTERNAL_SESSION_STATUS_TYPE,
     _EXTERNAL_SESSION_STATUS_VALUES,
@@ -204,6 +205,7 @@ from omnigent.server.routes._sessions.helpers import (
     _forward_session_change_to_runner,
     _get_runner_client,
     _get_runner_client_for_resource_access,
+    _handle_external_session_awaiting_input,
     _handle_external_session_todos,
     _is_codex_native_subagent,
     _is_devin_native_subagent,
@@ -1536,6 +1538,7 @@ def register_events_routes(
             _EXTERNAL_REASONING_EFFORT_CHANGE_TYPE,
             _EXTERNAL_SESSION_TITLE_TYPE,
             _EXTERNAL_SESSION_TODOS_TYPE,
+            _EXTERNAL_SESSION_AWAITING_INPUT_TYPE,
             _EXTERNAL_SUBAGENT_START_TYPE,
             _EXTERNAL_ACP_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -1613,6 +1616,8 @@ def register_events_routes(
             except ValueError as exc:
                 raise OmnigentError(str(exc), code=ErrorCode.INVALID_INPUT) from exc
         if body.type == "message" and body.data.get("role", "user") == "user":
+            if conv.labels.get(awaiting_input.AWAITING_INPUT_LABEL_KEY):
+                awaiting_input.schedule_clear(session_id)
             from omnigent.harnesses.claude_native.bridge import is_auth_slash_command
 
             if is_auth_slash_command(_extract_user_text_from_event(body)) and (
@@ -3127,6 +3132,9 @@ def register_events_routes(
                 body,
                 conversation_store,
             )
+            return {"queued": False}
+        if body.type == _EXTERNAL_SESSION_AWAITING_INPUT_TYPE:
+            await _handle_external_session_awaiting_input(session_id, body, conversation_store)
             return {"queued": False}
         if body.type == _EXTERNAL_SESSION_TODOS_TYPE:
             await _handle_external_session_todos(session_id, body, conversation_store)

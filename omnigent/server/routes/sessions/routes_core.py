@@ -61,6 +61,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.server import awaiting_input
 from omnigent.server import session_pull_requests as server_prs
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
@@ -4084,6 +4085,7 @@ def register_core_routes(
         # runner). The teardown sleeps past the Undo window, then re-reads the
         # archived flag and skips if undone, so undoing keeps the runner alive.
         if body.archived is True:
+            awaiting_input.schedule_clear(session_id)
             _finish_archive(
                 session_id,
                 conversation_store,
