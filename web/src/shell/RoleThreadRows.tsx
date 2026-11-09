@@ -4,8 +4,16 @@ import { MessagesSquareIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import { relativeTime } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
-import { roleThreadStateText, roleThreadsFromLabels, type RoleThread } from "@/lib/roleThreads";
+import { StateDot } from "@/components/StateDot";
+import {
+  roleThreadStateDescription,
+  roleThreadStateText,
+  roleThreadStateTone,
+  roleThreadsFromLabels,
+  type RoleThread,
+} from "@/lib/roleThreads";
 import { createSideChat } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { SIDEBAR_HOVER_HIGHLIGHT, SIDEBAR_ROW } from "./sidebarStyles";
@@ -70,11 +78,15 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
           >
             <MessagesSquareIcon aria-hidden className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">{thread.counterpart}</span>
-            {urgent && (
-              <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
+            <span
+              data-testid="role-thread-state"
+              className="flex shrink-0 items-center gap-1 text-xs text-foreground"
+            >
+              <StateDot tone={roleThreadStateTone(thread.state)} />
+              <span className={urgent ? undefined : "sr-only"}>
                 {roleThreadStateText(thread.state)}
               </span>
-            )}
+            </span>
             {thread.unread > 0 && (
               <span
                 aria-label={`${thread.unread} unread`}
@@ -87,8 +99,14 @@ function RoleThreadRow({ holderId, thread }: { holderId: string; thread: RoleThr
         </TooltipTrigger>
         <TooltipContent side="right" className="max-w-72">
           <p className="font-medium">
-            {thread.counterpart} · {roleThreadStateText(thread.state)} · {thread.messages}{" "}
-            {thread.messages === 1 ? "message" : "messages"}
+            {thread.counterpart} · {roleThreadStateText(thread.state)}
+          </p>
+          {roleThreadStateDescription(thread.state) && (
+            <p>{roleThreadStateDescription(thread.state)}</p>
+          )}
+          <p className="mt-1 text-muted-foreground">
+            {thread.messages} {thread.messages === 1 ? "message" : "messages"}
+            {thread.updatedAt > 0 && <> · last {relativeTime(thread.updatedAt * 1000)}</>}
           </p>
           {thread.summary && <p className="mt-1">{thread.summary}</p>}
         </TooltipContent>

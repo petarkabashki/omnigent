@@ -1,3 +1,4 @@
+import type { StateTone } from "@/components/StateDot";
 import { authenticatedFetch } from "@/lib/identity";
 import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
@@ -54,15 +55,41 @@ export function roleThreadsFromLabels(
 
 const STATE_TEXT: Record<string, string> = {
   open: "Open",
-  waiting_on_them: "Waiting on them",
-  waiting_on_us: "Waiting on us",
+  waiting_on_them: "Their turn",
+  waiting_on_us: "Our turn",
   blocked: "Blocked",
   done: "Done",
+};
+
+const STATE_TONE: Record<string, StateTone> = {
+  open: "neutral",
+  waiting_on_them: "blue",
+  waiting_on_us: "amber",
+  blocked: "red",
+  done: "green",
 };
 
 /** Human text for a thread state; unknown states show as sent. */
 export function roleThreadStateText(state: string): string {
   return STATE_TEXT[state] ?? state;
+}
+
+const STATE_DESCRIPTION: Record<string, string> = {
+  waiting_on_us: "The last message came in to us and hasn't been answered or closed.",
+  waiting_on_them: "We sent the last message and expect a reply.",
+  open: "Nobody owes a reply; the thread stays available.",
+  blocked: "Work can't continue until something outside this thread changes.",
+  done: "The thread is finished; nothing further is expected.",
+};
+
+/** What a thread state means, for its tooltip; empty for unknown states. */
+export function roleThreadStateDescription(state: string): string {
+  return STATE_DESCRIPTION[state] ?? "";
+}
+
+/** Colour of a thread state's mark; unknown states are neutral. */
+export function roleThreadStateTone(state: string): StateTone {
+  return STATE_TONE[state] ?? "neutral";
 }
 
 /** One message of a thread: `in` from the counterpart, `out` sent by the role. */

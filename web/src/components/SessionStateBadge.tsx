@@ -1,4 +1,4 @@
-// Sidebar status indicator. Approval surfaces as a "Needs response" tag so
+// Sidebar status indicator. Approval surfaces as a "Needs you" tag so
 // it reads at a glance; other states stay compact. Verbose copy
 // (incl. the approval count) lives in the tooltip.
 
@@ -24,18 +24,18 @@ interface Visual {
 function describe(state: SessionState): Visual {
   switch (state.kind) {
     case "awaiting": {
-      const tooltip =
+      const reason =
         state.reason ??
         (state.count === 1
           ? "1 approval prompt waiting"
           : `${state.count} approval prompts waiting`);
       return {
         kind: state.kind,
-        ariaLabel: tooltip,
-        tooltip,
+        ariaLabel: reason,
+        tooltip: `Needs you: ${reason}`,
         render: () => (
           <Badge className="border-transparent bg-brand-accent/15 text-brand-accent">
-            Needs response
+            Needs you
           </Badge>
         ),
       };
@@ -44,7 +44,7 @@ function describe(state: SessionState): Visual {
       return {
         kind: state.kind,
         ariaLabel: "Session running",
-        tooltip: "Session running",
+        tooltip: "Running: the agent is working on a turn.",
         render: () => <RunningDot className="size-3" />,
       };
     case "starting":
@@ -59,7 +59,7 @@ function describe(state: SessionState): Visual {
       return {
         kind: state.kind,
         ariaLabel: "Latest message is an error",
-        tooltip: "Latest message is an error",
+        tooltip: "Failed: the last turn ended with an error.",
         render: () => (
           <CircleAlertIcon aria-hidden className="size-3.5 shrink-0 text-destructive" />
         ),
@@ -68,7 +68,7 @@ function describe(state: SessionState): Visual {
       return {
         kind: state.kind,
         ariaLabel: "Host disconnected",
-        tooltip: "Host disconnected",
+        tooltip: "Offline: the session's host isn't connected.",
         render: () => (
           <span
             aria-hidden

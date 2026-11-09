@@ -787,7 +787,7 @@ Cross-harness journeys:
   server limit, and cancelled waits stop re-parking (server/JS regressions).
   For a manual check, edit the prefill, cancel a subsequent editor, and send a
   follow-up. Keep the service running while checking that the card and sidebar
-  “Needs response” badge settle.
+  “Needs you” badge settle.
   Known gaps: native cancellation → browser sidebar settlement, select/input
   cancellation through real Pi, active SDK interruption, Inbox/standalone
   approvals, mobile, sandbox and Managed acceptance.

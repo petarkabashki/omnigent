@@ -96,7 +96,7 @@ export function childStatus(child: ChildSessionInfo): AgentStatus {
   // so checking ``busy`` first would hide the prompt behind a generic
   // "Working" pill — exactly the signal the user needs to act on.
   if (needsResponse(child)) {
-    return { activity: "awaiting", label: "Needs response" };
+    return { activity: "awaiting", label: "Needs you" };
   }
   // ``busy`` is the authoritative live flag (queued or in_progress);
   // ``current_task_status`` may be "launching", "completed", "failed",

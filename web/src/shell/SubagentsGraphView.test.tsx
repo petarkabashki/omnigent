@@ -155,7 +155,7 @@ afterEach(cleanup);
 describe("childActivity", () => {
   it("returns awaiting when pending_elicitations_count > 0, even if busy", () => {
     const result = childActivity(childInfo({ id: "x", busy: true, pending_elicitations_count: 2 }));
-    expect(result).toEqual({ activity: "awaiting", label: "Needs response" });
+    expect(result).toEqual({ activity: "awaiting", label: "Needs you" });
   });
 
   it("returns launching for launching status", () => {

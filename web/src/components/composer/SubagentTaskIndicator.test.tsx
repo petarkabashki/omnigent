@@ -134,9 +134,9 @@ describe("SubagentTaskIndicator", () => {
     // The active spinner must use the shared RunningDot (same component as the
     // sidebar), not a one-off inline loader.
     expect(workingStatus?.querySelector('[data-testid="running-dot"]')).toBeInTheDocument();
-    expect(
-      screen.getAllByRole("status").some((status) => status.textContent === "Needs response"),
-    ).toBe(true);
+    expect(screen.getAllByRole("status").some((status) => status.textContent === "Needs you")).toBe(
+      true,
+    );
     expect(screen.getAllByRole("status").some((status) => status.textContent === "Failed")).toBe(
       true,
     );

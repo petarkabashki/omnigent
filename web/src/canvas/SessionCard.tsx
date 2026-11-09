@@ -27,7 +27,7 @@ export type SessionCardNode = Node<SessionCardData, "session">;
 function stateLabel(state: SessionState | null, status: Conversation["status"]): string {
   switch (state?.kind) {
     case "awaiting":
-      return "Needs response";
+      return "Needs you";
     case "running":
     case "starting":
       return "Running";

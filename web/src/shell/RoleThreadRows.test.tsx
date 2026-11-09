@@ -63,7 +63,13 @@ describe("RoleThreadRows", () => {
       }),
     );
     const rows = screen.getAllByTestId("role-thread-row");
-    expect(rows.map((row) => row.textContent)).toEqual(["/BenchBlocked3", "/Architect"]);
+    // An open thread shows only its dot; the word stays for screen readers.
+    expect(rows.map((row) => row.textContent)).toEqual(["/BenchBlocked3", "/ArchitectOpen"]);
+    expect(
+      rows.map((row) =>
+        within(row).getByTestId("role-thread-state").firstElementChild?.getAttribute("data-tone"),
+      ),
+    ).toEqual(["red", "neutral"]);
     expect(within(rows[0]).getByLabelText("3 unread")).toBeInTheDocument();
   });
 

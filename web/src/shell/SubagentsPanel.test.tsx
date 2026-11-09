@@ -1276,8 +1276,8 @@ describe("SubagentsPanel", () => {
 
     const row = childRow(container, "c_await");
     const avatar = within(row).getByTestId("subagent-status-avatar");
-    expect(row).not.toHaveTextContent(/Needs response/);
-    expect(avatar).toHaveAttribute("aria-label", "Needs response");
+    expect(row).not.toHaveTextContent(/Needs you/);
+    expect(avatar).toHaveAttribute("aria-label", "Needs you");
     expect(avatar).toHaveClass("bg-warning/15", "text-warning");
     expect(avatar.querySelector(".lucide-circle-question-mark")).not.toBeNull();
     expect(row.querySelector('[data-testid="running-dot"]')).toBeNull();

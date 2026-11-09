@@ -190,7 +190,7 @@ the header menu), and each place is a separate entry point.
   back. List scrolling, row taps, long-press reordering and horizontal scrollers
   keep their own touch handling.
 - `awaiting-input`: a session blocked on the user without an approval dialog
-  shows as "Needs response" like a pending approval: sidebar badge and count,
+  shows as "Needs you" like a pending approval: sidebar badge and count,
   Inbox "Needs input" tab (the reason is the row preview), and an
   immediate OS notification. The server sets label `omnigent.awaiting_input`
   (reason, 256 chars) when a turn ends on a question or request to the user, or

@@ -70,7 +70,7 @@ describe("SessionCard", () => {
       conversation: conversation({ status: "idle", pending_elicitations_count: 2 }),
     });
     expect(card).toHaveAttribute("data-state", "awaiting");
-    expect(screen.getAllByText("Needs response").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Needs you").length).toBeGreaterThan(0);
   });
 
   it("shows the unread dot for finished output the user has not seen", () => {

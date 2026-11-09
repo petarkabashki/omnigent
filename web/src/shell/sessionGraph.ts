@@ -52,7 +52,7 @@ export function sessionLocation(
 
 function sessionActivity(session: Conversation): { activity: AgentActivity; label: string } {
   if (needsResponse(session)) {
-    return { activity: "awaiting", label: "Needs response" };
+    return { activity: "awaiting", label: "Needs you" };
   }
   const unbound = !session.host_id && !session.runner_id;
   if (session.labels?.[FLEET_TASK_LABEL_KEY] && unbound) {

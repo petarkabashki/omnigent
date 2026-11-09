@@ -309,7 +309,7 @@ describe("SessionUpdatesProvider project folders", () => {
   it("watches sessions that live only in a project folder's cache", () => {
     // A project folder fetches its members into ["project-sessions", <name>],
     // separate from the global list. Those ids must still be watched so the
-    // stream delivers liveness (e.g. the "Needs response" elicitation count).
+    // stream delivers liveness (e.g. the "Needs you" elicitation count).
     const client = new QueryClient();
     seedConversations(client, ["conv_a"]);
     seedProjectFolder(client, "Sprint 42", ["conv_filed"]);
@@ -324,7 +324,7 @@ describe("SessionUpdatesProvider project folders", () => {
     const handler = frameHandler();
 
     // A pending-elicitation bump must reach the folder's own cache so the row
-    // flips to "Needs response" without a refetch.
+    // flips to "Needs you" without a refetch.
     act(() =>
       handler({
         type: "changed",

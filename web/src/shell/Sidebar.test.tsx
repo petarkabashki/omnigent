@@ -696,7 +696,7 @@ describe("Sidebar session list", () => {
   });
 
   it("narrows the awaiting row's reserve on the same trigger that fades its tag", () => {
-    // The "Needs response" tag is absolutely positioned, so the row's right
+    // The "Needs you" tag is absolutely positioned, so the row's right
     // padding is the only thing keeping the title clear of it. If the padding
     // narrows on a trigger the tag's fade doesn't share, the title slides under
     // a still-visible tag — which is what a plain click did via `focus-within`.
@@ -737,7 +737,7 @@ describe("Sidebar session list", () => {
   });
 
   it("does not constrain a row's awaiting pill to the dot slot", () => {
-    // The "Needs response" pill is wider than the dot markers; the size-6 box
+    // The "Needs you" pill is wider than the dot markers; the size-6 box
     // would clip its label, so the pill keeps its natural width.
     mockConversations([
       conv("conv_awaiting", "Claude Code", {
@@ -1440,7 +1440,7 @@ describe("Sidebar session list", () => {
     );
     expect(within(workingRow).queryByText("now")).toBeNull();
 
-    // Awaiting rows keep the "Needs response" badge without a timestamp.
+    // Awaiting rows keep the "Needs you" badge without a timestamp.
     const awaitingRow = screen.getByRole("link", { name: /conv_awaiting/ }).closest("li")!;
     expect(within(awaitingRow).getByTestId("session-state-badge")).toHaveAttribute(
       "data-state",
@@ -3138,11 +3138,11 @@ describe("Sidebar project Show more", () => {
     toggleFolder();
 
     expect(
-      within(screen.getByTestId("project-show-more")).getByText("Needs response"),
+      within(screen.getByTestId("project-show-more")).getByText("Needs you"),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("project-show-more"));
     const row = document.querySelector<HTMLElement>('[data-sidebar-session-id="conv_awaiting"]')!;
-    expect(within(row).getByText("Needs response")).toBeInTheDocument();
+    expect(within(row).getByText("Needs you")).toBeInTheDocument();
     expect(screen.queryByTestId("project-show-more")).toBeNull();
   });
 
@@ -3338,11 +3338,11 @@ describe("Sidebar collapsed project marker", () => {
     ]);
     renderSidebar();
 
-    // Collapsed by default → the row is hidden, but its "Needs response"
+    // Collapsed by default → the row is hidden, but its "Needs you"
     // marker surfaces on the project header.
     const header = screen.getByRole("button", { name: /^Customer X/ });
     expect(header).toHaveAttribute("aria-expanded", "false");
-    expect(within(header).getByText("Needs response")).toBeInTheDocument();
+    expect(within(header).getByText("Needs you")).toBeInTheDocument();
   });
 
   it("drops the header marker once the project is expanded", () => {
@@ -3359,7 +3359,7 @@ describe("Sidebar collapsed project marker", () => {
     const header = screen.getByRole("button", { name: /^Customer X/ });
     expect(header).toHaveAttribute("aria-expanded", "true");
     // The visible row now owns the badge; the header no longer carries it.
-    expect(within(header).queryByText("Needs response")).toBeNull();
+    expect(within(header).queryByText("Needs you")).toBeNull();
   });
 
   it("shows no header marker when no filed row has one", () => {
@@ -3370,7 +3370,7 @@ describe("Sidebar collapsed project marker", () => {
     renderSidebar();
 
     const header = screen.getByRole("button", { name: /^Customer X/ });
-    expect(within(header).queryByText("Needs response")).toBeNull();
+    expect(within(header).queryByText("Needs you")).toBeNull();
   });
 
   // A dot/spinner marker on a collapsed project must sit in the same size-6
@@ -3405,7 +3405,7 @@ describe("Sidebar collapsed project marker", () => {
   });
 
   // The "awaiting" pill is wider than the dot markers; constraining it to the
-  // size-6 box would clip its "Needs response" label, so it keeps its natural
+  // size-6 box would clip its "Needs you" label, so it keeps its natural
   // width.
   it("does not constrain the collapsed-project awaiting pill to the dot slot", () => {
     projectsMock.push("Customer X");
