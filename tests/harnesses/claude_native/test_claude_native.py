@@ -167,6 +167,7 @@ def test_claude_terminal_request_pins_launch_cwd(tmp_path, monkeypatch) -> None:
     settings = _load_invocation_settings(args)
     assert sorted(settings["hooks"]) == [
         "MessageDisplay",
+        "Notification",
         "PostToolUse",
         "PreCompact",
         "SessionEnd",
