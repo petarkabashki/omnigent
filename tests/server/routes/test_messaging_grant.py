@@ -43,7 +43,11 @@ async def _verdict(action: str, content: dict | None) -> None:
 
 @pytest.fixture()
 def rules_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(helpers, "_load_agent_spec_for_session", lambda *_args: None)
+    # Agentless sessions still build an engine; these offers stash no writes for it.
+    monkeypatch.setattr(helpers, "_load_policy_spec_for_session", lambda *_args: None)
+    monkeypatch.setattr(
+        helpers, "_build_policy_engine_from_spec", lambda *_args: SimpleNamespace()
+    )
     path = tmp_path / "rules.yaml"
     path.write_text("# mine\ndefault: ask\nrules: []\n")
     yield path
