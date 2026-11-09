@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import math
 import re
@@ -95,6 +96,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_wrapper_label,
 )
 from omnigent.native.session_todos import validate_session_todos
+from omnigent.policies.builtins.messaging import add_allow_rule
 from omnigent.policies.types import EvaluationContext
 from omnigent.runner.identity import (
     token_bound_runner_id,
@@ -248,6 +250,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     _model_options_stale,
     _native_ask_gate_locks,
     _pending_policy_ask_writes,
+    _PendingPolicyAskWrites,
     _pushed_model_options_cache,
     _read_explicit_unread,
     _read_last_seen,
@@ -9320,6 +9323,28 @@ def _build_policy_engine_from_spec_impl(
     )
 
 
+def _write_messaging_grant(pending: _PendingPolicyAskWrites, data: dict[str, Any]) -> None:
+    """Insert the allow rule an owner picked on an approved messaging ASK.
+
+    Runs only from the approval verdict path; the pair and file come from the
+    server-held offer, the verdict just picks permanent or two hours.
+    """
+    content = data.get("content")
+    choice = content.get("messaging_grant") if isinstance(content, dict) else None
+    offer = pending.message_grant
+    if offer is None or data.get("action") != "accept" or choice not in ("always", "2h"):
+        return
+    add_allow_rule(
+        offer.path,
+        offer.sender,
+        offer.target,
+        hours=_MESSAGING_GRANT_HOURS if choice == "2h" else None,
+    )
+
+
+_MESSAGING_GRANT_HOURS = 2
+
+
 async def _apply_pending_policy_ask_writes(
     session_id: str,
     conv: Conversation,
@@ -9355,6 +9380,11 @@ async def _apply_pending_policy_ask_writes(
     if pending is None:
         return
     if pending.from_mcp:
+        if pending.message_grant is not None and data.get("action") == "accept":
+            _pending_policy_ask_writes[elicitation_id] = dataclasses.replace(
+                pending, message_grant=None
+            )
+            await asyncio.to_thread(_write_messaging_grant, pending, data)
         # MCP entries: the retry path (POST /mcp with requestState)
         # pops and applies the writes itself. Applying here too would
         # double-apply non-idempotent ops (e.g. INCREMENT state
@@ -9377,6 +9407,7 @@ async def _apply_pending_policy_ask_writes(
         # Declined — the claim already removed the stashed writes
         # (POLICIES.md §7.2: a denied ASK leaves no trace).
         return
+    await asyncio.to_thread(_write_messaging_grant, pending, data)
     # Resolve the agent spec + build the engine off the event loop: the
     # lookup, cold-cache bundle fetch, and engine construction are all
     # blocking DB/IO.

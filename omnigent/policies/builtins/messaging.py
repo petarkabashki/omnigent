@@ -86,6 +86,20 @@ def _glob_escape(text: str) -> str:
 
 
 @dataclass(frozen=True)
+class MessagingGrantOffer:
+    """A pair the owner may allow from an ASK approval, and the file to write it to."""
+
+    path: str
+    sender: str
+    target: str
+
+
+def resolve_route(sender_id: str, address: str, user_id: str | None) -> MessageRoute | None:
+    """Resolve a message's role handles with the installed resolver, if any."""
+    return _resolver(sender_id, address, user_id) if _resolver is not None else None
+
+
+@dataclass(frozen=True)
 class MessagingRule:
     """One ``from`` / ``to`` / ``action`` line of the rules file."""
 

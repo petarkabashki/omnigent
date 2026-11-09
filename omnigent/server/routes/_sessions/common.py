@@ -46,6 +46,7 @@ from omnigent.harness_plugins import (
     PI_NATIVE_CODING_AGENT,
     harness_capabilities,
 )
+from omnigent.policies.builtins.messaging import MessagingGrantOffer
 from omnigent.runner.routing import RunnerRouter
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.schemas import (
@@ -823,6 +824,7 @@ class _PendingPolicyAskWrites:
     :param reviewed_arguments: Original MCP arguments shown for approval.
     :param transformed_arguments: Policy transform stored with that approval.
     :param mcp_call_identity: Session, tool, policy actor and credential user.
+    :param message_grant: Pair and rules file an approval may turn into an allow rule.
     """
 
     state_updates: list[StateUpdate] | None
@@ -831,6 +833,7 @@ class _PendingPolicyAskWrites:
     reviewed_arguments: dict[str, Any] | None = None
     transformed_arguments: dict[str, Any] | None = None
     mcp_call_identity: tuple[str, str, str | None, str | None] | None = None
+    message_grant: MessagingGrantOffer | None = None
 
 
 # Workspace-scoped: keyed by a harness elicitation id, which can be

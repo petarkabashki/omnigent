@@ -15,9 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.policies.builtins.messaging import (
+    MESSAGING_TOOLS,
     POLICY_REGISTRY,
     MessageRoute,
+    MessagingGrantOffer,
     parse_rules,
+    resolve_route,
     write_text_atomically,
 )
 from omnigent.runtime import get_caps
@@ -46,6 +49,37 @@ def active_rules_policy(store: PolicyStore) -> tuple[str, str] | None:
             if isinstance(path, str):
                 return spec.name, os.path.expanduser(path)
     return None
+
+
+def messaging_grant_offer(
+    store: PolicyStore | None,
+    session_id: str,
+    tool_name: str,
+    arguments: object,
+    deciding_policies: list[str] | None,
+    user_id: str | None,
+) -> MessagingGrantOffer | None:
+    """Return the "always allow this pair" offer for a messaging_rules ASK, else ``None``.
+
+    Offered only when the ASK was decided by the messaging_rules policy itself.
+    """
+    if store is None or tool_name.rsplit("__", 1)[-1] not in MESSAGING_TOOLS:
+        return None
+    active = active_rules_policy(store)
+    address = arguments.get("session_id") if isinstance(arguments, dict) else None
+    if (
+        active is None
+        or active[0] not in (deciding_policies or [])
+        or not isinstance(address, str)
+    ):
+        return None
+    route = resolve_route(session_id, address, user_id)
+    return MessagingGrantOffer(active[1], route.sender, route.target) if route else None
+
+
+def grant_schema(offer: MessagingGrantOffer) -> dict[str, object]:
+    """Elicitation schema that tells the approval card which grants to offer."""
+    return {"x-messaging-grant": {"from": offer.sender, "to": offer.target, "hours": 2}}
 
 
 def _read_text(path: str) -> str:

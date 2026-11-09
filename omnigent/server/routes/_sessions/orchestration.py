@@ -374,6 +374,7 @@ from omnigent.server.routes._sessions.helpers import (
     _wait_for_managed_runner_tunnel,
     _wait_for_runner_client,
 )
+from omnigent.server.routes.messaging_rules import grant_schema, messaging_grant_offer
 from omnigent.server.routing_outcomes import (
     COST_UNIT_CREDITS,
     COST_UNIT_KEY,
@@ -10532,6 +10533,7 @@ async def _register_policy_elicitation(
     result: PolicyResult,
     arguments_preview: str,
     conversation_store: ConversationStore,
+    requested_schema: dict[str, Any] | None = None,
 ) -> str:
     """
     Publish an elicitation request event on the session stream.
@@ -10550,13 +10552,15 @@ async def _register_policy_elicitation(
         the elicitation UI preview (max ~1024 chars).
     :param conversation_store: Store used to mirror child-session
         prompts into ancestor streams.
+    :param requested_schema: Extra schema for the approval card, e.g. a
+        messaging grant offer; ``None`` for a plain approve / reject.
     :returns: The generated elicitation id,
         e.g. ``"elicit_a1b2c3..."``.
     """
     elicitation_id = f"elicit_{secrets.token_hex(16)}"
     elicitation = ElicitationRequest(
         message=result.reason or "Approval required",
-        requested_schema={},
+        requested_schema=requested_schema or {},
         phase=Phase.TOOL_CALL.value,
         policy_names=result.deciding_policies or ["unknown"],
         content_preview=arguments_preview[:1024],
@@ -10679,11 +10683,20 @@ async def _evaluate_tool_call_policy(
 
     # ASK — publish elicitation event. Approval state lives
     # on the runner (_pending_approvals dict).
+    grant_offer = messaging_grant_offer(
+        get_policy_store(),
+        session_id,
+        tool_name,
+        args_payload,
+        result.deciding_policies,
+        (actor or {}).get("run_as"),
+    )
     elicitation_id = await _register_policy_elicitation(
         session_id=session_id,
         result=result,
         arguments_preview=arguments_str,
         conversation_store=conversation_store,
+        requested_schema=grant_schema(grant_offer) if grant_offer else None,
     )
     # The deciding policy's writes (e.g. a cost-budget checkpoint via
     # ``state_updates``) must land ONLY on approve. This relay path returns
@@ -10698,6 +10711,7 @@ async def _evaluate_tool_call_policy(
     _pending_policy_ask_writes[elicitation_id] = _PendingPolicyAskWrites(
         state_updates=result.state_updates,
         set_labels=result.set_labels,
+        message_grant=grant_offer,
     )
     return {
         "verdict": "pending",
@@ -13216,17 +13230,27 @@ async def _handle_mcp_tools_call(
             # Emit elicitation SSE event (for REPL approval UI) and return
             # InputRequiredResult per the MCP MRTR spec so the runner can
             # park on the approval Future and retry when the user decides.
+            grant_offer = messaging_grant_offer(
+                get_policy_store(),
+                session_id,
+                namespaced_name,
+                arguments,
+                call_result.deciding_policies,
+                (actor or {}).get("run_as"),
+            )
             elicitation_id = await _register_policy_elicitation(
                 session_id,
                 call_result,
                 json.dumps(arguments)[:1024],
                 conversation_store,
+                requested_schema=grant_schema(grant_offer) if grant_offer else None,
             )
             # Keep the reviewed call and deferred writes together until approval.
             _pending_policy_ask_writes[elicitation_id] = _PendingPolicyAskWrites(
                 state_updates=call_result.state_updates,
                 set_labels=call_result.set_labels,
                 from_mcp=True,
+                message_grant=grant_offer,
                 reviewed_arguments=arguments,
                 transformed_arguments=cast("dict[str, object] | None", call_result.data),
                 mcp_call_identity=(
