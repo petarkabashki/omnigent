@@ -345,7 +345,7 @@ class ExternalTask:
     :param title: Sidebar title, e.g. ``"fk-gate-7"``.
     :param status: Session status, one of ``"idle"``, ``"running"``,
         ``"waiting"`` or ``"failed"``.
-    :param state: The raw external state last reported, e.g. ``"completed"``.
+    :param state: The raw external state last reported, e.g. ``"done"``.
     :param exit_code: Last reported exit code, or ``None``.
     :param detail: Free-form detail last reported, or ``None``.
     :param unit: External unit name, e.g. ``"fk-gate-7"``.
@@ -1001,8 +1001,8 @@ class SessionsNamespace:
         :param host_id: Host the unit runs on, e.g. ``"0123abcd..."``.
         :param project_id: Project to file the row under.
         :param labels: Extra labels to stamp on the row.
-        :param status: Initial state; defaults to ``"pending"`` (shown as
-            waiting). See :meth:`update_external_task` for accepted values.
+        :param status: Initial state; defaults to ``"queued"``. See
+            :meth:`update_external_task` for accepted values.
         :returns: The :class:`ExternalTask` row.
         :raises OmnigentError: On non-2xx status (404 for an unknown project
             or host, 400 for an unknown status).
@@ -1030,19 +1030,21 @@ class SessionsNamespace:
         *,
         exit_code: int | None = None,
         detail: str | None = None,
+        host_id: str | None = None,
     ) -> ExternalTask:
         """
         Update an external task row's status, exit code and detail.
 
         Calls ``PATCH /v1/external-tasks/{session_id}``. ``status`` is one of
-        ``running``, ``pending``, ``waiting``, ``idle``, ``completed``,
-        ``succeeded`` or ``failed``; ``exit_code`` and ``detail`` replace the
-        previous values (omit them to clear).
+        ``queued``, ``running``, ``done``, ``failed`` or ``stopped`` (any
+        transition is allowed; last write wins); ``exit_code`` and ``detail``
+        replace the previous values (omit them to clear).
 
         :param session_id: The row's session id.
         :param status: New external state, e.g. ``"failed"``.
         :param exit_code: Process exit code, e.g. ``2``.
-        :param detail: Short free-form detail, e.g. ``"gate red"``.
+        :param detail: Short free-form detail, e.g. ``"oom-kill"``.
+        :param host_id: Move the row to another host you own.
         :returns: The updated :class:`ExternalTask`.
         :raises OmnigentError: On non-2xx status (400 for an unknown status,
             404 when the id is not an external task).
@@ -1052,6 +1054,8 @@ class SessionsNamespace:
             body["exit_code"] = exit_code
         if detail is not None:
             body["detail"] = detail
+        if host_id is not None:
+            body["host_id"] = host_id
         resp = await self._http.patch(f"{self._base}/v1/external-tasks/{session_id}", json=body)
         raise_for_status(resp.status_code, response_body(resp))
         return ExternalTask.from_dict(

@@ -44,7 +44,7 @@ async def test_create_update_delete_external_task_requests() -> None:
     sessions = _namespace(httpx.MockTransport(handler))
 
     created = await sessions.create_external_task(
-        "fk-gate-7", "fk-gate-7", host_id="h1", status="running"
+        "fk-gate-7", "fk-gate-7", host_id="h1", status="queued"
     )
     updated = await sessions.update_external_task("abc", "failed", exit_code=2)
     await sessions.delete("abc")
@@ -55,7 +55,7 @@ async def test_create_update_delete_external_task_requests() -> None:
         (
             "POST",
             "/v1/external-tasks",
-            {"title": "fk-gate-7", "unit": "fk-gate-7", "host_id": "h1", "status": "running"},
+            {"title": "fk-gate-7", "unit": "fk-gate-7", "host_id": "h1", "status": "queued"},
         ),
         ("PATCH", "/v1/external-tasks/abc", {"status": "failed", "exit_code": 2}),
         ("DELETE", "/v1/sessions/abc", None),

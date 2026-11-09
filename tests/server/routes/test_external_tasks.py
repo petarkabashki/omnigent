@@ -6,6 +6,10 @@ import httpx
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+
+HOST_A = "a" * 32
+HOST_B = "b" * 32
 
 
 def _seed_placeholder_agent(db_uri: str) -> None:
@@ -28,7 +32,7 @@ async def test_external_task_lifecycle_is_listed_read_only_and_deletable(
     client: httpx.AsyncClient, db_uri: str
 ) -> None:
     _seed_placeholder_agent(db_uri)
-    payload = {"title": "fk-gate-7", "unit": "fk-gate-7", "host_id": None, "status": "running"}
+    payload = {"title": "fk-gate-7", "unit": "fk-gate-7", "host_id": HOST_A, "status": "queued"}
 
     created = await client.post("/v1/external-tasks", json=payload)
     repeated = await client.post("/v1/external-tasks", json=payload)
@@ -37,21 +41,42 @@ async def test_external_task_lifecycle_is_listed_read_only_and_deletable(
     assert repeated.status_code == 200
     session_id = created.json()["id"]
     assert repeated.json()["id"] == session_id
-    assert created.json()["status"] == "running"
+    assert created.json()["status"] == "idle"
+    assert created.json()["state"] == "queued"
     row = await _list_row(client, session_id)
-    assert row["status"] == "running"
+    assert row["status"] == "idle"
     assert row["labels"]["omnigent.external.unit"] == "fk-gate-7"
 
+    running = await client.patch(f"/v1/external-tasks/{session_id}", json={"status": "running"})
+    assert (await _list_row(client, session_id))["status"] == "running"
+    # Rows keep their host in a label, so per-host session counts never see them.
+    host_counts = SqlAlchemyConversationStore(db_uri).count_running_sessions_by_host([HOST_A])
+    assert not host_counts.get(HOST_A)
+    assert running.json()["state"] == "running"
     updated = await client.patch(
         f"/v1/external-tasks/{session_id}",
-        json={"status": "failed", "exit_code": 2, "detail": "gate red"},
+        json={"status": "failed", "exit_code": 2, "detail": "oom-kill"},
     )
     assert updated.status_code == 200, updated.text
+    moved = await client.patch(
+        f"/v1/external-tasks/{session_id}",
+        json={"status": "failed", "exit_code": 2, "host_id": HOST_B},
+    )
+    assert moved.json()["host_id"] == HOST_B
     assert updated.json()["exit_code"] == 2
     assert updated.json()["state"] == "failed"
+    assert updated.json()["detail"] == "oom-kill"
     row = await _list_row(client, session_id)
     assert row["status"] == "failed"
     assert row["labels"]["omnigent.external.exit_code"] == "2"
+
+    stopped = await client.patch(f"/v1/external-tasks/{session_id}", json={"status": "stopped"})
+    assert stopped.json()["exit_code"] is None
+    assert stopped.json()["status"] == "idle"
+    done = await client.patch(
+        f"/v1/external-tasks/{session_id}", json={"status": "done", "exit_code": 0}
+    )
+    assert done.json()["state"] == "done"
 
     message = await client.post(
         f"/v1/sessions/{session_id}/events",
@@ -76,14 +101,14 @@ async def test_external_task_rejects_bad_input(client: httpx.AsyncClient, db_uri
     ).json()["id"]
 
     unknown_status = await client.patch(
-        f"/v1/external-tasks/{session_id}", json={"status": "exploded"}
+        f"/v1/external-tasks/{session_id}", json={"status": "completed"}
     )
     plain_text = await client.post(
         "/v1/external-tasks",
         content='{"title": "t", "unit": "u2"}',
         headers={"content-type": "text/plain"},
     )
-    missing = await client.patch("/v1/external-tasks/nope", json={"status": "idle"})
+    missing = await client.patch("/v1/external-tasks/nope", json={"status": "done"})
 
     assert unknown_status.status_code == 400
     assert plain_text.status_code in (400, 415)
@@ -94,13 +119,11 @@ async def test_external_task_patch_refuses_normal_sessions(
     client: httpx.AsyncClient, db_uri: str
 ) -> None:
     _seed_placeholder_agent(db_uri)
-    from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
-
     normal = SqlAlchemyConversationStore(db_uri).create_conversation(
         title="normal", agent_id=builtin_agent_id("claude-native-ui")
     )
 
-    response = await client.patch(f"/v1/external-tasks/{normal.id}", json={"status": "idle"})
+    response = await client.patch(f"/v1/external-tasks/{normal.id}", json={"status": "done"})
 
     assert response.status_code == 404
 

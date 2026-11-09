@@ -64,6 +64,7 @@ class ExternalTaskUpdateRequest(BaseModel):
     status: str
     exit_code: int | None = None
     detail: str | None = Field(default=None, max_length=_MAX_DETAIL_CHARS)
+    host_id: str | None = None
 
 
 class ExternalTaskResponse(BaseModel):
@@ -92,7 +93,7 @@ def external_task_id(owner: str | None, host_id: str | None, unit: str) -> str:
 
 def _live_status_for(state: str) -> str:
     try:
-        return EXTERNAL_STATE_TO_LIVE_STATUS[state.strip().lower()]
+        return EXTERNAL_STATE_TO_LIVE_STATUS[state]
     except KeyError:
         raise OmnigentError(
             f"Unknown status {state!r}; expected one of {sorted(EXTERNAL_STATE_TO_LIVE_STATUS)}",
@@ -142,14 +143,20 @@ def create_external_tasks_router(
         return conversation
 
     async def _write_state(
-        session_id: str, state: str, exit_code: int | None, detail: str | None
+        session_id: str,
+        state: str,
+        exit_code: int | None,
+        detail: str | None,
+        host_id: str | None = None,
     ) -> None:
         live_status = _live_status_for(state)
         labels = {
-            EXTERNAL_STATE_LABEL_KEY: state.strip().lower(),
+            EXTERNAL_STATE_LABEL_KEY: state,
             EXTERNAL_EXIT_CODE_LABEL_KEY: "" if exit_code is None else str(exit_code),
             EXTERNAL_DETAIL_LABEL_KEY: detail or "",
         }
+        if host_id is not None:
+            labels[EXTERNAL_HOST_LABEL_KEY] = host_id
         await asyncio.to_thread(conversation_store.set_labels, session_id, labels)
         await asyncio.to_thread(
             conversation_store.set_session_live_status, session_id, live_status
@@ -165,7 +172,7 @@ def create_external_tasks_router(
     ) -> ExternalTaskResponse:
         """Create (or return the existing) read-only row for an external unit."""
         user_id = require_user(request, auth_provider)
-        state = body.status or "pending"
+        state = body.status or "queued"
         _live_status_for(state)
         if body.host_id is not None and host_store is not None:
             await asyncio.to_thread(
@@ -236,7 +243,15 @@ def create_external_tasks_router(
     ) -> ExternalTaskResponse:
         """Update an external task row's status, exit code and detail."""
         await _load(request, session_id)
-        await _write_state(session_id, body.status, body.exit_code, body.detail)
+        _live_status_for(body.status)
+        if body.host_id is not None and host_store is not None:
+            await asyncio.to_thread(
+                resolve_host_owner,
+                user_id=require_user(request, auth_provider),
+                host_id=body.host_id,
+                host_store=host_store,
+            )
+        await _write_state(session_id, body.status, body.exit_code, body.detail, body.host_id)
         updated = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if updated is None:
             raise OmnigentError("External task not found", code=ErrorCode.NOT_FOUND)
