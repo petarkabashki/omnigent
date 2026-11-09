@@ -1,4 +1,4 @@
-"""Claude ``Notification`` hooks forward as awaiting-input events."""
+"""Claude ``Notification`` hooks and answered dialogs forward as awaiting-input events."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ from tests.harnesses.claude_native.forwarder._support import (
 
 
 async def _forward_and_collect_awaiting_input(
-    tmp_path: Path, notifications: list[dict[str, Any]]
+    tmp_path: Path, notifications: list[dict[str, Any]], event: str = "Notification"
 ) -> dict[str, Any]:
-    """Record *notifications* after a SessionStart and return the first awaiting-input body."""
+    """Record *notifications* (as *event* hooks) after a SessionStart; return the first
+    awaiting-input body."""
     bridge_dir = tmp_path / "bridge"
     transcript_path = tmp_path / "session.jsonl"
     transcript_path.write_text("", encoding="utf-8")
@@ -34,7 +35,7 @@ async def _forward_and_collect_awaiting_input(
     for notification in notifications:
         record_hook_event(
             bridge_dir,
-            {"hook_event_name": "Notification", "session_id": "claude-session", **notification},
+            {"hook_event_name": event, "session_id": "claude-session", **notification},
         )
     server, thread, base_url = _start_recording_server()
     task = asyncio.create_task(
@@ -90,3 +91,11 @@ async def test_non_blocking_notification_is_not_forwarded(tmp_path: Path) -> Non
     followed_by = {"notification_type": "permission_prompt", "message": "Waiting"}
     body = await _forward_and_collect_awaiting_input(tmp_path, [*ignored, followed_by])
     assert body["data"] == {"message": "Waiting"}
+
+
+@pytest.mark.asyncio
+async def test_answered_dialog_tool_posts_answered(tmp_path: Path) -> None:
+    # Only a dialog tool means the user answered; other tools are not a signal.
+    tools = [{"tool_name": "Bash"}, {"tool_name": "AskUserQuestion"}]
+    body = await _forward_and_collect_awaiting_input(tmp_path, tools, event="PostToolUse")
+    assert body["data"] == {"answered": True}
