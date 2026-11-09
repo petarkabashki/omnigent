@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   roleHandlePath,
   roleThreadIsUrgent,
+  roleThreadNudgeText,
   roleThreadStateLabels,
   roleThreadStateText,
   roleThreadsFromLabels,
@@ -79,5 +80,23 @@ describe("roleHandlePath", () => {
     ["a/b/Role", "a/b"],
   ])("%s is in %j", (handle, path) => {
     expect(roleHandlePath(handle)).toBe(path);
+  });
+});
+
+describe("roleThreadNudgeText", () => {
+  it("says how many messages, from whom, and how long they've waited", () => {
+    const thread = {
+      key: "aaaaaaaaaaaa",
+      counterpart: "/Architect",
+      state: "waiting_on_us",
+      unread: 1,
+      messages: 3,
+      summary: "",
+      updatedAt: 1000,
+    };
+    expect(roleThreadNudgeText(thread, 1000 + 25 * 60)).toBe(
+      "Reminder: 1 message from /Architect in this thread still unhandled, waiting 25 min. " +
+        "Please reply or act on them, then record the thread with sys_thread_note.",
+    );
   });
 });

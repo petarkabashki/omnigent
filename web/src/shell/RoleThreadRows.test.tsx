@@ -118,6 +118,28 @@ describe("RoleThreadRows", () => {
     });
   });
 
+  it("nudges the holder about unhandled messages from the row's bell", async () => {
+    const nudge = vi.spyOn(roleThreadsApi, "nudgeRoleThread").mockResolvedValue(undefined);
+    renderRows(
+      holder({
+        "thread.aaaaaaaaaaaa.cp": "/Architect",
+        "thread.aaaaaaaaaaaa.state": "waiting_on_us",
+        "thread.aaaaaaaaaaaa.unread": "2",
+        "thread.bbbbbbbbbbbb.cp": "/Bench",
+      }),
+    );
+
+    expect(screen.getAllByTestId("role-thread-nudge")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Nudge about /Architect" }));
+
+    await waitFor(() =>
+      expect(nudge).toHaveBeenCalledWith(
+        "sess_product",
+        expect.objectContaining({ counterpart: "/Architect", unread: 2 }),
+      ),
+    );
+  });
+
   it("shows a compact card with actions when a row is focused", async () => {
     vi.spyOn(rolesApi, "listNamespaceRoles").mockResolvedValue([
       {
