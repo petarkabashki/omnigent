@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -10,6 +11,7 @@ import httpx
 import pytest
 
 from omnigent.entities import MessageData
+from omnigent.process_logging import DATA_DIR_ENV_VAR
 from omnigent.server import awaiting_input, reply_classifier, role_threads
 from omnigent.server.reply_classifier import ReplyClass, classify
 
@@ -22,6 +24,13 @@ def _completion(content: str) -> httpx.MockTransport:
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     return httpx.MockTransport(handle)
+
+
+@pytest.fixture(autouse=True)
+def isolated_data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    # Keeps a real ~/.omnigent/openrouter.key out of every test.
+    monkeypatch.setenv(DATA_DIR_ENV_VAR, str(tmp_path))
+    return tmp_path
 
 
 @pytest.fixture
@@ -57,6 +66,40 @@ def test_without_a_key_nothing_is_called(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv(reply_classifier.API_KEY_ENV, raising=False)
     transport = httpx.MockTransport(lambda request: pytest.fail("no call expected"))
     assert classify("Land it?", transport=transport) is None
+
+
+@pytest.mark.parametrize(
+    ("env_key", "file_text", "expected_key"),
+    [
+        (None, "test-key\n", "test-key"),
+        ("test-key", "file-key\n", "test-key"),
+        (None, "  \n", None),
+    ],
+)
+def test_key_falls_back_to_the_data_dir_file(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_data_dir: Path,
+    env_key: str | None,
+    file_text: str,
+    expected_key: str | None,
+) -> None:
+    monkeypatch.delenv(reply_classifier.DISABLE_ENV, raising=False)
+    monkeypatch.delenv(reply_classifier.MODEL_ENV, raising=False)
+    if env_key is None:
+        monkeypatch.delenv(reply_classifier.API_KEY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(reply_classifier.API_KEY_ENV, env_key)
+    (isolated_data_dir / reply_classifier.API_KEY_FILE_NAME).write_text(file_text)
+
+    assert reply_classifier.enabled() is (expected_key is not None)
+    if expected_key is None:
+        transport = httpx.MockTransport(lambda request: pytest.fail("no call expected"))
+        assert classify("Land it?", transport=transport) is None
+    else:
+        verdict = '{"kind": "input", "reason": "Land it?"}'
+        assert classify("Land it?", transport=_completion(verdict)) == ReplyClass(
+            "input", "Land it?"
+        )
 
 
 class _Store:

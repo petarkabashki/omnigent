@@ -19,6 +19,7 @@ from typing import Literal
 import httpx
 
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
+from omnigent.process_logging import data_dir
 
 _logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ ReplyKind = Literal["input", "ack", "info"]
 _KINDS: tuple[ReplyKind, ...] = ("input", "ack", "info")
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
+# Read when the env var is unset, so a hub restarted without the export keeps the key.
+API_KEY_FILE_NAME = "openrouter.key"
 MODEL_ENV = "OMNIGENT_REPLY_CLASSIFIER_MODEL"
 DISABLE_ENV = "OMNIGENT_REPLY_CLASSIFIER_OFF"
 DEFAULT_MODEL = "typesafe/jev-router"
@@ -79,9 +82,20 @@ class ReplyClass:
 _executor: ThreadPoolExecutor | None = None
 
 
+def _api_key() -> str:
+    """The OpenRouter key: the env var, else ``<data dir>/openrouter.key``; empty if neither."""
+    key = os.environ.get(API_KEY_ENV, "").strip()
+    if key:
+        return key
+    try:
+        return (data_dir() / API_KEY_FILE_NAME).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def enabled() -> bool:
     """Whether a key is configured and the classifier isn't switched off."""
-    return bool(os.environ.get(API_KEY_ENV)) and not os.environ.get(DISABLE_ENV)
+    return bool(_api_key()) and not os.environ.get(DISABLE_ENV)
 
 
 def _parse(body: dict[str, object]) -> ReplyClass | None:
@@ -123,7 +137,7 @@ def classify(
         "max_tokens": 200,
         "usage": {"include": True},
     }
-    headers = {"Authorization": f"Bearer {os.environ[API_KEY_ENV]}"}
+    headers = {"Authorization": f"Bearer {_api_key()}"}
     try:
         with httpx.Client(timeout=_TIMEOUT_SECONDS, transport=transport) as client:
             response = client.post(_URL, json=payload, headers=headers)
