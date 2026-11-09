@@ -63,7 +63,7 @@ from ._events import MCP_ELICITATION_METHOD, ElicitationRequest
 from ._query import QueryResult, QueryStream
 from ._server import LocalServer
 from ._session import Session
-from ._sessions import LaunchHost, RegisteredAgent, SessionsNamespace
+from ._sessions import ExternalTask, LaunchHost, RegisteredAgent, SessionsNamespace
 from ._sessions_chat import SessionsChat, SessionToolCallInfo, ToolCallable
 from ._stream import BlockStream, format_tool_args_brief
 from ._tool_handler import (
@@ -93,6 +93,7 @@ __all__ = [
     "ElicitationRequest",
     "ElicitationRequestCtx",
     "ErrorBlock",
+    "ExternalTask",
     "File",
     "FileBlock",
     "LaunchHost",
