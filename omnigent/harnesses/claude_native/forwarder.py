@@ -4767,6 +4767,20 @@ async def _forward_available_status_events(
             # PostToolUse/TaskUpdate). Mutate the caller-owned maps in-place
             # so task state accumulates across multiple polls within a session.
             native_todos_changed = False
+            if record.awaiting_input_message is not None and not _is_subagent_hook_record(
+                record, parent_claude_session_ids=parent_claude_session_ids
+            ):
+                try:
+                    await _post_external_session_awaiting_input(
+                        client, session_id=session_id, message=record.awaiting_input_message
+                    )
+                except httpx.HTTPError:
+                    _logger.warning(
+                        "Failed to forward Claude awaiting-input notification; session=%s",
+                        session_id,
+                        exc_info=True,
+                        extra={"session_id": session_id},
+                    )
             if record.event_name == "TaskCreated" and record.task_id is not None:
                 if record.task_id not in task_subjects:
                     task_order.append(record.task_id)
@@ -7396,6 +7410,27 @@ def _log_session_not_bound_once(
             source_id=source_id,
         ),
     )
+
+
+async def _post_external_session_awaiting_input(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    message: str,
+) -> None:
+    """
+    Post one ``external_session_awaiting_input`` event to the Sessions API.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param message: Why Claude is waiting, e.g. ``"Claude needs your permission to use Bash"``.
+    :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
+    """
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "external_session_awaiting_input", "data": {"message": message}},
+    )
+    resp.raise_for_status()
 
 
 async def _post_external_session_todos(
