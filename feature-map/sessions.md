@@ -1195,7 +1195,11 @@ index (state, summary, hop count) across compaction and relaunch.
 - Agents use `sys_thread_list`, `sys_thread_history` and `sys_thread_note`.
 - Web: the session header menu shows "Open thread..." only when the session
   holds a role alias. It asks for the counterpart handle and opens the side chat.
+- Web: the sidebar lists a role session's threads under its row (urgent first,
+  with unread counts). Clicking one opens the holder with that thread's side
+  chat; reopening a thread reuses its side chat rather than forking another.
 - Tests: `test_role_threads_index_history_guard_and_owner_thread` in
   `tests/server/integration/test_session_orchestration.py`,
   `web/src/shell/HeaderConversationMenu.test.tsx`,
-  `web/src/lib/sessionsApi.test.ts`.
+  `web/src/lib/sessionsApi.test.ts`, `web/src/lib/roleThreads.test.ts`,
+  `web/src/shell/RoleThreadRows.test.tsx`.

@@ -4612,6 +4612,30 @@ def register_core_routes(
                 "Source session has no agent binding — cannot fork.",
                 code=ErrorCode.INVALID_INPUT,
             )
+        if body.side_chat and body.thread is not None:
+            # Reopening a thread returns its side chat rather than forking another.
+            from omnigent.server.role_threads import find_thread_side_chat, validate_counterpart
+
+            existing = await asyncio.to_thread(
+                find_thread_side_chat,
+                conversation_store,
+                source.id,
+                validate_counterpart(body.thread),
+                user_id=user_id,
+            )
+            if existing is not None:
+                existing_items = await asyncio.to_thread(
+                    conversation_store.list_items, existing.id, limit=100, order="desc"
+                )
+                return _build_session_response(
+                    existing,
+                    list(reversed(existing_items.data)),
+                    "idle",
+                    permission_level=await _get_permission_level(
+                        user_id, existing.id, permission_store
+                    ),
+                    last_task_error=None,
+                )
 
         sandbox_profile = await prepare_profile(
             request, body, user_id=user_id, inherited_session_id=source_id

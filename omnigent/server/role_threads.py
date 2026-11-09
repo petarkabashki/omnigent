@@ -16,7 +16,11 @@ from typing import Any
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, ConversationStore
+from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
+    SIDE_CHAT_SOURCE_LABEL_KEY,
+    ConversationStore,
+)
 
 THREAD_ROLE_LABEL = "thread.role"  # handle of the role a session held
 THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
@@ -226,6 +230,28 @@ def thread_of_header(text: str) -> str | None:
     """The thread key a delivered message header carries, if any."""
     match = _THREAD_TAG.match(text)
     return match.group(1) if match else None
+
+
+def find_thread_side_chat(
+    store: ConversationStore, holder_id: str, counterpart: str, *, user_id: str | None
+) -> Conversation | None:
+    """The newest live side chat already opened on ``holder_id`` for ``counterpart``."""
+    after: str | None = None
+    for _ in range(20):
+        page = store.list_conversations(
+            limit=100, after=after, owned_by=user_id, has_label=THREAD_OF_LABEL, kind=None
+        )
+        for session in page.data:
+            labels = session.labels
+            if (
+                labels.get(THREAD_OF_LABEL) == counterpart
+                and labels.get(SIDE_CHAT_SOURCE_LABEL_KEY) == holder_id
+            ):
+                return session
+        if not page.has_more:
+            return None
+        after = page.last_id
+    return None
 
 
 def thread_history(

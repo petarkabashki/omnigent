@@ -2019,6 +2019,11 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     )
     first_row = (await _tool(auth_client, successor, "sys_thread_list"))["threads"][0]
     assert (first_row["counterpart"], first_row["state"]) == ("/Bench", "blocked")
+    # Reopening the thread returns its side chat instead of forking another.
+    reopened = await auth_client.post(
+        f"/v1/sessions/{successor['id']}/fork", json={"side_chat": True, "thread": "/Bench"}
+    )
+    assert reopened.status_code == 201 and reopened.json()["id"] == side["id"]
     # Threads need a role, and an unroled session cannot open one.
     refused = await auth_client.post(
         f"/v1/sessions/{other['id']}/fork", json={"side_chat": True, "thread": "/Bench"}

@@ -962,7 +962,7 @@ export async function createSideChat(
     throw new Error("This session is disconnected. Reconnect it before starting a side chat.");
   }
   const fork = await forkSession(sourceId, {
-    title: "Side chat",
+    title: options.thread ? `Thread: ${options.thread}` : "Side chat",
     sideChat: true,
     thread: options.thread,
     config: settings,

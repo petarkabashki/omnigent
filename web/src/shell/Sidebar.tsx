@@ -186,6 +186,7 @@ import { isFeatureEnabled, isSingleUserMode, sandboxOptionLabel } from "@/lib/ca
 import { useBranding } from "@/lib/branding";
 import { relativeTime } from "@/lib/relativeTime";
 import { sessionRoleHandle } from "@/lib/rolesApi";
+import { RoleThreadRows } from "./RoleThreadRows";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
 import { unpinWithUndo } from "./unpinUndoToast";
@@ -4364,25 +4365,27 @@ function ConversationSection({
             // Indent project chats a step under the project-folder name above.
             <ul ref={listRef} className={cn("flex flex-col gap-px", indentRows && "pl-6")}>
               {conversations.map((conv, index) => (
-                <ConversationRow
-                  key={conv.id}
-                  conversation={conv}
-                  isActive={conv.id === activeConversationId}
-                  inActiveGrid={gridMembers.has(conv.id)}
-                  gridSelected={conv.id === grids?.selectedSessionId}
-                  gridsEnabled={grids?.enabled ?? false}
-                  isPinned={pinnedConversationIds.includes(conv.id)}
-                  onClick={onRowClick}
-                  onTogglePinned={onTogglePinned}
-                  selectionMode={selectionMode}
-                  isSelected={selectedIds.has(conv.id)}
-                  onToggleSelected={onToggleSelected}
-                  onProjectAssigned={onProjectAssigned}
-                  reorderGroup={reorderGroup}
-                  previousId={reorderNeighbour(conversations[index - 1])}
-                  nextId={reorderNeighbour(conversations[index + 1])}
-                  reorderIndex={reorderGroup ? index : undefined}
-                />
+                <Fragment key={conv.id}>
+                  <ConversationRow
+                    conversation={conv}
+                    isActive={conv.id === activeConversationId}
+                    inActiveGrid={gridMembers.has(conv.id)}
+                    gridSelected={conv.id === grids?.selectedSessionId}
+                    gridsEnabled={grids?.enabled ?? false}
+                    isPinned={pinnedConversationIds.includes(conv.id)}
+                    onClick={onRowClick}
+                    onTogglePinned={onTogglePinned}
+                    selectionMode={selectionMode}
+                    isSelected={selectedIds.has(conv.id)}
+                    onToggleSelected={onToggleSelected}
+                    onProjectAssigned={onProjectAssigned}
+                    reorderGroup={reorderGroup}
+                    previousId={reorderNeighbour(conversations[index - 1])}
+                    nextId={reorderNeighbour(conversations[index + 1])}
+                    reorderIndex={reorderGroup ? index : undefined}
+                  />
+                  {!selectionMode && <RoleThreadRows conversation={conv} />}
+                </Fragment>
               ))}
             </ul>
           )}
