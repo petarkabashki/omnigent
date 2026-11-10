@@ -26,6 +26,7 @@ import {
   Trash2Icon,
   UserMinusIcon,
   MessagesSquareIcon,
+  UsersIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -57,7 +58,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { useReleaseRole } from "@/hooks/useRoles";
-import { ALIAS_LABEL_KEY } from "@/lib/rolesApi";
+import { newThreadPath } from "@/lib/groupThreads";
+import { ALIAS_LABEL_KEY, sessionRoleHandle } from "@/lib/rolesApi";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isIndentedSibling } from "@/lib/sessionFamilies";
 import { PIN_WRITE_MUTATION_KEY } from "@/lib/sessionListCache";
@@ -425,6 +427,24 @@ export function HeaderConversationMenu({
           Open thread…
         </DropdownMenuItem>
       )}
+      <DropdownMenuItem
+        data-testid="header-start-group-thread"
+        className={itemClass}
+        onSelect={() =>
+          navigate(
+            newThreadPath([
+              sessionRoleHandle(
+                conversation.labels,
+                currentProject,
+                conversation.project_id != null,
+              ) ?? conversation.id,
+            ]),
+          )
+        }
+      >
+        <UsersIcon className="size-3.5" />
+        Start group thread…
+      </DropdownMenuItem>
       {roleAlias && (
         <DropdownMenuItem
           data-testid="header-release-role"

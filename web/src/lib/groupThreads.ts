@@ -130,6 +130,13 @@ export function memberFromText(text: string): { kind: GroupThreadMemberKind; ref
   return { kind: SESSION_ID.test(ref) ? "session" : "role", ref };
 }
 
+/** The Threads page with a new thread's members filled in, e.g. a role to start from. */
+export function newThreadPath(refs: readonly string[]): string {
+  const params = new URLSearchParams();
+  for (const ref of refs) params.append("with", ref);
+  return `/threads?${params}`;
+}
+
 /** How a member is named in the UI: the role handle, or a short session id. */
 export function memberLabel(member: Pick<GroupThreadMember, "kind" | "ref">): string {
   return member.kind === "role" ? member.ref : `session ${member.ref.slice(0, 8)}`;

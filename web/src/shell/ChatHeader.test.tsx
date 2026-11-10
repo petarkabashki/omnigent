@@ -1140,6 +1140,7 @@ describe("ChatHeader — title-adjacent conversation actions", () => {
       "Pin",
       "Export",
       "Rename",
+      "Start group thread…",
       "Mark as unread",
       "Add to project",
       "Files",

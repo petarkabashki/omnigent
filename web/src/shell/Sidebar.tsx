@@ -200,6 +200,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled, isSingleUserMode, sandboxOptionLabel } from "@/lib/capabilities";
 import { useBranding } from "@/lib/branding";
 import { relativeTime } from "@/lib/relativeTime";
+import { newThreadPath } from "@/lib/groupThreads";
 import { ALIAS_LABEL_KEY, sessionRoleHandle } from "@/lib/rolesApi";
 import { OpenThreadDialog } from "./OpenThreadDialog";
 import { RoleThreadRows } from "./RoleThreadRows";
@@ -4840,6 +4841,7 @@ function ConversationMenuItems({
   reorder?: { previousId?: string; nextId?: string };
 }) {
   const info = useContext(ServerInfoContext);
+  const navigate = useNavigate();
   const atPinCap = useContext(PinCapacityContext);
   const pinSaving = useContext(PinSavingContext);
   const moveSession = useContext(SessionReorderContext);
@@ -5039,6 +5041,24 @@ function ConversationMenuItems({
           Open thread…
         </C.Item>
       )}
+      <C.Item
+        className="mobile-touch-target"
+        data-testid="sidebar-start-group-thread"
+        onSelect={() =>
+          navigate(
+            newThreadPath([
+              sessionRoleHandle(
+                conversation.labels,
+                currentProject,
+                conversation.project_id != null,
+              ) ?? conversation.id,
+            ]),
+          )
+        }
+      >
+        <UsersIcon className="size-3.5" />
+        Start group thread…
+      </C.Item>
       {/* Every row offers one read-state action: "Mark as unread" re-lights
           the pink dot so a session can be flagged to revisit (including the
           one you're currently viewing); a row already showing the dot offers

@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as picker from "@/components/threads/ThreadMemberPicker";
 import * as api from "@/lib/groupThreads";
 import { RoutingProvider, basenamedRouting } from "@/lib/routing";
 import { ThreadsPage } from "./ThreadsPage";
@@ -21,7 +22,17 @@ vi.mock("@/lib/groupThreads", async (importOriginal) => ({
   updateGroupThread: vi.fn(),
 }));
 
+vi.mock("@/components/threads/ThreadMemberPicker", async (importOriginal) => ({
+  ...(await importOriginal<typeof picker>()),
+  useMemberOptions: () => OPTIONS,
+}));
+
 const SESSION = "ab".repeat(16);
+const OPTIONS: picker.MemberOption[] = [
+  { kind: "role", ref: "omnigent/Product", label: "omnigent/Product", detail: "role" },
+  { kind: "role", ref: "x/Bench", label: "x/Bench", detail: "role · vacant" },
+  { kind: "session", ref: SESSION, label: "Release notes", detail: "session abababab" },
+];
 const THREAD = {
   id: "t1",
   key: "grp_t1",
@@ -85,15 +96,24 @@ afterEach(() => {
 });
 
 describe("ThreadsPage", () => {
-  it("starts a thread with role and session members and opens it", async () => {
+  it("starts a thread with members picked by search and opens it", async () => {
     vi.mocked(api.createGroupThread).mockResolvedValue(THREAD);
     renderAt("/threads");
     expect(await screen.findByText("Release plan")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Release plan" } });
-    fireEvent.change(screen.getByLabelText("Members"), {
-      target: { value: `omnigent/Product\n\n${SESSION}` },
-    });
+    const members = screen.getByRole("combobox", { name: "Members" });
+    fireEvent.change(members, { target: { value: "prod" } });
+    fireEvent.click(screen.getByRole("option", { name: /omnigent\/Product/ }));
+    fireEvent.change(members, { target: { value: "release" } });
+    fireEvent.keyDown(members, { key: "Enter" });
+    fireEvent.change(members, { target: { value: "y/Typed" } });
+    fireEvent.keyDown(members, { key: "Enter" });
+    expect(screen.getAllByTestId("chosen-member").map((chip) => chip.textContent)).toEqual([
+      "omnigent/Product",
+      "Release notes",
+      "y/Typed",
+    ]);
     fireEvent.change(screen.getByLabelText("First post"), { target: { value: "Kickoff" } });
     fireEvent.click(screen.getByRole("button", { name: "Start thread" }));
 
@@ -103,11 +123,23 @@ describe("ThreadsPage", () => {
         members: [
           { kind: "role", ref: "omnigent/Product" },
           { kind: "session", ref: SESSION },
+          { kind: "role", ref: "y/Typed" },
         ],
         message: "Kickoff",
       }),
     );
     expect(await screen.findByText("Draft is ready")).toBeTruthy();
+  });
+
+  it("fills members from the link a role's menu opens", async () => {
+    renderAt(api.newThreadPath(["omnigent/Product"]));
+    expect(await screen.findByTestId("chosen-member")).toBeTruthy();
+    expect(screen.getByTestId("chosen-member").textContent).toBe("omnigent/Product");
+    fireEvent.change(screen.getByRole("combobox", { name: "Members" }), {
+      target: { value: "omni" },
+    });
+    // A chosen member is not suggested again.
+    expect(screen.queryByRole("option", { name: /omnigent\/Product/ })).toBeNull();
   });
 
   it("shows posts and vacant members, and posts to the chosen members only", async () => {
@@ -138,7 +170,11 @@ describe("ThreadsPage", () => {
       expect(api.postToGroupThread).toHaveBeenCalledWith("grp_t1", "All hands", "everyone"),
     );
 
-    fireEvent.change(screen.getByLabelText("Invite member"), { target: { value: "x/Bench" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Invite member" }), {
+      target: { value: "bench" },
+    });
+    fireEvent.click(screen.getByRole("option", { name: /x\/Bench/ }));
+    expect(screen.getByTestId("invite-choice").textContent).toContain("x/Bench");
     fireEvent.change(screen.getByLabelText("Primer"), { target: { value: "full" } });
     fireEvent.click(screen.getByRole("button", { name: "Invite" }));
     await waitFor(() =>
