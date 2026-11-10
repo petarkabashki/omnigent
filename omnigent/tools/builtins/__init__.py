@@ -71,6 +71,7 @@ from omnigent.tools.builtins.threads import (
     SysThreadHistoryTool,
     SysThreadListTool,
     SysThreadNoteTool,
+    SysThreadPostTool,
 )
 from omnigent.tools.builtins.timer import (
     SysTimerCancelTool,
@@ -114,6 +115,7 @@ __all__ = [
     "SysThreadHistoryTool",
     "SysThreadListTool",
     "SysThreadNoteTool",
+    "SysThreadPostTool",
     "SysTimerCancelTool",
     "SysTimerSetTool",
     "UpdateCommentTool",

@@ -72,6 +72,7 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_thread_list",
         "sys_thread_history",
         "sys_thread_note",
+        "sys_thread_post",
         "sys_session_rename",
         # Peer messaging is advertised for every agent; the server
         # enforces the orchestration flag and source authorization.

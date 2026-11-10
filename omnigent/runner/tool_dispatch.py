@@ -326,6 +326,7 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_thread_list",
         "sys_thread_history",
         "sys_thread_note",
+        "sys_thread_post",
     }
 )
 
@@ -579,6 +580,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
         SysThreadHistoryTool,
         SysThreadListTool,
         SysThreadNoteTool,
+        SysThreadPostTool,
     )
     from omnigent.tools.builtins.update_comment import UpdateCommentTool
 
@@ -623,6 +625,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysThreadListTool,
             SysThreadHistoryTool,
             SysThreadNoteTool,
+            SysThreadPostTool,
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
@@ -5339,6 +5342,10 @@ async def _execute_session_query_tool(
         return await _session_share_via_rest(args, conversation_id, server_client, agent_spec)
     if tool_name == "sys_role_list":
         return await _role_list_via_rest(args, conversation_id, server_client)
+    if tool_name == "sys_thread_post" or (
+        tool_name == "sys_thread_history" and _is_group_key(args.get("counterpart"))
+    ):
+        return await _group_thread_via_rest(tool_name, args, conversation_id, server_client)
     if tool_name in ("sys_thread_list", "sys_thread_history", "sys_thread_note"):
         return await _thread_via_rest(tool_name, args, conversation_id, server_client)
     if tool_name in ("sys_role_take", "sys_role_release"):
@@ -5370,6 +5377,30 @@ async def _role_list_via_rest(
     return json.dumps({"namespace": payload.get("namespace"), "roles": payload.get("data", [])})
 
 
+async def _thread_list_with_groups(
+    headers: dict[str, str], server_client: httpx.AsyncClient
+) -> str:
+    """Role threads plus the group threads this session is a member of."""
+    try:
+        roles = await server_client.get("/v1/sessions/threads", headers=headers, timeout=30.0)
+        groups = await server_client.get(
+            "/v1/sessions/group-threads", headers=headers, timeout=30.0
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"sys_thread_list failed: {exc}"})
+    if roles.status_code != 200 and groups.status_code != 200:
+        return json.dumps(
+            {"error": f"sys_thread_list returned {roles.status_code}", "detail": roles.text[:300]}
+        )
+    payload: dict[str, object] = roles.json() if roles.status_code == 200 else {"threads": []}
+    if groups.status_code == 200:
+        payload["group_threads"] = [
+            {k: row[k] for k in ("key", "title", "summary", "state", "last_seq")}
+            for row in groups.json()["threads"]
+        ]
+    return json.dumps(payload)
+
+
 async def _thread_via_rest(
     tool_name: str, args: _JsonObject, conversation_id: str, server_client: httpx.AsyncClient
 ) -> str:
@@ -5378,10 +5409,10 @@ async def _thread_via_rest(
     A note from a thread side chat also sends its role holder a summary line.
     """
     headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    if tool_name == "sys_thread_list":
+        return await _thread_list_with_groups(headers, server_client)
     try:
-        if tool_name == "sys_thread_list":
-            resp = await server_client.get("/v1/sessions/threads", headers=headers, timeout=30.0)
-        elif tool_name == "sys_thread_history":
+        if tool_name == "sys_thread_history":
             params: dict[str, str | int] = {"counterpart": str(args.get("counterpart") or "")}
             if isinstance(args.get("limit"), int):
                 params["limit"] = args["limit"]
@@ -5412,6 +5443,39 @@ async def _thread_via_rest(
             )
         )
     return json.dumps(payload)
+
+
+def _is_group_key(value: object) -> bool:
+    return isinstance(value, str) and value.strip().startswith("grp_")
+
+
+async def _group_thread_via_rest(
+    tool_name: str, args: _JsonObject, conversation_id: str, server_client: httpx.AsyncClient
+) -> str:
+    """Post into a group thread, or read its transcript, via ``/v1/sessions/group-threads``."""
+    headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    key = str(args.get("thread") or args.get("counterpart") or "").strip()
+    if not _is_group_key(key):
+        return json.dumps({"error": f"{tool_name}: thread must be a group thread key (grp_…)"})
+    url = f"/v1/sessions/group-threads/{key}"
+    try:
+        if tool_name == "sys_thread_post":
+            body = {k: args[k] for k in ("message", "to", "summary") if k in args}
+            resp = await server_client.post(
+                f"{url}/posts", json=body, headers=headers, timeout=_ASK_GATE_DELIVERY_TIMEOUT
+            )
+        else:
+            limit = args.get("limit") if isinstance(args.get("limit"), int) else 50
+            resp = await server_client.get(
+                f"{url}/posts", params={"limit": limit}, headers=headers, timeout=30.0
+            )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"{tool_name} failed: {exc}"})
+    if resp.status_code not in (200, 201):
+        return json.dumps(
+            {"error": f"{tool_name} returned {resp.status_code}", "detail": resp.text[:300]}
+        )
+    return json.dumps(resp.json())
 
 
 async def _role_change_via_rest(

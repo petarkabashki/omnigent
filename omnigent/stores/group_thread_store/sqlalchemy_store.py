@@ -345,11 +345,14 @@ class SqlAlchemyGroupThreadStore:
         thread_id: str,
         *,
         user_id: str | None,
+        title: str | None = None,
         summary: str | None = None,
         state: str | None = None,
     ) -> GroupThread:
-        """Set the thread's summary and/or state."""
+        """Set the thread's title, summary and/or state."""
         values: dict[str, object] = {"updated_at": now_epoch()}
+        if title is not None:
+            values["title"] = title
         if summary is not None:
             values["summary"] = summary
         if state is not None:

@@ -400,6 +400,7 @@ _AGY_ENABLED_TOOLS = [
     "sys_thread_history",
     "sys_thread_list",
     "sys_thread_note",
+    "sys_thread_post",
     "sys_terminal_close",
     "sys_terminal_launch",
     "sys_terminal_list",

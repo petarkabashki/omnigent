@@ -1,4 +1,4 @@
-"""Tools for the role-thread index: list, read history, and note state."""
+"""Tools for role and group threads: list, read history, note state and post."""
 
 from __future__ import annotations
 
@@ -52,7 +52,8 @@ class SysThreadListTool(_ThreadTool):
             "promotion_candidate (a long thread worth moving to its own side chat). "
             "waiting_on_owner, blocked and waiting_on_us threads come first. Incoming messages "
             "carry a '[thread <counterpart>]' tag; '[Message from owner ...]' is the owner "
-            "speaking in that thread, and both roles in it may see it."
+            "speaking in that thread, and both roles in it may see it. group_threads lists "
+            "the group threads (keys 'grp_…') you are a member of."
         )
 
 
@@ -62,7 +63,7 @@ class SysThreadHistoryTool(_ThreadTool):
     _PROPERTIES = {
         "counterpart": {
             "type": "string",
-            "description": "Thread key from sys_thread_list, e.g. 'project/Role'.",
+            "description": "Thread key from sys_thread_list, e.g. 'project/Role' or 'grp_…'.",
         },
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
     }
@@ -80,7 +81,8 @@ class SysThreadHistoryTool(_ThreadTool):
             "Read the messages received on one thread, oldest first, from every session "
             "that held your role, so history follows the role rather than the session. "
             "Returns the newest 'limit' (default 50) with session_id, message_id, "
-            "created_at and text."
+            "created_at and text. For a group thread key ('grp_…') returns its posts with "
+            "seq, author and text."
         )
 
 
@@ -115,4 +117,44 @@ class SysThreadNoteTool(_ThreadTool):
             "'[thread note]' summary line; call it after any commitment, dependency, "
             "conflict or blocker. Set state 'waiting_on_owner' when the thread needs the "
             "owner's decision; the owner's next post in the thread clears it."
+        )
+
+
+class SysThreadPostTool(_ThreadTool):
+    """Post into a group thread; only the members named in ``to`` get a turn."""
+
+    _PROPERTIES = {
+        "thread": {"type": "string", "description": "Group thread key, 'grp_…'."},
+        "message": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "to": {
+            "description": (
+                "Members who should answer: a list of their refs ('project/Role' or a "
+                "session id), or 'everyone'. Omit to post without asking anyone to reply."
+            ),
+            "anyOf": [
+                {"type": "array", "items": {"type": "string"}},
+                {"type": "string", "enum": ["everyone"]},
+            ],
+        },
+        "summary": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Optional new summary of the whole thread, shown to late joiners.",
+        },
+    }
+    _REQUIRED = ["thread", "message"]
+
+    @classmethod
+    def name(cls) -> str:
+        """Return the tool name."""
+        return "sys_thread_post"
+
+    @classmethod
+    def description(cls) -> str:
+        """Return the LLM-facing description."""
+        return (
+            "Post into a group thread you are a member of. Every member can read the post "
+            "with sys_thread_history; only those named in 'to' get a turn to answer. After "
+            "six agent posts without the owner posting, posts are refused: stop and ask the "
+            "owner."
         )

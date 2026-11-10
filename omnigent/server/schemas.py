@@ -2887,6 +2887,55 @@ class ThreadNoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class GroupThreadMemberInput(BaseModel):
+    """A group thread member: a ``project/Role`` handle or a session id."""
+
+    kind: Literal["role", "session"]
+    ref: str = Field(min_length=1, max_length=200)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GroupThreadCreateRequest(BaseModel):
+    """The owner starts a group thread, optionally with its first members and post."""
+
+    title: str = Field(min_length=1, max_length=200)
+    members: list[GroupThreadMemberInput] = Field(default_factory=list, max_length=20)
+    message: str | None = Field(default=None, min_length=1, max_length=8000)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GroupThreadInviteRequest(GroupThreadMemberInput):
+    """The owner invites a member; ``primer`` decides what it learns of earlier posts."""
+
+    primer: Literal["summary", "full", "none"] = "summary"
+
+
+class GroupThreadPostRequest(BaseModel):
+    """A post into a group thread.
+
+    ``to`` is ``"everyone"`` or a list of member refs; those members get a turn.
+    Omitted, the owner's post goes to everyone and an agent's post to nobody.
+    """
+
+    message: str = Field(min_length=1, max_length=8000)
+    to: Literal["everyone"] | list[str] | None = None
+    summary: str | None = Field(default=None, max_length=2000)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GroupThreadUpdateRequest(BaseModel):
+    """The owner renames, summarizes or closes a group thread."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=2000)
+    state: Literal["open", "done"] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SessionForkRequest(_SandboxProfileSelection):
     """
     Request body for ``POST /v1/sessions/{source_id}/fork``.

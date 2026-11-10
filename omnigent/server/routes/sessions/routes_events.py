@@ -925,8 +925,8 @@ def register_events_routes(
     | None = None,
     register_startup_dispatch: Callable[[StartupDispatch], None] | None = None,
     project_store: ProjectStore | None = None,
-) -> None:
-    """Register the events, stream, and delete routes on router."""
+) -> Callable[[Request, str, SessionEventInput], Awaitable[dict[str, bool | str]]]:
+    """Register the events, stream, and delete routes; returns the event dispatcher for reuse."""
 
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
 
@@ -4565,3 +4565,5 @@ def register_events_routes(
         except Exception:
             pass
         return ConversationDeleted(id=session_id)
+
+    return _post_event_impl

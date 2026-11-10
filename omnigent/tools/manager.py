@@ -48,6 +48,7 @@ from omnigent.tools.builtins import (
     SysThreadHistoryTool,
     SysThreadListTool,
     SysThreadNoteTool,
+    SysThreadPostTool,
     SysTimerCancelTool,
     SysTimerSetTool,
     UpdateCommentTool,
@@ -471,6 +472,7 @@ class ToolManager:
         self._tools[SysThreadListTool.name()] = SysThreadListTool()
         self._tools[SysThreadHistoryTool.name()] = SysThreadHistoryTool()
         self._tools[SysThreadNoteTool.name()] = SysThreadNoteTool()
+        self._tools[SysThreadPostTool.name()] = SysThreadPostTool()
         self._tools[SysRoleTakeTool.name()] = SysRoleTakeTool()
         self._tools[SysRoleReleaseTool.name()] = SysRoleReleaseTool()
 

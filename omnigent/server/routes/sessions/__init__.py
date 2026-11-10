@@ -905,6 +905,10 @@ def create_sessions_router(
     from omnigent.server.routes.sessions.routes_core import register_core_routes
     from omnigent.server.routes.sessions.routes_elicitations import register_elicitations_routes
     from omnigent.server.routes.sessions.routes_events import register_events_routes
+    from omnigent.server.routes.sessions.routes_group_threads import (
+        GroupThreadHandlers,
+        register_group_thread_routes,
+    )
     from omnigent.server.routes.sessions.routes_hooks import register_hooks_routes
     from omnigent.server.routes.sessions.routes_items import register_items_routes
     from omnigent.server.routes.sessions.routes_outcomes import register_outcomes_routes
@@ -914,7 +918,17 @@ def create_sessions_router(
 
     if pull_request_refresher is None:
         pull_request_refresher = PullRequestRefresher()
-    register_core_routes(
+    # Before the core routes, whose /sessions/{session_id} would match "group-threads".
+    group_thread_handlers = GroupThreadHandlers()
+    register_group_thread_routes(
+        router,
+        conversation_store=conversation_store,
+        project_store=project_store,
+        auth_provider=auth_provider,
+        permission_store=permission_store,
+        handlers=group_thread_handlers,
+    )
+    group_thread_handlers.fork = register_core_routes(
         router,
         conversation_store=conversation_store,
         agent_store=agent_store,
@@ -996,7 +1010,7 @@ def create_sessions_router(
         permission_store=permission_store,
     )
 
-    register_events_routes(
+    group_thread_handlers.post_event = register_events_routes(
         router,
         conversation_store=conversation_store,
         agent_store=agent_store,

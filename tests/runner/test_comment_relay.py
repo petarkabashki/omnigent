@@ -451,6 +451,7 @@ async def test_terminal_launch_with_bridge_inject_advertises_comment_tools(
         "sys_thread_list",
         "sys_thread_history",
         "sys_thread_note",
+        "sys_thread_post",
         "sys_session_rename",
         "sys_session_message",
         "ui_open_file",

@@ -1971,6 +1971,127 @@ async def test_owner_posts_into_a_role_thread(auth_client, peers, db_uri):
     assert set(await rows(architect)) == {"/Product"}
 
 
+async def test_group_thread_reaches_roles_and_sessions(auth_client, peers, db_uri):
+    architect, product, _ = peers
+    other = await _create_session_as(auth_client, "", "alice")
+    for session in (product, other):
+        _bind_runner(db_uri, session["id"])
+    for session, alias in ((architect, "Architect"), (product, "Product")):
+        assert (
+            await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        ).status_code == 200
+
+    async def items(session_id):
+        return (await auth_client.get(f"/v1/sessions/{session_id}/items")).text
+
+    # The owner starts a thread with one role, then invites a role and a plain session.
+    created = await auth_client.post(
+        "/v1/sessions/group-threads",
+        json={"title": "API plan", "members": [{"kind": "role", "ref": "/Product"}]},
+    )
+    assert created.status_code == 201, created.text
+    key = created.json()["thread"]["key"]
+    base = f"/v1/sessions/group-threads/{key}"
+    for kind, ref in (("role", "/Architect"), ("session", other["id"])):
+        invited = await auth_client.post(
+            f"{base}/members", json={"kind": kind, "ref": ref, "primer": "none"}
+        )
+        assert invited.status_code == 201, invited.text
+
+    # An owner post reaches every member; roles in a side chat of their holder.
+    posted = await auth_client.post(f"{base}/posts", json={"message": "Draft the schema"})
+    assert posted.status_code == 201, posted.text
+    reached = {row["ref"]: row["session_id"] for row in posted.json()["delivered"]}
+    assert reached[other["id"]] == other["id"]
+    product_side = {"id": reached["/Product"]}
+    assert product_side["id"] not in (product["id"], None)
+    assert "[Message from owner (message msg_" in await items(product_side["id"])
+    assert f"[thread {key}]" in await items(other["id"])
+    assert f"[thread {key}]" not in await items(product["id"])
+
+    # An agent post naming nobody starts no turn; naming one member reaches only it,
+    # with the posts it missed.
+    _bind_runner(db_uri, product_side["id"])
+    quiet = await _tool(auth_client, product_side, "sys_thread_post", thread=key, message="Noted")
+    assert quiet["post"]["author_ref"] == "/Product" and quiet["delivered"] == []
+    asked = await _tool(
+        auth_client, other, "sys_thread_post", thread=key, message="Ready?", to=["/Architect"]
+    )
+    assert [row["ref"] for row in asked["delivered"]] == ["/Architect"]
+    architect_items = await items(asked["delivered"][0]["session_id"])
+    assert "#2 /Product: Noted" in architect_items and "Ready?" in architect_items
+    history = await _tool(auth_client, other, "sys_thread_history", counterpart=key)
+    assert [p["seq"] for p in history["posts"]] == [1, 2, 3]
+    listed = await _tool(auth_client, other, "sys_thread_list")
+    assert [row["key"] for row in listed["group_threads"]] == [key]
+
+    # Agents alone hit the hop cap; the owner's next post resets it.
+    for turn in range(4):
+        assert "post" in await _tool(
+            auth_client, other, "sys_thread_post", thread=key, message=f"hop {turn}"
+        )
+    refused = await _tool(auth_client, other, "sys_thread_post", thread=key, message="again")
+    assert "ask the owner" in refused["detail"]
+    reset = await auth_client.post(f"{base}/posts", json={"message": "Go on", "to": []})
+    assert reset.status_code == 201
+    assert "post" in await _tool(auth_client, other, "sys_thread_post", thread=key, message="ok")
+
+    # A removed member gets nothing more and cannot post; its posts stay.
+    detail = (await auth_client.get(base)).json()
+    other_member = next(m for m in detail["members"] if m["ref"] == other["id"])
+    assert (await auth_client.delete(f"{base}/members/{other_member['id']}")).status_code == 200
+    gone = await auth_client.post(f"{base}/posts", json={"message": "Still there?"})
+    assert other["id"] not in {row["ref"] for row in gone.json()["delivered"]}
+    assert "detail" in await _tool(auth_client, other, "sys_thread_post", thread=key, message="x")
+    posts = (await auth_client.get(f"{base}/posts")).json()["posts"]
+    assert any(p["author_ref"] == other["id"] for p in posts)
+
+    # Only the owner manages members.
+    denied = await auth_client.post(
+        f"{base}/members",
+        json={"kind": "session", "ref": other["id"]},
+        headers={ORCHESTRATION_SOURCE_HEADER: product_side["id"]},
+    )
+    assert denied.status_code == 403
+
+
+async def test_group_thread_primer_and_role_hand_over(auth_client, peers, db_uri):
+    architect, product, _ = peers
+    _bind_runner(db_uri, product["id"])
+    assert (
+        await auth_client.put(f"/v1/sessions/{product['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    created = await auth_client.post(
+        "/v1/sessions/group-threads", json={"title": "Roadmap", "message": "Kickoff"}
+    )
+    key = created.json()["thread"]["key"]
+    base = f"/v1/sessions/group-threads/{key}"
+    await auth_client.patch(base, json={"summary": "Ship v1 first"})
+
+    # A late joiner's first event is the primer, with the summary.
+    invited = await auth_client.post(f"{base}/members", json={"kind": "role", "ref": "/Product"})
+    side = invited.json()["primed_session_id"]
+    side_items = (await auth_client.get(f"/v1/sessions/{side}/items")).text
+    assert "You were added to this thread." in side_items
+    assert "Summary so far: Ship v1 first" in side_items
+
+    # A vacant role keeps its place; the next holder gets the missed posts and a primer.
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code in (
+        200,
+        204,
+    )
+    vacant = await auth_client.post(f"{base}/posts", json={"message": "While away"})
+    assert vacant.json()["delivered"][0]["session_id"] is None
+    assert (
+        await auth_client.put(f"/v1/sessions/{architect['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    back = await auth_client.post(f"{base}/posts", json={"message": "Welcome"})
+    new_side = back.json()["delivered"][0]["session_id"]
+    new_items = (await auth_client.get(f"/v1/sessions/{new_side}/items")).text
+    assert "#2 owner: While away" in new_items
+    assert "Summary so far: Ship v1 first" in new_items and "Welcome" in new_items
+
+
 async def test_role_threads_index_history_guard_and_owner_thread(auth_client, peers, db_uri):
     architect, product, _ = peers
     other = await _create_session_as(auth_client, "", "alice")

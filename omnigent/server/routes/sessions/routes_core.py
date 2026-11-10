@@ -8,7 +8,7 @@ import dataclasses
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
@@ -518,8 +518,8 @@ def register_core_routes(
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
-) -> None:
-    """Register the core session routes on router."""
+) -> Callable[[Request, str, SessionForkRequest], Awaitable[SessionResponse]]:
+    """Register the core session routes on router; returns the fork handler for reuse."""
 
     async def _check_initial_input(request: Request, event: SessionEventInput | None) -> None:
         """Refuse a malformed first input before the session exists."""
@@ -5307,3 +5307,5 @@ def register_core_routes(
                 "Fork the session into another agent instead."
             ),
         )
+
+    return fork_session
