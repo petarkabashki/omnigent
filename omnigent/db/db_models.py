@@ -882,6 +882,103 @@ class SqlRoleEvent(OmnigentBase):
     )
 
 
+def _workspace_column() -> Mapped[int]:
+    return mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+
+
+class SqlGroupThread(OmnigentBase):
+    """
+    SQLAlchemy model for ``group_threads``: one owner-run conversation of several members.
+
+    :param state: Int code, 1 open, 2 done.
+    :param hops: Agent posts since the owner last posted (loop guard).
+    :param last_seq: ``seq`` of the newest post; posts take ``last_seq + 1`` under a CAS.
+    """
+
+    __tablename__ = "group_threads"
+
+    workspace_id: Mapped[int] = _workspace_column()
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    owner_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    state: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    hops: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    hops_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("state IN (1, 2)", name="ck_group_threads_state"),
+        Index("ix_group_threads_owner", "workspace_id", "owner_key", "created_at"),
+    )
+
+
+class SqlGroupThreadMember(OmnigentBase):
+    """
+    SQLAlchemy model for ``group_thread_members``.
+
+    :param kind: Int code, 1 role (``ref`` is a handle), 2 session (``ref`` is a session id).
+    :param delivered_seq: Newest post seq the member has seen.
+    :param delivered_to: Session that got the last delivery, to spot a role hand-over.
+    """
+
+    __tablename__ = "group_thread_members"
+
+    workspace_id: Mapped[int] = _workspace_column()
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    kind: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    joined_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    left_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    delivered_seq: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    delivered_to: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("kind IN (1, 2)", name="ck_group_thread_members_kind"),
+        Index(
+            "uq_group_thread_members_ref", "workspace_id", "thread_id", "kind", "ref", unique=True
+        ),
+    )
+
+
+class SqlGroupThreadPost(OmnigentBase):
+    """
+    SQLAlchemy model for ``group_thread_posts``, the canonical transcript.
+
+    :param author_kind: Int code, 1 owner, 2 role, 3 session.
+    :param mentions: JSON list of member refs the post named, or NULL.
+    """
+
+    __tablename__ = "group_thread_posts"
+
+    workspace_id: Mapped[int] = _workspace_column()
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    author_kind: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    author_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    text: Mapped[str] = mapped_column(CompressedText, nullable=False)
+    mentions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("author_kind IN (1, 2, 3)", name="ck_group_thread_posts_author_kind"),
+        Index("uq_group_thread_posts_seq", "workspace_id", "thread_id", "seq", unique=True),
+    )
+
+
 class SqlConversation(ConversationBase):
     """
     SQLAlchemy model for the ``conversations`` table.

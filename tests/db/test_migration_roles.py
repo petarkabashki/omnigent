@@ -57,7 +57,7 @@ def _migrate(uri: str, engine: sa.Engine, step, revision: str) -> None:
 def test_chains_from_the_namespace_tree_with_one_head() -> None:
     script = ScriptDirectory.from_config(_build_alembic_config("sqlite://"))
 
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 

@@ -23,6 +23,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 
 if TYPE_CHECKING:
     from omnigent.stores.conversation_store import ConversationStore, ProjectSessionSweep
+    from omnigent.stores.group_thread_store import SqlAlchemyGroupThreadStore
     from omnigent.stores.role_store import RoleStore
 
 # Deepest allowed namespace path (segments), cycle-guard bound for path walks.
@@ -173,9 +174,11 @@ class ProjectStore(ABC):
 
     :cvar roles: The role store on the same database, or ``None`` when this
         backend has no role rows and aliases stay plain labels.
+    :cvar group_threads: The group thread store on the same database, or ``None``.
     """
 
     roles: RoleStore | None = None
+    group_threads: SqlAlchemyGroupThreadStore | None = None
 
     def __init__(self, storage_location: str) -> None:
         """

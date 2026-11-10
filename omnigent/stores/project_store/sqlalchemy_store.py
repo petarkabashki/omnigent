@@ -28,6 +28,7 @@ from omnigent.db.utils import (
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import RESERVED_USER_LOCAL
+from omnigent.stores.group_thread_store import SqlAlchemyGroupThreadStore
 from omnigent.stores.project_store import (
     MAX_PROJECT_DEPTH,
     UNSET,
@@ -195,6 +196,7 @@ class SqlAlchemyProjectStore(ProjectStore):
             immediate=True,
         )
         self.roles = SqlAlchemyRoleStore(storage_location)
+        self.group_threads = SqlAlchemyGroupThreadStore(storage_location)
         # Test seam: called inside a write after its checks pass, before commit,
         # so a test can hold one writer there and start a competing one.
         self.after_checks_hook: Callable[[str], None] | None = None
