@@ -2891,3 +2891,113 @@ async def test_family_project_removal_precedes_archive(auth_client, peers, db_ur
         store.update_conversation(session_id, archived=False)
     snapshot = (await auth_client.get(f"/v1/sessions/{source['id']}")).json()
     assert not snapshot["family"]["pinned"]
+
+
+async def _role_pair(auth_client, peers, db_uri):
+    architect, product, _ = peers
+    _bind_runner(db_uri, product["id"])
+    for session, alias in ((architect, "Architect"), (product, "Product")):
+        assert (
+            await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        ).status_code == 200
+    return architect, product
+
+
+async def _held_row(auth_client, session, counterpart):
+    threads = (await _tool(auth_client, session, "sys_thread_list"))["threads"]
+    return next(row for row in threads if row["counterpart"] == counterpart)
+
+
+async def test_loop_guard_counts_short_messages_and_holds_the_seventh(auth_client, peers, db_uri):
+    architect, product = await _role_pair(auth_client, peers, db_uri)
+    pair = (architect, product)
+    long_text = "Security finding: " + "detail " * 60
+    for n in range(7):  # substantive messages never count toward the loop cap
+        sent = await _send(auth_client, pair[n % 2], pair[(n + 1) % 2], f"{long_text} {n}")
+        assert sent.get("queued") is True
+    for n in range(6):
+        sent = await _send(auth_client, pair[n % 2], pair[(n + 1) % 2], f"ok {n}")
+        assert sent.get("queued") is True
+    held = await _send(auth_client, architect, product, "ok 6")
+    assert "held for the owner" in json.dumps(held) and "Don't resend" in json.dumps(held)
+    assert "/Architect \\u2194 /Product" in json.dumps(held)
+    row = await _held_row(auth_client, architect, "/Product")
+    assert row["state"] == "waiting_on_owner"
+    assert row["held"]["held_to"] == product["id"] and row["held"]["text"] == "ok 6"
+    replaced = await _send(auth_client, architect, product, "ok 7")
+    assert "replaces the message held earlier" in json.dumps(replaced)
+    assert (await _held_row(auth_client, architect, "/Product"))["held"]["text"] == "ok 7"
+    items = (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+    assert "ok 6" not in items
+
+    # An owner message into either session restarts the counters.
+    owner_message = {
+        "type": "message",
+        "data": {"role": "user", "content": [{"type": "input_text", "text": "carry on"}]},
+    }
+    posted = await auth_client.post(f"/v1/sessions/{product['id']}/events", json=owner_message)
+    assert posted.status_code in (200, 202), posted.text
+    assert (await _send(auth_client, architect, product, "ok again")).get("queued") is True
+
+
+async def test_loop_guard_burst_backstop_holds_the_twenty_first_message(
+    auth_client, peers, db_uri
+):
+    architect, product = await _role_pair(auth_client, peers, db_uri)
+    pair = (architect, product)
+    for n in range(20):
+        sent = await _send(
+            auth_client, pair[n % 2], pair[(n + 1) % 2], f"Finding {n}: " + "y" * 300
+        )
+        assert sent.get("queued") is True
+    held = await _send(auth_client, architect, product, "Finding 20: " + "y" * 300)
+    assert "held for the owner" in json.dumps(held) and "20 messages" in json.dumps(held)
+
+
+async def test_owner_releases_allows_or_discards_a_held_message(auth_client, peers, db_uri):
+    architect, product = await _role_pair(auth_client, peers, db_uri)
+
+    async def trip(text):
+        for n in range(6):
+            sender, receiver = (architect, product) if n % 2 == 0 else (product, architect)
+            if (await _row_hops_ok(sender, receiver, f"fill {n}")) is False:
+                break
+        return await _send(auth_client, architect, product, text)
+
+    async def _row_hops_ok(sender, receiver, text):
+        return (await _send(auth_client, sender, receiver, text)).get("queued") is True
+
+    async def act(action):
+        return await auth_client.post(
+            f"/v1/sessions/{architect['id']}/threads/held",
+            json={"counterpart": "/Product", "action": action},
+        )
+
+    assert (await act("release")).status_code == 409  # nothing held yet
+
+    await trip("first held")
+    discarded = await act("discard")
+    assert discarded.status_code == 200 and discarded.json()["delivered"] == []
+    row = await _held_row(auth_client, architect, "/Product")
+    assert row["held"] is None and row["state"] == "open"
+    assert (
+        "owner discarded your held message"
+        in (await auth_client.get(f"/v1/sessions/{architect['id']}/items")).text
+    )
+    assert "first held" not in (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+
+    await _send(auth_client, architect, product, "second held")
+    released = await act("release")
+    assert released.status_code == 200 and released.json()["delivered"] == [product["id"]]
+    assert "second held" in (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+    row = await _held_row(auth_client, architect, "/Product")
+    assert row["held"] is None and row["state"] == "waiting_on_them"
+    # Release leaves the counters alone, so the next short message is held again.
+    assert "held for the owner" in json.dumps(
+        await _send(auth_client, architect, product, "third held")
+    )
+
+    allowed = await act("allow")
+    assert allowed.status_code == 200 and allowed.json()["delivered"] == [product["id"]]
+    assert "third held" in (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
+    assert (await _send(auth_client, architect, product, "after allow")).get("queued") is True

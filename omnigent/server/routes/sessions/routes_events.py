@@ -335,6 +335,7 @@ from omnigent.server.schemas import (
     ResetSessionRequest,
     ResetSessionResponse,
     SessionEventInput,
+    ThreadHeldRequest,
     ThreadPostRequest,
 )
 from omnigent.server.session_aliases import release_role_after_lifecycle
@@ -1160,6 +1161,151 @@ def register_events_routes(
             engine_changed=bool(ack.get("engine_changed")),
         )
 
+    def _reset_pair_counters(user_id: str | None, conv: Any) -> None:
+        """Restart loop and burst counters on ``conv`` and on each counterpart's row."""
+        from omnigent.server.role_threads import reset_counters, threads_with_counters
+        from omnigent.server.session_aliases import resolve_session_address, session_handle
+
+        own_key = session_handle(conv, project_store, user_id) or f"session:{conv.id}"
+        for counterpart in threads_with_counters(conv.labels):
+            reset_counters(conversation_store, conv.id, counterpart)
+            try:
+                peer_id = resolve_session_address(
+                    conversation_store,
+                    project_store,
+                    address=counterpart.removeprefix("session:"),
+                    user_id=user_id,
+                    source=None,
+                )
+            except OmnigentError:
+                continue
+            reset_counters(conversation_store, peer_id, own_key)
+
+    @event_router.post("/sessions/{session_id}/threads/held", response_model=None)
+    async def act_on_held_thread_message(
+        request: Request, session_id: str, body: ThreadHeldRequest
+    ) -> dict[str, Any]:
+        """The owner releases, allows or discards the message the loop guard held.
+
+        ``release`` delivers it as sent; ``allow`` delivers it and restarts the pair's
+        counters; ``discard`` drops it and tells the sender.
+        """
+        from omnigent.server.role_threads import (
+            clear_held,
+            held_message,
+            holds_role,
+            inbound_thread_key,
+            record_inbound,
+            record_outbound,
+            reset_counters,
+            schedule_inbound_classification,
+            thread_hash,
+            thread_hops,
+            thread_index,
+            validate_counterpart,
+        )
+        from omnigent.server.session_aliases import session_handle
+        from omnigent.server.session_orchestration import (
+            orchestration_message,
+            require_owned_session,
+        )
+
+        user_id, holder = await _authorized_conversation(request, session_id)
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+        )
+        if not holds_role(holder):
+            raise OmnigentError(
+                "Threads belong to a session that holds a role", code=ErrorCode.INVALID_INPUT
+            )
+        counterpart = validate_counterpart(body.counterpart)
+        fresh = await asyncio.to_thread(conversation_store.get_conversation, holder.id)
+        held = held_message(fresh.labels if fresh else holder.labels, counterpart)
+        if held is None:
+            raise OmnigentError("No message is held in this thread", code=ErrorCode.CONFLICT)
+        holder_key = (
+            await asyncio.to_thread(session_handle, holder, project_store, user_id)
+            or f"session:{holder.id}"
+        )
+        delivered: list[str] = []
+        if body.action == "discard":
+            await asyncio.to_thread(clear_held, conversation_store, holder.id, counterpart)
+            await asyncio.to_thread(
+                conversation_store.set_labels,
+                holder.id,
+                {f"thread.{thread_hash(counterpart)}.state": "open"},
+            )
+            notice = (
+                f"[Message from hub (notice {int(time.time())})] [thread {counterpart}]\n"
+                f"The owner discarded your held message to {counterpart}."
+            )
+            data = {"role": "user", "content": [{"type": "input_text", "text": notice}]}
+            await _post_event_impl(
+                request, holder.id, SessionEventInput(type="message", data=data)
+            )
+        else:
+            if permission_store is not None and user_id:
+                target = await asyncio.to_thread(
+                    require_owned_session,
+                    held["target_id"],
+                    user_id,
+                    conversation_store,
+                    permission_store,
+                )
+            else:
+                target = await asyncio.to_thread(
+                    conversation_store.get_conversation, held["target_id"]
+                )
+            if target is None:
+                raise OmnigentError("The held message's target is gone", code=ErrorCode.CONFLICT)
+            message_id = held["message_id"] or f"msg_{secrets.token_hex(16)}"
+            thread_key = inbound_thread_key(holder, holder_key) if holds_role(target) else None
+            target_handle = await asyncio.to_thread(session_handle, target, project_store, user_id)
+            hops = thread_hops(fresh.labels if fresh else holder.labels, counterpart)
+            message = orchestration_message(
+                held["source_id"] or holder.id,
+                held["text"],
+                holder_key if not holder_key.startswith("session:") else None,
+                message_id=message_id,
+                thread=thread_key,
+            )
+            if thread_key is not None:
+                await asyncio.to_thread(
+                    record_inbound,
+                    conversation_store,
+                    target,
+                    thread_key,
+                    target_handle,
+                    message_id,
+                    held["text"],
+                    hops,
+                )
+                schedule_inbound_classification(target.id, thread_key, message_id, held["text"])
+            await _post_event_impl(
+                request, target.id, SessionEventInput(type=message.type, data=message.data)
+            )
+            await asyncio.to_thread(
+                record_outbound,
+                conversation_store,
+                holder,
+                counterpart,
+                None if holder_key.startswith("session:") else holder_key,
+                message_id,
+                held["text"],
+                hops,
+            )
+            await asyncio.to_thread(clear_held, conversation_store, holder.id, counterpart)
+            if body.action == "allow":
+                await asyncio.to_thread(reset_counters, conversation_store, holder.id, counterpart)
+                await asyncio.to_thread(
+                    reset_counters, conversation_store, target.id, thread_key or holder_key
+                )
+            delivered.append(target.id)
+        refreshed = await asyncio.to_thread(conversation_store.get_conversation, holder.id)
+        rows = thread_index(refreshed.labels if refreshed else {})
+        row = next((row for row in rows if row["counterpart"] == counterpart), None)
+        return {"action": body.action, "delivered": delivered, "thread": row}
+
     @event_router.post("/sessions/{session_id}/threads/post", status_code=202, response_model=None)
     async def post_owner_thread_message(
         request: Request, session_id: str, body: ThreadPostRequest
@@ -1173,6 +1319,7 @@ def register_events_routes(
             holds_role,
             owner_thread_message,
             record_inbound,
+            reset_counters,
             settle_owner_wait,
             validate_counterpart,
         )
@@ -1249,6 +1396,9 @@ def register_events_routes(
                 fresh = await asyncio.to_thread(conversation_store.get_conversation, target.id)
                 if fresh is not None:
                     await asyncio.to_thread(settle_owner_wait, conversation_store, fresh, key)
+        for target, key in sides:
+            other = key if target is holder else holder_key
+            await asyncio.to_thread(reset_counters, conversation_store, target.id, other)
         return {"message_id": message_id, "delivered": delivered}
 
     @event_router.post(
@@ -1630,9 +1780,11 @@ def register_events_routes(
             )
             from omnigent.server.role_threads import (
                 THREAD_OF_LABEL,
+                guard_outbound,
+                hold_message,
                 holds_role,
                 inbound_thread_key,
-                next_hops,
+                loop_guard_error,
                 record_inbound,
                 record_outbound,
                 schedule_inbound_classification,
@@ -1661,12 +1813,33 @@ def register_events_routes(
             thread_key = None
             target_handle: str | None = None
             hops = 0
+            verdict = None
             if holds_role(speaker) or holds_role(conv):
                 target_handle = await asyncio.to_thread(
                     session_handle, conv, project_store, user_id
                 )
-                if holds_role(speaker):
-                    hops = next_hops(speaker, target_handle or f"session:{conv.id}")
+                if holds_role(speaker) and isinstance(peer_text, str):
+                    pair_key = target_handle or f"session:{conv.id}"
+                    verdict = guard_outbound(speaker, pair_key, peer_text)
+                    if verdict.tripped:
+                        replaced = await asyncio.to_thread(
+                            hold_message,
+                            conversation_store,
+                            speaker,
+                            pair_key,
+                            text=peer_text,
+                            target_id=conv.id,
+                            source_id=source.id,
+                            message_id=peer_message_id,
+                            sender_handle=sender_handle,
+                        )
+                        raise loop_guard_error(
+                            verdict,
+                            sender_handle or f"session:{speaker.id}",
+                            pair_key,
+                            replaced=replaced,
+                        )
+                    hops = verdict.hops
             if holds_role(conv):
                 thread_key = inbound_thread_key(speaker, sender_handle)
             body = orchestration_message(
@@ -1684,8 +1857,9 @@ def register_events_routes(
                 target_handle,
                 peer_message_id,
                 peer_text,
-                hops or 1,
+                hops if verdict is not None else 1,
                 keep_state=to_own_holder,
+                verdict=verdict,
             ):
                 return {"queued": False, "duplicate": True}
             if thread_key is not None and not to_own_holder:
@@ -1700,7 +1874,15 @@ def register_events_routes(
                     peer_message_id,
                     peer_text,
                     hops,
+                    verdict=verdict,
                 )
+        elif (
+            body.type == "message"
+            and any(key.startswith("thread.") for key in conv.labels)
+            and not (_extract_user_text_from_event(body) or "").startswith("[Message from ")
+        ):
+            # A message typed by the owner restarts the loop counters on both sides.
+            await asyncio.to_thread(_reset_pair_counters, user_id, conv)
         native_shell_authorized = False
         if (
             body.type == "message"

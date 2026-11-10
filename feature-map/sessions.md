@@ -1355,8 +1355,21 @@ index (state, summary, hop count) across compaction and relaunch.
 
 - `GET /v1/sessions/threads` lists a session's threads;
   `GET /v1/sessions/threads/history` reads one; `POST /v1/sessions/threads/note`
-  sets a thread's state or summary and marks it read. Hops are capped, and a
-  quiet thread resets.
+  sets a thread's state or summary and marks it read.
+- Loop guard (`omnigent/loop_guard.py`, shared with group threads): a message
+  counts as a loop hop only when it is under 280 characters or repeats one of
+  the sender's last 3. The 7th such hop is held, and so is the 21st message of
+  any kind within 10 minutes. Counts reset after 10 quiet minutes, any owner
+  message into either session, or Allow more. A held role-thread message stays
+  on the sender's thread row (`thread.<hash>.held*` labels, no migration), the
+  thread turns "Needs you", and the sender's tool result says "held for the
+  owner". `POST /v1/sessions/{id}/threads/held` `{"counterpart", "action"}`
+  (owner only): `release` delivers it, `allow` delivers it and resets the
+  pair's counters, `discard` drops it and tells the sender. Thread rows carry
+  `held`. Group-thread posts are counted the same way but are refused, not held.
+- Web: a held message shows as an amber "Held by loop guard" notice on the
+  thread card and at the top of the thread side chat, with Release, Allow more
+  and Discard.
 - `POST /v1/sessions/{id}/fork` `{"side_chat": true, "thread": "<handle>"}`
   starts an owner thread with that counterpart; `thread` without `side_chat`
   is rejected.

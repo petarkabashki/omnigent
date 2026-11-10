@@ -30,6 +30,7 @@ from omnigent.entities.group_thread import (
     MemberKind,
 )
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.loop_guard import BURST_HOPS, evaluate, limit_reached, message_digest
 
 _STATES = {"open": 1, "done": 2}
 _MEMBER_KINDS: dict[MemberKind, int] = {"role": 1, "session": 2}
@@ -257,6 +258,27 @@ class SqlAlchemyGroupThreadStore:
 
         run_write_transaction(self._session_immediate, "mark_group_thread_delivered", write)
 
+    @staticmethod
+    def _recent_agent_posts(
+        session: Session, thread_id: str, since: int
+    ) -> list[SqlGroupThreadPost]:
+        """Agent posts since the last owner post within the window, newest first."""
+        rows = session.scalars(
+            select(SqlGroupThreadPost)
+            .where(
+                SqlGroupThreadPost.thread_id == thread_id,
+                SqlGroupThreadPost.created_at >= since,
+            )
+            .order_by(SqlGroupThreadPost.seq.desc())
+            .limit(BURST_HOPS + 1)
+        )
+        found: list[SqlGroupThreadPost] = []
+        for row in rows:
+            if row.author_kind == _AUTHOR_KINDS["owner"]:
+                break
+            found.append(row)
+        return found
+
     def append_post(
         self,
         thread_id: str,
@@ -284,12 +306,32 @@ class SqlAlchemyGroupThreadStore:
             if author_kind == "owner":
                 hops = 0
             else:
-                fresh = row.hops_at is not None and now - row.hops_at <= hop_reset_seconds
-                hops = (row.hops if fresh else 0) + 1
-                if hops > max_hops:
+                prior = self._recent_agent_posts(session, thread_id, now - hop_reset_seconds)
+                verdict = evaluate(
+                    text,
+                    prev_hops=row.hops,
+                    last_at=row.hops_at or 0,
+                    stamps=[post.created_at for post in prior],
+                    recent=[
+                        message_digest(post.text)
+                        for post in reversed(prior)
+                        if post.author_ref == author_ref
+                    ],
+                    now=now,
+                    max_hops=max_hops,
+                )
+                hops = verdict.hops
+                if verdict.tripped:
+                    limit = limit_reached(
+                        verdict.tripped,
+                        max_hops=max_hops,
+                        window_seconds=hop_reset_seconds,
+                    )
                     raise GroupThreadLoopGuardError(
-                        f"Thread loop guard: {max_hops} agent posts in this group without "
-                        "the owner posting. Stop posting and ask the owner.",
+                        f"Thread loop guard: refused, not posted. {author_ref} in group thread "
+                        f'"{row.title}" hit {limit}. Don\'t resend; ask the owner to post in '
+                        f"the thread. The count resets after {hop_reset_seconds // 60} quiet "
+                        "minutes or an owner post.",
                         code=ErrorCode.CONFLICT,
                     )
             seq = row.last_seq + 1

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query, Request
 from omnigent.entities import Conversation
 from omnigent.entities.group_thread import GroupThread, GroupThreadMember, GroupThreadPost
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.loop_guard import HOP_RESET_SECONDS, MAX_HOPS
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 from omnigent.server.auth import AuthProvider
 from omnigent.server.group_threads import (
@@ -30,8 +31,6 @@ from omnigent.server.group_threads import (
     split_missed,
 )
 from omnigent.server.role_threads import (
-    HOP_RESET_SECONDS,
-    MAX_HOPS,
     THREAD_OF_LABEL,
     find_thread_side_chat,
     record_inbound,

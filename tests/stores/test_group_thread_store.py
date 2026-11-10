@@ -60,8 +60,12 @@ def test_agent_posts_past_the_cap_are_refused_until_the_owner_posts(
     _post(threads, thread.id, "role")
     _post(threads, thread.id, "role")
 
-    with pytest.raises(GroupThreadLoopGuardError, match="ask the owner"):
+    with pytest.raises(GroupThreadLoopGuardError) as refused:
         _post(threads, thread.id, "role")
+    message = str(refused.value)
+    assert 'omnigent/Product in group thread "t"' in message
+    assert "the loop limit (2 short or repeated messages without a pause)" in message
+    assert "resets after 10 quiet minutes or an owner post" in message
     assert threads.get(thread.id, user_id=OWNER).last_seq == 2  # type: ignore[union-attr]
 
     _post(threads, thread.id, "owner")
@@ -97,3 +101,28 @@ def test_mark_delivered_records_position_and_recipient(
 
     (stored,) = threads.members(thread.id)
     assert (stored.delivered_seq, stored.delivered_to) == (3, "b" * 32)
+
+
+def test_long_distinct_agent_posts_do_not_trip_the_loop_cap(
+    threads: SqlAlchemyGroupThreadStore,
+) -> None:
+    thread = threads.create("t", user_id=OWNER)
+
+    def post(text: str) -> int:
+        return threads.append_post(
+            thread.id,
+            user_id=OWNER,
+            author_kind="role",
+            author_ref="omnigent/Product",
+            text=text,
+            mentions=[],
+            max_hops=2,
+            hop_reset_seconds=600,
+        ).seq
+
+    assert [post(f"finding {n} " + "detail " * 60) for n in range(5)] == [1, 2, 3, 4, 5]
+    repeated = "finding 4 " + "detail " * 60
+    post(repeated)
+    post(repeated.upper())
+    with pytest.raises(GroupThreadLoopGuardError, match="short or repeated"):
+        post(repeated)

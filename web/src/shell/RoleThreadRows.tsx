@@ -18,6 +18,7 @@ import type { Conversation } from "@/hooks/useConversations";
 import { useNamespaceRoles } from "@/hooks/useRoles";
 import { relativeTime } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
+import { HeldThreadMessage } from "@/components/chat/HeldThreadMessage";
 import { StateDot } from "@/components/StateDot";
 import {
   requestRoleThreadPostFocus,
@@ -202,6 +203,13 @@ function RoleThreadCard({
           </span>
         )}
       </p>
+      {thread.held && (
+        <HeldThreadMessage
+          holderId={holderId}
+          counterpart={thread.counterpart}
+          held={thread.held}
+        />
+      )}
       {thread.summary && (
         <p className="line-clamp-2 text-xs" title={thread.summary}>
           {thread.summary}
