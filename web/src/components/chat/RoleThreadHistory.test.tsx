@@ -77,4 +77,22 @@ describe("RoleThreadHistory", () => {
     );
     await waitFor(() => expect(within(box).getByLabelText("Post to the thread")).toHaveValue(""));
   });
+
+  it("shows the loop-guard notice when the thread has a held message", async () => {
+    useSession.mockReturnValue({
+      session: {
+        id: "sess_product",
+        title: "x",
+        labels: {
+          "omnigent.alias": "Product",
+          "thread.aaaaaaaaaaaa.cp": "/Architect",
+          "thread.aaaaaaaaaaaa.held": "Held words",
+        },
+      },
+    });
+    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([]);
+    renderHistory();
+    expect(await screen.findByText("Held words")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Release" })).toBeTruthy();
+  });
 });

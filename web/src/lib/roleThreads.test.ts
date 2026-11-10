@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as identity from "@/lib/identity";
 import {
   roleHandlePath,
   roleThreadIsUrgent,
   roleThreadStateLabels,
   roleThreadStateText,
+  resolveHeldThreadMessage,
   roleThreadsFromLabels,
 } from "./roleThreads";
 
@@ -79,5 +81,37 @@ describe("roleHandlePath", () => {
     ["a/b/Role", "a/b"],
   ])("%s is in %j", (handle, path) => {
     expect(roleHandlePath(handle)).toBe(path);
+  });
+});
+
+describe("held thread message", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("parses the held labels, with underscores in field names", () => {
+    const [row] = roleThreadsFromLabels({
+      ...ALIAS,
+      "thread.aaaaaaaaaaaa.cp": "/Architect",
+      "thread.aaaaaaaaaaaa.state": "waiting_on_owner",
+      "thread.aaaaaaaaaaaa.held": "Please reply",
+      "thread.aaaaaaaaaaaa.held_to": "sess_x",
+      "thread.aaaaaaaaaaaa.held_at": "123",
+    });
+    expect(row.held).toEqual({ text: "Please reply", to: "sess_x", at: 123 });
+    const [plain] = roleThreadsFromLabels({ ...ALIAS, "thread.aaaaaaaaaaaa.cp": "/Architect" });
+    expect(plain.held).toBeUndefined();
+  });
+
+  it("posts the action for the counterpart", async () => {
+    const fetchSpy = vi
+      .spyOn(identity, "authenticatedFetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await resolveHeldThreadMessage("sess a", "/Architect", "allow");
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("/v1/sessions/sess%20a/threads/held");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      counterpart: "/Architect",
+      action: "allow",
+    });
   });
 });

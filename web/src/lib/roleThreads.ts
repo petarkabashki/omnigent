@@ -13,9 +13,20 @@ export interface RoleThread {
   messages: number;
   summary: string;
   updatedAt: number;
+  /** A message the loop guard is holding back from delivery, if any. */
+  held?: HeldThreadMessage;
 }
 
-const INDEX_LABEL = /^thread\.([0-9a-f]{12})\.([a-z]+)$/;
+/** A thread message withheld by the loop guard until the owner resolves it. */
+export interface HeldThreadMessage {
+  text: string;
+  /** Session id the message was addressed to. */
+  to: string | null;
+  /** Epoch seconds when it was held. */
+  at: number | null;
+}
+
+const INDEX_LABEL = /^thread\.([0-9a-f]{12})\.([a-z_]+)$/;
 // Mirrors omnigent/server/role_threads.py: needs the owner or blocked, then our turn, then the rest.
 const URGENT_STATES: Record<string, number> = {
   waiting_on_owner: 0,
@@ -49,6 +60,13 @@ export function roleThreadsFromLabels(
   const rows: RoleThread[] = [];
   for (const [key, fields] of grouped) {
     if (!fields.cp) continue;
+    const held = fields.held
+      ? {
+          text: fields.held,
+          to: fields.held_to || null,
+          at: fields.held_at ? toInt(fields.held_at) : null,
+        }
+      : undefined;
     rows.push({
       key,
       counterpart: fields.cp,
@@ -57,6 +75,7 @@ export function roleThreadsFromLabels(
       messages: toInt(fields.n),
       summary: fields.sum ?? "",
       updatedAt: toInt(fields.at),
+      ...(held ? { held } : {}),
     });
   }
   return rows.sort(
@@ -190,6 +209,27 @@ export async function postRoleThreadMessage(
   if (!res.ok) throw await apiErrorFromResponse(res);
   const body = (await res.json()) as { message_id: string; delivered: string[] };
   return { messageId: body.message_id, delivered: body.delivered };
+}
+
+/** What the owner does with a held message: deliver it, let the pair continue, or drop it. */
+export type HeldThreadAction = "release" | "allow" | "discard";
+
+/** `POST /v1/sessions/{id}/threads/held`: resolve the message the loop guard is holding. */
+export async function resolveHeldThreadMessage(
+  holderId: string,
+  counterpart: string,
+  action: HeldThreadAction,
+): Promise<unknown> {
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(holderId)}/threads/held`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ counterpart, action }),
+    },
+  );
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  return res.json();
 }
 
 const POST_FOCUS_EVENT = "omnigent:role-thread-post-focus";

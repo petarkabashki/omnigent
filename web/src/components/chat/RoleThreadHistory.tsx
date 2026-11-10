@@ -4,6 +4,7 @@ import { Loader2Icon, SendIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { HeldThreadMessage } from "@/components/chat/HeldThreadMessage";
 import { useSession } from "@/hooks/useSession";
 import {
   fetchRoleThreadMessages,
@@ -42,9 +43,10 @@ export function RoleThreadHistory({
   const { session: holder } = useSession(holderId);
   const holderName = holder?.labels?.["omnigent.alias"]?.trim() || holder?.title || "This role";
   // The thread index on the holder moves when a message lands; refetch then.
-  const updatedAt = roleThreadsFromLabels(holder?.labels).find(
-    (thread) => thread.counterpart === counterpart,
-  )?.updatedAt;
+  const thread = roleThreadsFromLabels(holder?.labels).find(
+    (row) => row.counterpart === counterpart,
+  );
+  const updatedAt = thread?.updatedAt;
   const messages = useQuery({
     queryKey: ["role-thread-messages", holderId, counterpart, updatedAt],
     queryFn: () => fetchRoleThreadMessages(holderId, counterpart),
@@ -59,6 +61,9 @@ export function RoleThreadHistory({
       <p className="text-xs font-medium text-muted-foreground">
         {holderName} ↔ {counterpart}
       </p>
+      {thread?.held && (
+        <HeldThreadMessage holderId={holderId} counterpart={counterpart} held={thread.held} />
+      )}
       {messages.isPending && (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2Icon aria-hidden className="size-3.5 animate-spin" /> Loading messages…

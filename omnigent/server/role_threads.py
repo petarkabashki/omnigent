@@ -16,6 +16,13 @@ from typing import Any
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.loop_guard import (
+    BURST_HOPS,
+    HOP_RESET_SECONDS,
+    MAX_HOPS,
+    GuardVerdict,
+    evaluate,
+)
 from omnigent.server import reply_classifier, session_live_state
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
@@ -25,14 +32,12 @@ from omnigent.stores.conversation_store import (
 
 THREAD_ROLE_LABEL = "thread.role"  # handle of the role a session held
 THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
-MAX_HOPS = 6
-HOP_RESET_SECONDS = 600  # a quiet thread starts counting hops again
 PROMOTION_MESSAGE_THRESHOLD = 20  # messages after which a thread is a promotion candidate
 THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "waiting_on_owner", "blocked", "done")
 OWNER_SENDER = "owner"  # sender name on a message the owner posted into a thread
 COUNTERPART_MAX_LEN = 200
 
-_INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z]+)")
+_INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z0-9_]+)")
 _THREAD_TAG = re.compile(r"^\[Message from [^\n]*?\] \[thread ([^\]\n]+)\]\n", re.ASCII)
 _URGENT_STATES = {"waiting_on_owner": 0, "blocked": 0, "waiting_on_us": 1}
 
@@ -98,6 +103,7 @@ def thread_index(labels: Mapping[str, str]) -> list[dict[str, Any]]:
                 "summary": fields.get("sum", ""),
                 "updated_at": _to_int(fields.get("at")),
                 "promotion_candidate": messages >= PROMOTION_MESSAGE_THRESHOLD,
+                "held": _held_summary(fields),
             }
         )
     rows.sort(key=lambda row: -row["updated_at"])
@@ -117,19 +123,161 @@ def _row_fields(labels: Mapping[str, str], counterpart: str) -> dict[str, str]:
     return {key[len(prefix) :]: value for key, value in labels.items() if key.startswith(prefix)}
 
 
-def next_hops(sender: Conversation, counterpart: str, *, now: int | None = None) -> int:
-    """Hop count for a message from a role holder to ``counterpart``; refuses past the cap."""
+def thread_hops(labels: Mapping[str, str], counterpart: str) -> int:
+    """The loop hop count currently on a thread row."""
+    return _to_int(_row_fields(labels, counterpart).get("hops"))
+
+
+def _held_summary(fields: Mapping[str, str]) -> dict[str, Any] | None:
+    if "held_to" not in fields:
+        return None
+    return {
+        "text": fields.get("held", ""),
+        "held_to": fields["held_to"],
+        "held_at": _to_int(fields.get("held_at")),
+    }
+
+
+def guard_outbound(
+    sender: Conversation, counterpart: str, text: str, *, now: int | None = None
+) -> GuardVerdict:
+    """Counters after a message from a role holder to ``counterpart`` (see ``loop_guard``)."""
     fields = _row_fields(sender.labels, counterpart)
-    stamp = now if now is not None else int(time.time())
-    fresh = stamp - _to_int(fields.get("at")) <= HOP_RESET_SECONDS
-    hops = (_to_int(fields.get("hops")) if fresh else 0) + 1
-    if hops > MAX_HOPS:
-        raise OmnigentError(
-            f"Thread loop guard: {MAX_HOPS} role-to-role hops with {counterpart} without a "
-            "pause. Stop replying and ask the owner.",
-            code=ErrorCode.CONFLICT,
-        )
-    return hops
+    return evaluate(
+        text,
+        prev_hops=_to_int(fields.get("hops")),
+        last_at=_to_int(fields.get("at")),
+        stamps=[_to_int(part) for part in fields.get("times", "").split(",") if part],
+        recent=[part for part in fields.get("recent", "").split(",") if part],
+        now=now if now is not None else int(time.time()),
+    )
+
+
+def _guard_labels(
+    counterpart: str, verdict: GuardVerdict | None, *, recent: bool
+) -> dict[str, str]:
+    """Burst stamps are mirrored on both sides; recent digests are the sender's own."""
+    if verdict is None:
+        return {}
+    labels = {_label(counterpart, "times"): ",".join(str(stamp) for stamp in verdict.stamps)}
+    if recent:
+        labels[_label(counterpart, "recent")] = ",".join(verdict.recent)
+    return labels
+
+
+def loop_guard_error(
+    verdict: GuardVerdict, sender_key: str, counterpart: str, *, replaced: bool
+) -> OmnigentError:
+    """The error a sender gets when its message was held for the owner."""
+    limit = (
+        f"the loop limit ({MAX_HOPS} short or repeated messages without a pause)"
+        if verdict.tripped == "loop"
+        else f"the message backstop ({BURST_HOPS} messages in {HOP_RESET_SECONDS // 60} minutes)"
+    )
+    return OmnigentError(
+        f"Thread loop guard: held for the owner. {sender_key} \u2194 {counterpart} hit {limit}. "
+        "Don't resend; the owner will release it. The count resets after "
+        f"{HOP_RESET_SECONDS // 60} quiet minutes, an owner message, or the owner's Allow more."
+        + (" This replaces the message held earlier." if replaced else ""),
+        code=ErrorCode.CONFLICT,
+    )
+
+
+_HELD_FIELDS = ("held", "held_to", "held_at", "held_src", "held_id", "held_n")
+_HELD_CHUNK = LABEL_VALUE_MAX_LEN
+
+
+def _held_chunk_key(counterpart: str, index: int) -> str:
+    return _label(counterpart, f"heldtext_{index:02d}")
+
+
+def hold_message(
+    store: ConversationStore,
+    sender: Conversation,
+    counterpart: str,
+    *,
+    text: str,
+    target_id: str,
+    source_id: str,
+    message_id: str | None,
+    sender_handle: str | None,
+    now: int | None = None,
+) -> bool:
+    """Keep a refused message on the sender's thread row; ``True`` if it replaced one.
+
+    The text is split over ``heldtext_NN`` labels (a label value is capped), so it
+    survives whole. The thread is marked as waiting on the owner.
+    """
+    labels = store.get_conversation(sender.id).labels  # type: ignore[union-attr]
+    replaced = "held_to" in _row_fields(labels, counterpart)
+    if replaced:
+        clear_held(store, sender.id, counterpart)
+    chunks = [text[i : i + _HELD_CHUNK] for i in range(0, len(text), _HELD_CHUNK)]
+    updates = {
+        _label(counterpart, "cp"): counterpart,
+        _label(counterpart, "state"): "waiting_on_owner",
+        _label(counterpart, "sum"): preview(f"held for owner: {text}"),
+        _label(counterpart, "held"): preview(text),
+        _label(counterpart, "held_to"): target_id,
+        _label(counterpart, "held_at"): str(now if now is not None else int(time.time())),
+        _label(counterpart, "held_src"): source_id,
+        _label(counterpart, "held_n"): str(len(chunks)),
+    }
+    if message_id:
+        updates[_label(counterpart, "held_id")] = message_id
+    for index, chunk in enumerate(chunks):
+        updates[_held_chunk_key(counterpart, index)] = chunk
+    if sender_handle:
+        updates[THREAD_ROLE_LABEL] = sender_handle
+    store.set_labels(sender.id, updates)
+    return replaced
+
+
+def held_message(labels: Mapping[str, str], counterpart: str) -> dict[str, Any] | None:
+    """The full held message on a holder's thread row, or ``None``."""
+    fields = _row_fields(labels, counterpart)
+    if "held_to" not in fields:
+        return None
+    count = _to_int(fields.get("held_n"))
+    text = "".join(fields.get(f"heldtext_{index:02d}", "") for index in range(count))
+    return {
+        "text": text,
+        "target_id": fields["held_to"],
+        "source_id": fields.get("held_src", ""),
+        "message_id": fields.get("held_id"),
+    }
+
+
+def clear_held(store: ConversationStore, holder_id: str, counterpart: str) -> None:
+    """Drop a thread's held message."""
+    labels = store.get_conversation(holder_id).labels  # type: ignore[union-attr]
+    prefix = f"thread.{thread_hash(counterpart)}."
+    for key in labels:
+        field = key[len(prefix) :] if key.startswith(prefix) else ""
+        if field in _HELD_FIELDS or field.startswith("heldtext_"):
+            store.delete_label(holder_id, key)
+
+
+def reset_counters(store: ConversationStore, holder_id: str, counterpart: str) -> None:
+    """Restart the loop and burst counters on one side of a pair."""
+    labels = store.get_conversation(holder_id).labels  # type: ignore[union-attr]
+    fields = _row_fields(labels, counterpart)
+    if _to_int(fields.get("hops")):
+        store.set_labels(holder_id, {_label(counterpart, "hops"): "0"})
+    if fields.get("times"):
+        store.delete_label(holder_id, _label(counterpart, "times"))
+
+
+def threads_with_counters(labels: Mapping[str, str]) -> list[str]:
+    """Counterparts whose loop or burst counters are running on this holder."""
+    return [
+        row["counterpart"] for row in thread_index(labels) if _counting(labels, row["counterpart"])
+    ]
+
+
+def _counting(labels: Mapping[str, str], counterpart: str) -> bool:
+    fields = _row_fields(labels, counterpart)
+    return bool(_to_int(fields.get("hops")) or fields.get("times"))
 
 
 def record_inbound(
@@ -142,6 +290,7 @@ def record_inbound(
     hops: int,
     *,
     keep_state: bool = False,
+    verdict: GuardVerdict | None = None,
     now: int | None = None,
 ) -> bool:
     """Update the holder's index for a delivered message; ``False`` for a duplicate id.
@@ -160,6 +309,7 @@ def record_inbound(
         _label(counterpart, "hops"): str(hops),
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
     }
+    updates.update(_guard_labels(counterpart, verdict, recent=False))
     if keep_state:
         del updates[_label(counterpart, "state")], updates[_label(counterpart, "sum")]
     if message_id:
@@ -219,6 +369,7 @@ def record_outbound(
     text: object,
     hops: int,
     *,
+    verdict: GuardVerdict | None = None,
     now: int | None = None,
 ) -> None:
     """A role holder wrote to ``counterpart``: waiting on them, nothing unread."""
@@ -232,6 +383,7 @@ def record_outbound(
         _label(counterpart, "hops"): str(hops),
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
     }
+    updates.update(_guard_labels(counterpart, verdict, recent=True))
     if message_id:
         updates[_label(counterpart, "last")] = message_id
     if sender_handle:

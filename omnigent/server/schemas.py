@@ -2877,6 +2877,15 @@ class ThreadPostRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ThreadHeldRequest(BaseModel):
+    """The owner's decision on a message the loop guard held."""
+
+    counterpart: str = Field(max_length=200)
+    action: Literal["release", "allow", "discard"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ThreadNoteRequest(BaseModel):
     """Set a role thread's state or summary (``sys_thread_note``)."""
 

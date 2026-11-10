@@ -97,3 +97,28 @@ def test_mark_delivered_records_position_and_recipient(
 
     (stored,) = threads.members(thread.id)
     assert (stored.delivered_seq, stored.delivered_to) == (3, "b" * 32)
+
+
+def test_long_distinct_agent_posts_do_not_trip_the_loop_cap(
+    threads: SqlAlchemyGroupThreadStore,
+) -> None:
+    thread = threads.create("t", user_id=OWNER)
+
+    def post(text: str) -> int:
+        return threads.append_post(
+            thread.id,
+            user_id=OWNER,
+            author_kind="role",
+            author_ref="omnigent/Product",
+            text=text,
+            mentions=[],
+            max_hops=2,
+            hop_reset_seconds=600,
+        ).seq
+
+    assert [post(f"finding {n} " + "detail " * 60) for n in range(5)] == [1, 2, 3, 4, 5]
+    repeated = "finding 4 " + "detail " * 60
+    post(repeated)
+    post(repeated.upper())
+    with pytest.raises(GroupThreadLoopGuardError, match="short or repeated"):
+        post(repeated)

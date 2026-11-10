@@ -167,4 +167,18 @@ describe("RoleThreadRows", () => {
     fireEvent.click(goTo);
     expect(await screen.findByTestId("holder-page")).toBeInTheDocument();
   });
+
+  it("shows the held message notice in the hover card", async () => {
+    renderRows(
+      holder({
+        "thread.aaaaaaaaaaaa.cp": "/Architect",
+        "thread.aaaaaaaaaaaa.state": "waiting_on_owner",
+        "thread.aaaaaaaaaaaa.held": "Held words",
+      }),
+    );
+    fireEvent.focus(screen.getByTestId("role-thread-row"));
+    const card = await screen.findByTestId("role-thread-card");
+    expect(within(card).getByText("Held words")).toBeTruthy();
+    expect(within(card).getByRole("button", { name: "Allow more" })).toBeTruthy();
+  });
 });
