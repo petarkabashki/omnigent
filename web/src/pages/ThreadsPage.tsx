@@ -8,6 +8,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2Icon, SendIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { PageScroll } from "@/components/PageScroll";
+import {
+  MemberPicker,
+  MemberSearch,
+  useMemberOptions,
+  type MemberChoice,
+} from "@/components/threads/ThreadMemberPicker";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -27,7 +33,7 @@ import {
   type GroupThreadPrimer,
 } from "@/lib/groupThreads";
 import { relativeTime } from "@/lib/relativeTime";
-import { Link, useNavigate, useParams } from "@/lib/routing";
+import { Link, useNavigate, useParams, useSearchParams } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 
 const FIELD_CLASS =
@@ -98,22 +104,24 @@ function ThreadList() {
   );
 }
 
+/** Members named in the URL (`/threads?with=omnigent/Product&with=<session id>`). */
+function membersFromSearch(params: URLSearchParams): MemberChoice[] {
+  return params
+    .getAll("with")
+    .filter((ref) => ref.trim())
+    .map(memberFromText);
+}
+
 function NewThreadForm() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const options = useMemberOptions();
   const [title, setTitle] = useState("");
-  const [members, setMembers] = useState("");
+  const [members, setMembers] = useState<MemberChoice[]>(() => membersFromSearch(searchParams));
   const [message, setMessage] = useState("");
   const create = useMutation({
-    mutationFn: () =>
-      createGroupThread({
-        title: title.trim(),
-        members: members
-          .split(/[\n,]/)
-          .filter((line) => line.trim())
-          .map(memberFromText),
-        message: message.trim(),
-      }),
+    mutationFn: () => createGroupThread({ title: title.trim(), members, message: message.trim() }),
     onSuccess: async (thread) => {
       await queryClient.invalidateQueries({ queryKey: ["group-threads"] });
       navigate(`/threads/${thread.key}`);
@@ -121,7 +129,7 @@ function NewThreadForm() {
   });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (title.trim() && members.trim()) create.mutate();
+    if (title.trim() && members.length) create.mutate();
   };
   return (
     <form
@@ -133,17 +141,12 @@ function NewThreadForm() {
       <input
         aria-label="Title"
         placeholder="Title"
+        autoFocus={members.length > 0}
         value={title}
         onChange={(event) => setTitle(event.target.value)}
         className={FIELD_CLASS}
       />
-      <Textarea
-        aria-label="Members"
-        placeholder={"Members, one per line: omnigent/Product, /Architect or a session id"}
-        value={members}
-        onChange={(event) => setMembers(event.target.value)}
-        className="min-h-16 text-sm"
-      />
+      <MemberPicker value={members} onChange={setMembers} options={options} />
       <Textarea
         aria-label="First post"
         placeholder="First post (optional; goes to everyone)"
@@ -160,7 +163,7 @@ function NewThreadForm() {
         <Button
           type="submit"
           loading={create.isPending}
-          disabled={!title.trim() || !members.trim()}
+          disabled={!title.trim() || members.length === 0}
           componentId="threads.create"
         >
           Start thread
@@ -387,7 +390,7 @@ function MemberList({
           </li>
         ))}
       </ul>
-      <InviteForm threadKey={threadKey} onInvited={onChanged} />
+      <InviteForm threadKey={threadKey} members={members} onInvited={onChanged} />
     </section>
   );
 }
@@ -400,37 +403,63 @@ const PRIMERS: [GroupThreadPrimer, string][] = [
 
 function InviteForm({
   threadKey,
+  members,
   onInvited,
 }: {
   threadKey: string;
+  members: GroupThreadMember[];
   onInvited: () => Promise<unknown>;
 }) {
-  const [ref, setRef] = useState("");
+  const options = useMemberOptions();
+  const [choice, setChoice] = useState<MemberChoice | null>(null);
   const [primer, setPrimer] = useState<GroupThreadPrimer>("summary");
   const invite = useMutation({
-    mutationFn: () => inviteToGroupThread(threadKey, memberFromText(ref), primer),
+    mutationFn: (picked: MemberChoice) => inviteToGroupThread(threadKey, picked, primer),
     onSuccess: async () => {
-      setRef("");
+      setChoice(null);
       await onInvited();
     },
   });
+  const choiceLabel =
+    choice &&
+    (options.find((option) => option.kind === choice.kind && option.ref === choice.ref)?.label ??
+      memberLabel(choice));
   return (
     <form
       aria-label="Invite"
       className="flex flex-col gap-1"
       onSubmit={(event) => {
         event.preventDefault();
-        if (ref.trim()) invite.mutate();
+        if (choice) invite.mutate(choice);
       }}
     >
       <div className="flex flex-wrap items-center gap-1.5">
-        <input
-          aria-label="Invite member"
-          placeholder="Invite: project/Role or session id"
-          value={ref}
-          onChange={(event) => setRef(event.target.value)}
-          className={cn(FIELD_CLASS, "min-w-0 flex-1 sm:max-w-72")}
-        />
+        {choice ? (
+          <span
+            data-testid="invite-choice"
+            className="flex max-w-full min-w-0 items-center gap-1 rounded-full border border-border py-0.5 pr-0.5 pl-2.5 text-sm"
+          >
+            <span className="min-w-0 truncate">{choiceLabel}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Clear"
+              onClick={() => setChoice(null)}
+            >
+              <XIcon aria-hidden />
+            </Button>
+          </span>
+        ) : (
+          <MemberSearch
+            label="Invite member"
+            placeholder="Invite: search roles and sessions…"
+            options={options}
+            exclude={members}
+            onPick={setChoice}
+            className="min-w-0 flex-1 sm:max-w-80"
+          />
+        )}
         <select
           aria-label="Primer"
           value={primer}
@@ -448,7 +477,7 @@ function InviteForm({
           size="sm"
           variant="outline"
           loading={invite.isPending}
-          disabled={!ref.trim()}
+          disabled={!choice}
           componentId="threads.invite"
         >
           Invite
