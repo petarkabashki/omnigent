@@ -7,7 +7,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { SidebarHeaderActions } from "./SidebarHeaderActions";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+});
 
 describe("SidebarHeaderActions shortcut hints", () => {
   it.each([
@@ -47,5 +49,39 @@ describe("SidebarHeaderActions shortcut hints", () => {
     expect(
       Array.from(content.querySelectorAll('[data-slot="kbd"]'), (key) => key.textContent),
     ).toEqual(keys);
+  });
+
+  it("leaves Settings to the native-shell profile footer when requested", () => {
+    render(
+      <MemoryRouter>
+        <TooltipProvider>
+          <SidebarHeaderActions expanded onToggle={vi.fn()} showSettings={false} />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByLabelText("Settings")).toBeNull();
+    expect(screen.getByLabelText("Search")).toBeInTheDocument();
+    expect(screen.getByLabelText("Close sidebar")).toBeInTheDocument();
+    expect(
+      Array.from(
+        screen.getByTestId("sidebar-header-actions").querySelectorAll<HTMLElement>("[aria-label]"),
+        (control) => control.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Close sidebar", "Search"]);
+  });
+
+  it("omits Search when the Electron brand row owns it", () => {
+    render(
+      <MemoryRouter>
+        <TooltipProvider>
+          <SidebarHeaderActions expanded showSearch={false} onToggle={vi.fn()} />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByLabelText("Search")).toBeNull();
+    expect(screen.getByLabelText("Settings")).toBeInTheDocument();
+    expect(screen.getByLabelText("Close sidebar")).toBeInTheDocument();
   });
 });

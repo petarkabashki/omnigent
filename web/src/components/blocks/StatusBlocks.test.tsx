@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as SessionsApiModule from "@/lib/sessionsApi";
 import { copyText } from "@/lib/clipboard";
 import { getSessionSignInLink } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
@@ -9,7 +10,10 @@ import { SwitchEngineContextProvider } from "@/shell/SwitchEngineContext";
 import { EngineSwitchMarker, ErrorBanner, RoutingDecisionCard } from "./StatusBlocks";
 
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(() => Promise.resolve()) }));
-vi.mock("@/lib/sessionsApi", () => ({ getSessionSignInLink: vi.fn() }));
+vi.mock("@/lib/sessionsApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof SessionsApiModule>()),
+  getSessionSignInLink: vi.fn(),
+}));
 
 afterEach(cleanup);
 
@@ -287,6 +291,10 @@ describe("ErrorBanner", () => {
     [
       "codex_provider_auth_failed",
       "Codex couldn't get a token from the model provider's sign-in command on the host.",
+    ],
+    [
+      "harness_not_configured",
+      "The harness isn't set up on the host, so this session can't start.",
     ],
   ])("describes a %s failure in plain English", (code, sentence) => {
     render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
@@ -1473,5 +1481,28 @@ describe("ErrorBanner — usage limit switch action", () => {
   it("hides it when the session cannot switch", () => {
     renderLimit({ canSwitchEngine: false, currentSessionId: "conv_1" });
     expect(screen.queryByRole("button", { name: "Switch engine…" })).toBeNull();
+  });
+});
+
+describe("ErrorBanner sign-in notice", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reloads the page from its Reload page action", () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    render(
+      <ErrorBanner
+        message="Reload the page to sign in again."
+        source=""
+        code="sign_in_expired"
+        title="Your sign-in expired"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload page" }));
+
+    expect(reload).toHaveBeenCalledOnce();
   });
 });

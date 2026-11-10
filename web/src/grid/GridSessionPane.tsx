@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { createPortal } from "react-dom";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { cn } from "@/lib/utils";
@@ -235,11 +243,21 @@ export function GridSessionPane({
     };
   }, []);
   const navigateWorkspace = useCallback(
-    (path: string, options: OpenFileOptions | undefined, apply: () => void) => {
+    (path: string | null, options: OpenFileOptions | undefined, apply: () => void) => {
       if (navigationGuard.current) navigationGuard.current(path, options, apply);
       else apply();
     },
     [],
+  );
+  // Leaving the grid (the shell's Close) asks this cell's viewer about unsaved edits too.
+  const registerShellNavigationGuard = useContext(FileViewerContext)?.registerNavigationGuard;
+  useEffect(
+    () =>
+      registerShellNavigationGuard?.((path, options, navigate) => {
+        if (path === null) navigateWorkspace(null, options, navigate);
+        else navigate();
+      }),
+    [registerShellNavigationGuard, navigateWorkspace],
   );
   const openFile = useCallback(
     (path: string, options?: OpenFileOptions) => {
@@ -302,6 +320,7 @@ export function GridSessionPane({
     () => ({
       openFile,
       registerNavigationGuard,
+      guardFileNavigation: navigateWorkspace,
       openGithubTab: () => {
         selectTab("github");
         onOpenWorkspace();
@@ -469,6 +488,7 @@ export function GridSessionPane({
             <div className={selected && workspacePanel.open ? "contents" : "hidden"}>
               <WorkspacePanel
                 contained
+                keyboardTarget={selected}
                 conversationId={sessionId}
                 sessionHarness={state.sessionHarness}
                 agentId={state.boundAgentId ?? session?.agentId ?? null}

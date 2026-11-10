@@ -72,6 +72,10 @@ from omnigent.native._native_post_delivery import (
     post_may_have_been_delivered,
 )
 from omnigent.native._native_supersession import (
+    clear_replacement_create_body,
+    unfiled_clear_replacement_body,
+)
+from omnigent.native._native_supersession import (
     post_clear_supersession as _post_clear_supersession,
 )
 from omnigent.native.failure_telemetry import (
@@ -3677,16 +3681,13 @@ async def _create_clear_replacement_session(
     )
     labels = labels_for_clear_replacement(labels)
     labels.setdefault(BRIDGE_ID_LABEL_KEY, read_bridge_id(bridge_dir) or old_session_id)
-    carried_fields, moved_alias = clear_replacement_identity(old)
+    # The create body carries title and project; only the alias moves separately.
+    _, moved_alias = clear_replacement_identity(old)
 
-    create_resp = await client.post(
-        "/v1/sessions",
-        json={
-            "agent_id": agent_id,
-            "labels": labels,
-            **carried_fields,
-        },
-    )
+    create_body = clear_replacement_create_body(old, agent_id=agent_id, labels=labels)
+    create_resp = await client.post("/v1/sessions", json=create_body)
+    if (unfiled_body := unfiled_clear_replacement_body(create_body, create_resp)) is not None:
+        create_resp = await client.post("/v1/sessions", json=unfiled_body)
     create_resp.raise_for_status()
     created = _parse_json_response(create_resp, context="clear-replacement session create")
     new_session_id = created.get("id")

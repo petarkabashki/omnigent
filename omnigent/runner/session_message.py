@@ -13,6 +13,7 @@ from omnigent.runner.session_requests import (
     post_on_host,
     session_host_id,
 )
+from omnigent.tools.builtins.session_message import peer_session_messaging_enabled
 
 # ``Role`` or ``project/Role``; anything else that is not a session id is rejected.
 _ALIAS_ADDRESS = re.compile(r"(?:[A-Za-z][A-Za-z0-9._-]*/)?[A-Za-z][A-Za-z0-9_-]{0,31}")
@@ -40,6 +41,8 @@ async def execute_message_tool(
         return json.dumps({"error": "Provide a non-blank message of 1–8000 characters"})
     if client is None or source_id is None:
         return json.dumps({"error": "Session messaging requires an authenticated runner"})
+    if not peer_session_messaging_enabled():
+        return json.dumps({"error": "Messaging other sessions is disabled on this runner"})
     try:
         path = f"/v1/sessions/{target}/events"
         payload = {"type": "session_message", "data": {"message": message}}

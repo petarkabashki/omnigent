@@ -441,13 +441,16 @@ def create_imports_router(
         workspace = resolved_create.body.workspace
         resolved_host_id = resolved_create.body.host_id
         title = (native_title or "").strip() or title_from_items(items)
-        if replace_conversation_id is not None:
-            await conversation_store.delete_conversation(replace_conversation_id)
+        conversation_id = _import_conversation_id(source, external_session_id)
+        if replace_conversation_id == conversation_id:
+            await conversation_store.delete_conversation(
+                conversation_id, preserve_host_binding=resolved_host_id
+            )
             await asyncio.to_thread(
                 release_role_after_lifecycle,
                 conversation_store,
                 project_store,
-                replace_conversation_id,
+                conversation_id,
                 reason="delete",
             )
         try:
@@ -457,7 +460,7 @@ def create_imports_router(
                 agent_id=agent_id,
                 host_id=resolved_host_id,
                 workspace=workspace,
-                conversation_id=_import_conversation_id(source, external_session_id),
+                conversation_id=conversation_id,
                 project_id=resolved_create.project_id,
             )
         except ConversationAlreadyExistsError as exc:
@@ -497,6 +500,15 @@ def create_imports_router(
         except Exception:
             await conversation_store.delete_conversation(conversation.id)
             raise
+        if replace_conversation_id is not None and replace_conversation_id != conversation.id:
+            await conversation_store.delete_conversation(replace_conversation_id)
+            await asyncio.to_thread(
+                release_role_after_lifecycle,
+                conversation_store,
+                project_store,
+                replace_conversation_id,
+                reason="delete",
+            )
         return conversation.id, title
 
     @router.post(
