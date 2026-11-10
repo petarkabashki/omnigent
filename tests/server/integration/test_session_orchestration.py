@@ -2312,6 +2312,18 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     )
     first_row = (await _tool(auth_client, successor, "sys_thread_list"))["threads"][0]
     assert (first_row["counterpart"], first_row["state"]) == ("/Bench", "blocked")
+    # The note line to its own holder is not an unread message.
+    assert (first_row["unread"], first_row["messages"]) == (0, 0)
+    # A side chat that names another thread notes that one and tells nobody.
+    elsewhere = await _tool(
+        auth_client, side, "sys_thread_note", counterpart="/Architect", state="waiting_on_them"
+    )
+    assert elsewhere["thread"]["state"] == "waiting_on_them" and "notified" not in elsewhere
+    assert (await _held_row(auth_client, successor, "/Bench"))["state"] == "blocked"
+    group_note = await _tool(
+        auth_client, side, "sys_thread_note", counterpart="grp_" + "a" * 32, state="done"
+    )
+    assert "sys_thread_post" in group_note["detail"]
     # Reopening the thread returns its side chat instead of forking another.
     reopened = await auth_client.post(
         f"/v1/sessions/{successor['id']}/fork", json={"side_chat": True, "thread": "/Bench"}
