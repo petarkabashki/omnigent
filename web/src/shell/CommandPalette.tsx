@@ -8,6 +8,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClockIcon,
   InboxIcon,
+  MessagesSquareIcon,
   type LucideIcon,
   NetworkIcon,
   PanelLeftIcon,
@@ -207,6 +208,13 @@ export function CommandPalette({
         icon: InboxIcon,
         keywords: ["notifications", "comments", "needs response"],
         run: () => navigate("/inbox"),
+      },
+      {
+        id: "go-threads",
+        label: "Go to Threads",
+        icon: MessagesSquareIcon,
+        keywords: ["group", "roles", "discussion", "conversation"],
+        run: () => navigate("/threads"),
       },
       {
         id: "go-tasks",

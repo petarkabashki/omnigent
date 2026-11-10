@@ -566,6 +566,7 @@ function useActiveNavItem(): {
   isCanvasPage: boolean;
   isTasksPage: boolean;
   isUsagePage: boolean;
+  isThreadsPage: boolean;
   activeExtensionPageId: string | null;
   newSessionProjectName: string | null;
 } {
@@ -587,6 +588,7 @@ function useActiveNavItem(): {
   // match the "tasks" segment by position from the end, not an absolute path.
   const isTasksPage = !isExtensionRoute && (leaf === "tasks" || segments.at(-2) === "tasks");
   const isUsagePage = !isExtensionRoute && leaf === "usage";
+  const isThreadsPage = !isExtensionRoute && (leaf === "threads" || segments.at(-2) === "threads");
   const activeExtensionPageId =
     resolveExtensionPageFromPath(extensions, location.pathname)?.page.id ?? null;
   const isNewSessionRoute =
@@ -596,6 +598,7 @@ function useActiveNavItem(): {
     !isCanvasPage &&
     !isTasksPage &&
     !isUsagePage &&
+    !isThreadsPage &&
     !isExtensionRoute;
   const requestedProject = isNewSessionRoute
     ? new URLSearchParams(location.search).get("project")
@@ -611,6 +614,7 @@ function useActiveNavItem(): {
     isCanvasPage,
     isTasksPage,
     isUsagePage,
+    isThreadsPage,
     activeExtensionPageId,
     newSessionProjectName,
   };
@@ -896,6 +900,7 @@ function SidebarImpl({
     isCanvasPage,
     isTasksPage,
     isUsagePage,
+    isThreadsPage,
     activeExtensionPageId,
     newSessionProjectName,
   } = useActiveNavItem();
@@ -1378,6 +1383,15 @@ function SidebarImpl({
                   )}
                 </Link>
               </Button>
+              <PrimaryNavLink
+                to="/threads"
+                label="Threads"
+                icon={MessagesSquareIcon}
+                active={isThreadsPage}
+                onClick={onNavClick}
+                componentId="sidebar.threads"
+                testId="threads-nav"
+              />
               {canvasEnabled && (
                 <PrimaryNavLink
                   to={canvasDestination.pathname + canvasDestination.search}
