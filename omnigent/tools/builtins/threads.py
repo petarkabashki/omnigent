@@ -78,11 +78,11 @@ class SysThreadHistoryTool(_ThreadTool):
     def description(cls) -> str:
         """Return the LLM-facing description."""
         return (
-            "Read the messages received on one thread, oldest first, from every session "
+            "Read both sides of one thread, oldest first, from every session "
             "that held your role, so history follows the role rather than the session. "
-            "Returns the newest 'limit' (default 50) with session_id, message_id, "
-            "created_at and text. For a group thread key ('grp_…') returns its posts with "
-            "seq, author and text."
+            "Returns the newest 'limit' (default 50) with direction (in, out or owner), "
+            "session_id, message_id, created_at and text. For a group thread key ('grp_…') "
+            "returns its posts with seq, author and text."
         )
 
 

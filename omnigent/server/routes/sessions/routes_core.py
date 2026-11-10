@@ -1990,8 +1990,8 @@ def register_core_routes(
         counterpart: str = Query(...),
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict[str, Any]:
-        """Messages of one thread from every session that held the role."""
-        from omnigent.server.role_threads import thread_history, validate_counterpart
+        """Both sides of one thread, from every session that held either role."""
+        from omnigent.server.role_threads import thread_conversation, validate_counterpart
 
         user_id = _require_user(request, auth_provider)
 
@@ -1999,7 +1999,9 @@ def register_core_routes(
             _, holder, _ = _thread_holder(request, user_id)
             key = validate_counterpart(counterpart)
             fresh = conversation_store.get_conversation(holder.id) or holder
-            rows = thread_history(conversation_store, fresh, key, user_id=user_id, limit=limit)
+            rows = thread_conversation(
+                conversation_store, fresh, key, user_id=user_id, limit=limit
+            )
             return {"counterpart": key, "messages": rows}
 
         return await asyncio.to_thread(_history)
@@ -2214,9 +2216,11 @@ def register_core_routes(
 
         An agent call (orchestration header) parks on an owner approval first.
         """
+        from omnigent.server.role_threads import fold_session_threads
         from omnigent.server.session_aliases import (
             namespace_for_session,
             role_handle,
+            session_handle,
             set_session_alias,
             validate_alias,
         )
@@ -2250,6 +2254,11 @@ def register_core_routes(
             set_session_alias(
                 conversation_store, project_store, session=session, user_id=user_id, alias=alias
             )
+            fresh = conversation_store.get_conversation(session_id) or session
+            handle = session_handle(fresh, project_store, user_id)
+            if handle:
+                # Sends that reached it before it took the role join the role's thread.
+                fold_session_threads(conversation_store, session_id, handle, user_id=user_id)
             return _alias_entry(session, user_id)
 
         return await asyncio.to_thread(_set)

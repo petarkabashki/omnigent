@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Any
 
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
@@ -36,6 +36,7 @@ THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "waiting_on_owner",
 OWNER_SENDER = "owner"  # sender name on a message the owner posted into a thread
 COUNTERPART_MAX_LEN = 200
 
+_SCAN_PAGES = 100  # newest 10,000 messages per session
 _INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z0-9_]+)")
 _THREAD_TAG = re.compile(r"^\[Message from [^\n]*?\] \[thread ([^\]\n]+)\]\n", re.ASCII)
 _URGENT_STATES = {"waiting_on_owner": 0, "blocked": 0, "waiting_on_us": 1}
@@ -487,23 +488,51 @@ def _role_sessions(
     return sessions
 
 
-def _tagged_messages(
-    store: ConversationStore, session_ids: Iterable[str], counterpart: str
+def _thread_keys(store: ConversationStore, counterpart: str, user_id: str | None) -> set[str]:
+    """Keys one counterpart's messages carry: its handle and, for a role,
+    ``session:<id>`` of each session that held it (sends that reached it before it took it).
+
+    A session that later released the role still contributes all its ``session:<id>`` rows.
+    """
+    keys = {counterpart}
+    if not counterpart.startswith("session:"):
+        keys.update(f"session:{sid}" for sid in _role_sessions(store, counterpart, user_id))
+    return keys
+
+
+def _scan_messages(
+    store: ConversationStore,
+    session_ids: Iterable[str],
+    matches: Callable[[str], bool],
+    limit: int,
 ) -> list[dict[str, Any]]:
-    """Messages in ``session_ids`` delivered with the ``[thread counterpart]`` tag."""
+    """Up to ``limit`` newest messages per session whose text ``matches``, oldest first."""
     found: list[dict[str, Any]] = []
     for session_id in session_ids:
         cursor: str | None = None
-        for _ in range(20):
-            page = store.list_items(session_id, limit=100, after=cursor, type="message")
+        hits = 0
+        newest_first: list[dict[str, Any]] = []
+        for _ in range(_SCAN_PAGES):
+            page = store.list_items(
+                session_id, limit=100, after=cursor, order="desc", type="message"
+            )
             for item in page.data:
                 text = _item_text(item.data)
-                if text is not None and thread_of_header(text) == counterpart:
-                    found.append(_history_row(session_id, item.id, item.created_at, text))
-            if not page.has_more:
+                if text is not None and matches(text):
+                    newest_first.append(_history_row(session_id, item.id, item.created_at, text))
+                    hits += 1
+            if hits >= limit or not page.has_more:
                 break
             cursor = page.last_id
+        found.extend(reversed(newest_first))
     return found
+
+
+def _tagged_messages(
+    store: ConversationStore, session_ids: Iterable[str], keys: Collection[str], limit: int
+) -> list[dict[str, Any]]:
+    """Messages in ``session_ids`` delivered with a ``[thread <key>]`` tag for any of ``keys``."""
+    return _scan_messages(store, session_ids, lambda text: thread_of_header(text) in keys, limit)
 
 
 def thread_history(
@@ -524,7 +553,8 @@ def thread_history(
     if role:
         for session_id, session in _role_sessions(store, role, user_id).items():
             sessions.setdefault(session_id, session)
-    found = _tagged_messages(store, sessions, counterpart)
+    keys = _thread_keys(store, counterpart, user_id)
+    found = _tagged_messages(store, sessions, keys, limit)
     found.sort(key=lambda row: row["created_at"])
     return found[-limit:]
 
@@ -538,18 +568,33 @@ def thread_conversation(
     limit: int,
 ) -> list[dict[str, Any]]:
     """
-    Both sides of a thread, oldest first, each row tagged ``direction`` ``in`` or ``out``.
+    Both sides of a thread, oldest first, each row tagged ``direction`` ``in``, ``out``
+    or ``owner``.
 
-    Sent messages are found where they were delivered: tagged with the holder's role
-    on the counterpart role's sessions. A counterpart that holds no role (``session:<id>``)
-    has no tagged copies, so only its inbound side is shown.
+    Sent messages are read where they were delivered: on the counterpart role's sessions,
+    tagged with the holder's role; on an unroled ``session:<id>``, by the sender header.
     """
     inbound = thread_history(store, holder, counterpart, user_id=user_id, limit=limit)
     rows = [{**row, "direction": "in"} for row in inbound]
     role = holder.labels.get(THREAD_ROLE_LABEL)
-    if role and not counterpart.startswith("session:"):
+    if role and counterpart.startswith("session:"):
+        prefix = f"[Message from {role} ("
+        rows += [
+            {**row, "direction": "out"}
+            for row in _scan_messages(
+                store,
+                [counterpart.removeprefix("session:")],
+                lambda text: text.startswith(prefix) and thread_of_header(text) is None,
+                limit,
+            )
+        ]
+    elif role:
         receivers = _role_sessions(store, counterpart, user_id)
-        rows += [{**row, "direction": "out"} for row in _tagged_messages(store, receivers, role)]
+        sent_keys = _thread_keys(store, role, user_id)
+        rows += [
+            {**row, "direction": "out"}
+            for row in _tagged_messages(store, receivers, sent_keys, limit)
+        ]
     # An owner post reaches both sides; show it once, as the owner's.
     seen_owner_posts: set[str] = set()
     merged: list[dict[str, Any]] = []
@@ -561,6 +606,67 @@ def thread_conversation(
             row = {**row, "direction": OWNER_SENDER}
         merged.append(row)
     return merged[-limit:]
+
+
+_SUM_FIELDS = ("n", "unread")
+_NEWER_FIELDS = ("state", "sum", "last", "at")
+
+
+def fold_session_thread(
+    store: ConversationStore, holder_id: str, session_id: str, handle: str
+) -> bool:
+    """Merge the holder's ``session:<id>`` row into the ``handle`` row; ``True`` if one moved.
+
+    Counts add up and the newer row's state and summary win; loop counters and a held
+    message stay with the handle row when it has them. The source row is removed, so
+    folding twice counts nothing twice.
+    """
+    holder = store.get_conversation(holder_id)
+    if holder is None:
+        return False
+    source_key = f"session:{session_id}"
+    source = _row_fields(holder.labels, source_key)
+    if "cp" not in source or source_key == handle:
+        return False
+    target = _row_fields(holder.labels, handle)
+    merged = dict(source) if "cp" not in target else dict(target)
+    if "cp" in target:
+        for field in _SUM_FIELDS:
+            merged[field] = str(_to_int(target.get(field)) + _to_int(source.get(field)))
+        if _to_int(source.get("at")) > _to_int(target.get("at")):
+            merged.update({f: source[f] for f in _NEWER_FIELDS if f in source})
+        if "held_to" not in target and "held_to" in source:
+            merged.update(
+                {f: v for f, v in source.items() if f in _HELD_FIELDS or f.startswith("heldtext_")}
+            )
+    merged["cp"] = handle
+    store.set_labels(holder_id, {_label(handle, field): value for field, value in merged.items()})
+    for field in source:
+        store.delete_label(holder_id, _label(source_key, field))
+    return True
+
+
+def fold_session_threads(
+    store: ConversationStore, session_id: str, handle: str, *, user_id: str | None
+) -> int:
+    """A session took ``handle``: fold every holder's ``session:<id>`` row for it.
+
+    The session is marked as having held the role, so history finds what it was sent.
+    """
+    store.set_labels(session_id, {THREAD_ROLE_LABEL: handle})
+    cp_label = _label(f"session:{session_id}", "cp")
+    folded = 0
+    after: str | None = None
+    for _ in range(20):
+        page = store.list_conversations(
+            limit=100, after=after, owned_by=user_id, has_label=cp_label, kind=None
+        )
+        for session in page.data:
+            folded += fold_session_thread(store, session.id, session_id, handle)
+        if not page.has_more:
+            break
+        after = page.last_id
+    return folded
 
 
 def _item_text(data: Any) -> str | None:

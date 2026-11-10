@@ -2125,7 +2125,10 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     }
     assert rows["/Architect"]["state"] == "waiting_on_them" and rows["/Architect"]["unread"] == 0
     history = await _tool(auth_client, product, "sys_thread_history", counterpart="/Architect")
-    assert [m["text"] for m in history["messages"]] == ["Plan the API"]
+    assert [(m["direction"], m["text"]) for m in history["messages"]] == [
+        ("in", "Plan the API"),
+        ("out", "Draft ready"),
+    ]
     assert history["messages"][0]["message_id"].startswith("msg_")
 
     # The owner's thread view shows both sides; sends are read from the receiver.
@@ -2142,6 +2145,19 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     )
     assert unroled.status_code == 400
 
+    # Taking a role folds the sends made before it into the role's thread, counted once.
+    assert (
+        await auth_client.put(f"/v1/sessions/{other['id']}/alias", json={"alias": "Builder"})
+    ).status_code == 200
+    rows = {
+        r["counterpart"]: r
+        for r in (await _tool(auth_client, product, "sys_thread_list"))["threads"]
+    }
+    assert set(rows) == {"/Architect", "/Builder"} and rows["/Builder"]["messages"] == 1
+    early = await _tool(auth_client, product, "sys_thread_history", counterpart="/Builder")
+    assert [m["text"] for m in early["messages"]] == ["Hello from nowhere"]
+    assert (await auth_client.delete(f"/v1/sessions/{other['id']}/alias")).status_code == 204
+
     # History follows the role to a new holder session.
     successor = await _create_session_as(auth_client, "", "alice")
     _bind_runner(db_uri, successor["id"])
@@ -2152,7 +2168,7 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
         await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
     ).status_code == 200
     moved = await _tool(auth_client, successor, "sys_thread_history", counterpart="/Architect")
-    assert [m["text"] for m in moved["messages"]] == ["Plan the API"]
+    assert [m["text"] for m in moved["messages"]] == ["Plan the API", "Draft ready"]
     assert moved["messages"][0]["session_id"] == product["id"]
 
     # A duplicate message_id is acknowledged once and delivered once.

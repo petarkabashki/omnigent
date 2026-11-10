@@ -1604,6 +1604,7 @@ def register_events_routes(
             )
             from omnigent.server.role_threads import (
                 THREAD_OF_LABEL,
+                fold_session_thread,
                 guard_outbound,
                 hold_message,
                 holds_role,
@@ -1688,6 +1689,14 @@ def register_events_routes(
                 return {"queued": False, "duplicate": True}
             if thread_key is not None and not to_own_holder:
                 schedule_inbound_classification(conv.id, thread_key, peer_message_id, peer_text)
+            if thread_key is not None and thread_key == sender_handle:
+                await asyncio.to_thread(
+                    fold_session_thread, conversation_store, conv.id, speaker.id, thread_key
+                )
+            if holds_role(speaker) and target_handle:
+                await asyncio.to_thread(
+                    fold_session_thread, conversation_store, speaker.id, conv.id, target_handle
+                )
             if holds_role(speaker):
                 await asyncio.to_thread(
                     record_outbound,
