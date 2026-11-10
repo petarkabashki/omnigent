@@ -2047,8 +2047,9 @@ def register_core_routes(
     async def note_role_thread(request: Request, body: ThreadNoteRequest) -> dict[str, Any]:
         """Set a thread's state or summary on the role holder; ``sys_thread_note`` calls this.
 
-        A side chat opened for a thread notes its own thread; the reply names the
-        holder session so the runner can send the holder a summary line.
+        A side chat notes its own thread unless it names another; noting its own thread
+        returns the holder session so the runner can send the holder a summary line.
+        Group threads are summarized with ``sys_thread_post``, not noted here.
         """
         from omnigent.server.role_threads import note_thread, validate_counterpart
 
@@ -2056,11 +2057,18 @@ def register_core_routes(
 
         def _note() -> dict[str, Any]:
             _, holder, bound = _thread_holder(request, user_id)
-            key = bound or validate_counterpart(body.counterpart)
+            key = validate_counterpart(body.counterpart if body.counterpart else bound)
+            if key.startswith("grp_"):
+                raise OmnigentError(
+                    f"{key} is a group thread; set its summary with "
+                    "sys_thread_post(thread=..., summary=...)",
+                    code=ErrorCode.INVALID_INPUT,
+                )
             row = note_thread(
                 conversation_store, holder, key, state=body.state, summary=body.summary
             )
-            return {"thread": row, "notify_session_id": holder.id if bound else None}
+            own = bound is not None and key == bound
+            return {"thread": row, "notify_session_id": holder.id if own else None}
 
         return await asyncio.to_thread(_note)
 

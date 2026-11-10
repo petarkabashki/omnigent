@@ -1603,6 +1603,7 @@ def register_events_routes(
                 target_id=session_id,
             )
             from omnigent.server.role_threads import (
+                THREAD_NOTE_PREFIX,
                 THREAD_OF_LABEL,
                 guard_outbound,
                 hold_message,
@@ -1683,6 +1684,12 @@ def register_events_routes(
                 peer_text,
                 hops if verdict is not None else 1,
                 keep_state=to_own_holder,
+                # A side chat's note line tells its holder, but is not a new message.
+                count=not (
+                    to_own_holder
+                    and isinstance(peer_text, str)
+                    and peer_text.startswith(THREAD_NOTE_PREFIX)
+                ),
                 verdict=verdict,
             ):
                 return {"queued": False, "duplicate": True}

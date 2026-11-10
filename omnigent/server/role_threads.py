@@ -50,6 +50,9 @@ def _label(counterpart: str, field: str) -> str:
     return f"thread.{thread_hash(counterpart)}.{field}"
 
 
+THREAD_NOTE_PREFIX = "[thread note] "  # a side chat's note line to its own holder
+
+
 def validate_counterpart(value: object) -> str:
     """A counterpart key that is safe to put in a header and a label value."""
     if (
@@ -285,12 +288,14 @@ def record_inbound(
     hops: int,
     *,
     keep_state: bool = False,
+    count: bool = True,
     verdict: GuardVerdict | None = None,
     now: int | None = None,
 ) -> bool:
     """Update the holder's index for a delivered message; ``False`` for a duplicate id.
 
-    ``keep_state`` leaves state and summary as the thread's side chat noted them.
+    ``keep_state`` leaves state and summary as the thread's side chat noted them;
+    ``count=False`` leaves the message and unread counts alone.
     """
     fields = _row_fields(store.get_conversation(holder.id).labels, counterpart)  # type: ignore[union-attr]
     if message_id and fields.get("last") == message_id:
@@ -307,6 +312,8 @@ def record_inbound(
     updates.update(_guard_labels(counterpart, verdict, recent=False))
     if keep_state:
         del updates[_label(counterpart, "state")], updates[_label(counterpart, "sum")]
+    if not count:
+        del updates[_label(counterpart, "unread")], updates[_label(counterpart, "n")]
     if message_id:
         updates[_label(counterpart, "last")] = message_id
     if holder_handle:

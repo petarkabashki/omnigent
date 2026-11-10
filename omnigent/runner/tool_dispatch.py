@@ -5434,9 +5434,10 @@ async def _thread_via_rest(
     holder_id = payload.get("notify_session_id") if tool_name == "sys_thread_note" else None
     if holder_id:
         from omnigent.runner.session_message import execute_message_tool
+        from omnigent.server.role_threads import THREAD_NOTE_PREFIX
 
         row = payload["thread"]
-        line = f"[thread note] {row['state']}: {row['summary']}"
+        line = f"{THREAD_NOTE_PREFIX}{row['state']}: {row['summary']}"
         payload["notified"] = json.loads(
             await execute_message_tool(
                 {"session_id": holder_id, "message": line}, server_client, conversation_id
