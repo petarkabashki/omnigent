@@ -22,6 +22,19 @@ Tripped = Literal["loop", "burst"]
 _HEADER_LINE = re.compile(r"^\[Message from [^\n]*\](?: \[thread [^\]\n]+\])?$")
 
 
+def limit_reached(
+    tripped: Tripped,
+    *,
+    max_hops: int = MAX_HOPS,
+    burst_hops: int = BURST_HOPS,
+    window_seconds: int = HOP_RESET_SECONDS,
+) -> str:
+    """The limit a refused message hit, worded for the sender."""
+    if tripped == "loop":
+        return f"the loop limit ({max_hops} short or repeated messages without a pause)"
+    return f"the message backstop ({burst_hops} messages in {window_seconds // 60} minutes)"
+
+
 def message_digest(text: str) -> str:
     """Short hash of a message body: headers dropped, lowercased, whitespace collapsed."""
     lines = [line for line in text.splitlines() if not _HEADER_LINE.match(line.strip())]

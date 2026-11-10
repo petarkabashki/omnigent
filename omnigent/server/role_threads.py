@@ -17,11 +17,10 @@ from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.loop_guard import (
-    BURST_HOPS,
     HOP_RESET_SECONDS,
-    MAX_HOPS,
     GuardVerdict,
     evaluate,
+    limit_reached,
 )
 from omnigent.server import reply_classifier, session_live_state
 from omnigent.stores.conversation_store import (
@@ -169,11 +168,7 @@ def loop_guard_error(
     verdict: GuardVerdict, sender_key: str, counterpart: str, *, replaced: bool
 ) -> OmnigentError:
     """The error a sender gets when its message was held for the owner."""
-    limit = (
-        f"the loop limit ({MAX_HOPS} short or repeated messages without a pause)"
-        if verdict.tripped == "loop"
-        else f"the message backstop ({BURST_HOPS} messages in {HOP_RESET_SECONDS // 60} minutes)"
-    )
+    limit = limit_reached(verdict.tripped or "loop")
     return OmnigentError(
         f"Thread loop guard: held for the owner. {sender_key} \u2194 {counterpart} hit {limit}. "
         "Don't resend; the owner will release it. The count resets after "

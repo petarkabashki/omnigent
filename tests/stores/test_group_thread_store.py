@@ -60,8 +60,12 @@ def test_agent_posts_past_the_cap_are_refused_until_the_owner_posts(
     _post(threads, thread.id, "role")
     _post(threads, thread.id, "role")
 
-    with pytest.raises(GroupThreadLoopGuardError, match="ask the owner"):
+    with pytest.raises(GroupThreadLoopGuardError) as refused:
         _post(threads, thread.id, "role")
+    message = str(refused.value)
+    assert 'omnigent/Product in group thread "t"' in message
+    assert "the loop limit (2 short or repeated messages without a pause)" in message
+    assert "resets after 10 quiet minutes or an owner post" in message
     assert threads.get(thread.id, user_id=OWNER).last_seq == 2  # type: ignore[union-attr]
 
     _post(threads, thread.id, "owner")

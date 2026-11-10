@@ -30,7 +30,7 @@ from omnigent.entities.group_thread import (
     MemberKind,
 )
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.loop_guard import BURST_HOPS, evaluate, message_digest
+from omnigent.loop_guard import BURST_HOPS, evaluate, limit_reached, message_digest
 
 _STATES = {"open": 1, "done": 2}
 _MEMBER_KINDS: dict[MemberKind, int] = {"role": 1, "session": 2}
@@ -322,15 +322,16 @@ class SqlAlchemyGroupThreadStore:
                 )
                 hops = verdict.hops
                 if verdict.tripped:
+                    limit = limit_reached(
+                        verdict.tripped,
+                        max_hops=max_hops,
+                        window_seconds=hop_reset_seconds,
+                    )
                     raise GroupThreadLoopGuardError(
-                        "Thread loop guard: "
-                        + (
-                            f"{max_hops} short or repeated agent posts in this group without "
-                            if verdict.tripped == "loop"
-                            else f"{BURST_HOPS} agent posts in {hop_reset_seconds // 60} minutes "
-                            "without "
-                        )
-                        + "the owner posting. Stop posting and ask the owner.",
+                        f"Thread loop guard: refused, not posted. {author_ref} in group thread "
+                        f'"{row.title}" hit {limit}. Don\'t resend; ask the owner to post in '
+                        f"the thread. The count resets after {hop_reset_seconds // 60} quiet "
+                        "minutes or an owner post.",
                         code=ErrorCode.CONFLICT,
                     )
             seq = row.last_seq + 1
