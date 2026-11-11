@@ -288,3 +288,27 @@ def test_apply_session_role_uses_the_overlay_label(
     )
 
     assert applied.instructions is not None and applied.instructions.endswith("bench text")
+
+
+def test_a_fork_is_told_it_does_not_hold_its_parents_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    labels = {
+        "omnigent.fork.of": "abc",
+        "omnigent.fork.of_title": "Architect",
+        "omnigent.fork.of_role": "forthkit/Architect",
+        "thread.of": "grp_1",
+    }
+    marked = apply_session_role(_spec(), labels, None)
+    assert marked.instructions is not None
+    assert 'fork of "Architect" (session abc)' in marked.instructions
+    assert "does not hold the role forthkit/Architect" in marked.instructions
+    assert marked.instructions.endswith("It answers thread grp_1 only.")
+    assert apply_session_role(marked, labels, None) is marked  # not added twice
+    # A side chat made before the parent was recorded is still marked, without a role.
+    legacy = apply_session_role(_spec(), {"omnigent.side_chat.source_id": "abc"}, None)
+    assert legacy.instructions is not None
+    assert legacy.instructions.endswith(
+        "This session is a fork of session abc; it is not that session."
+    )

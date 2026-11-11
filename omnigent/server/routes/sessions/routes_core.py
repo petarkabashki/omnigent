@@ -5460,6 +5460,21 @@ def register_core_routes(
                 )
             extra_labels[_CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY] = "1"
 
+        # Every fork names its parent, so it can be told it does not hold the parent's role.
+        from omnigent.server.session_aliases import session_handle
+        from omnigent.stores.conversation_store import (
+            FORK_OF_LABEL_KEY,
+            FORK_OF_ROLE_LABEL_KEY,
+            FORK_OF_TITLE_LABEL_KEY,
+        )
+
+        extra_labels[FORK_OF_LABEL_KEY] = source_id
+        if source.title:
+            extra_labels[FORK_OF_TITLE_LABEL_KEY] = source.title[:200]
+        source_role = await asyncio.to_thread(session_handle, source, project_store, user_id)
+        if source_role:
+            extra_labels[FORK_OF_ROLE_LABEL_KEY] = source_role
+
         # Side chats use the source for shared-runner routing and stay hidden
         # from the sidebar while appearing in the Workspace rail.
         opened_thread: str | None = None

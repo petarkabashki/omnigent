@@ -433,6 +433,14 @@ def apply_role_overlay(spec: AgentSpec, overlay: RoleOverlay) -> AgentSpec:
 def apply_session_role(
     spec: AgentSpec, labels: Mapping[str, str] | None, workspace: str | None
 ) -> AgentSpec:
-    """Overlay the role the session's labels name, if any."""
+    """Overlay the role the session's labels name, if any, and mark a fork as one."""
+    from omnigent.runtime.prompt import append_framework_instructions, fork_identity_instruction
+
     overlay = load_session_role_overlay(labels, workspace)
-    return apply_role_overlay(spec, overlay) if overlay is not None else spec
+    spec = apply_role_overlay(spec, overlay) if overlay is not None else spec
+    fork_line = fork_identity_instruction(labels)
+    if fork_line is None or fork_line in (spec.instructions or ""):
+        return spec
+    return dataclasses.replace(
+        spec, instructions=append_framework_instructions(spec.instructions, [fork_line])
+    )

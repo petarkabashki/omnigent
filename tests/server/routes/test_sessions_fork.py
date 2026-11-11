@@ -1822,6 +1822,8 @@ async def test_fork_codex_bypass_stamps_label_on_codex_target(
     assert extra == {
         "omnigent.codex_native.bypass_sandbox": "1",
         "omnigent.client_surface": "web",
+        "omnigent.fork.of": "e9f8f58523cec9a57d3bdf93be543e8c",
+        "omnigent.fork.of_title": "Source Chat",
     }, f"bypass opt-in must stamp the codex bypass label, got {extra!r}"
 
 
@@ -2385,6 +2387,8 @@ async def test_fork_managed_launches_its_requested_host_id(
     assert conv_store.fork_calls[0]["extra_labels"] == {
         REQUESTED_HOST_ID_LABEL_KEY: host_id,
         "omnigent.client_surface": "web",
+        "omnigent.fork.of": "e9f8f58523cec9a57d3bdf93be543e8c",
+        "omnigent.fork.of_title": "Source Chat",
     }
     assert conv_store.label_writes == [(body["id"], {REQUESTED_HOST_ID_LABEL_KEY: host_id})]
 

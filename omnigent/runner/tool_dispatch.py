@@ -7154,6 +7154,57 @@ async def _close_tree_scope_error(
     return None
 
 
+def _is_self_or_own_fork(target_snap: _JsonObject, target_id: str, caller_id: str) -> bool:
+    """Whether the close target is the caller itself or a fork the caller made."""
+    from omnigent.stores.conversation_store import (
+        FORK_OF_LABEL_KEY,
+        FORK_SOURCE_LABEL_KEY,
+        SIDE_CHAT_SOURCE_LABEL_KEY,
+    )
+
+    if target_id == caller_id:
+        return True
+    labels = target_snap.get("labels")
+    if not isinstance(labels, dict):
+        return False
+    return any(
+        labels.get(key) == caller_id
+        for key in (FORK_OF_LABEL_KEY, SIDE_CHAT_SOURCE_LABEL_KEY, FORK_SOURCE_LABEL_KEY)
+    )
+
+
+async def _archive_own_session(
+    target_snap: _JsonObject,
+    target_id: str,
+    caller_id: str,
+    server_client: httpx.AsyncClient,
+) -> str:
+    """Archive the caller or its own fork; a session holding a role must release it first."""
+    labels = target_snap.get("labels")
+    alias = labels.get(ALIAS_LABEL_KEY) if isinstance(labels, dict) else None
+    if alias:
+        return json.dumps(
+            {
+                "error": "session_holds_role",
+                "conversation_id": target_id,
+                "message": f"holds {alias}; release it first with sys_role_release",
+            }
+        )
+    try:
+        patch = await server_client.patch(
+            f"{_session_url(target_id)}",
+            json={"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}, "archived": True},
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"sys_session_close failed: {exc}"})
+    if patch.status_code != 200:
+        return json.dumps({"error": f"sys_session_close returned {patch.status_code}"})
+    return json.dumps(
+        {"closed": True, "conversation_id": target_id, "self": target_id == caller_id}
+    )
+
+
 async def _session_close_via_rest(
     args: _JsonObject,
     conversation_id: str,
@@ -7197,6 +7248,8 @@ async def _session_close_via_rest(
     target_snap = await _fetch_close_target(target_id, server_client)
     if isinstance(target_snap, str):
         return target_snap
+    if _is_self_or_own_fork(target_snap, target_id, conversation_id):
+        return await _archive_own_session(target_snap, target_id, conversation_id, server_client)
     scope_error = await _close_tree_scope_error(
         target_snap, conversation_id, target_id, server_client
     )

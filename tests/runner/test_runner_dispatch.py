@@ -7686,6 +7686,62 @@ async def test_session_close_patches_tombstoned_title() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_id", "labels", "expected"),
+    [
+        ("conv_caller", {}, {"closed": True, "conversation_id": "conv_caller", "self": True}),
+        (
+            "conv_fork",
+            {"omnigent.fork.of": "conv_caller"},
+            {"closed": True, "conversation_id": "conv_fork", "self": False},
+        ),
+        (
+            "conv_caller",
+            {"omnigent.alias": "Architect"},
+            {
+                "error": "session_holds_role",
+                "conversation_id": "conv_caller",
+                "message": "holds Architect; release it first with sys_role_release",
+            },
+        ),
+    ],
+)
+async def test_session_close_archives_self_or_own_fork_unless_it_holds_a_role(
+    target_id: str, labels: dict[str, str], expected: dict[str, Any]
+) -> None:
+    """A top-level session may close itself or its fork; a role holder releases first."""
+    from omnigent.runner.tool_dispatch import _execute_session_query_tool
+
+    patched: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == f"/v1/sessions/{target_id}":
+            return httpx.Response(
+                200,
+                json={"id": target_id, "title": "Fork of Architect", "labels": labels},
+            )
+        if request.method == "PATCH" and request.url.path == f"/v1/sessions/{target_id}":
+            patched.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": target_id})
+        raise AssertionError(f"unexpected {request.method} {request.url.path}")
+
+    async with _session_query_client(handler) as client:
+        out = json.loads(
+            await _execute_session_query_tool(
+                "sys_session_close",
+                json.dumps({"conversation_id": target_id}),
+                conversation_id="conv_caller",
+                server_client=client,
+            )
+        )
+    assert out == expected
+    if "error" in expected:
+        assert patched == {}
+    else:
+        assert patched == {"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}, "archived": True}
+
+
+@pytest.mark.asyncio
 async def test_session_close_rejects_out_of_tree_target_without_patch() -> None:
     """
     ``sys_session_close`` refuses a target in a different spawn tree and
@@ -7746,8 +7802,8 @@ async def test_session_close_rejects_top_level_target() -> None:
     when it shares the caller's root, and issues no PATCH.
 
     A top-level session in the caller's own tree (its root) has no
-    ``parent_session_id``; close only operates on sub-agents, so the
-    tool returns ``session_not_a_sub_agent``.
+    ``parent_session_id``; apart from the caller itself and its forks, close
+    only operates on sub-agents, so the tool returns ``session_not_a_sub_agent``.
     """
     from omnigent.runner.tool_dispatch import _execute_session_query_tool
 
@@ -7765,6 +7821,10 @@ async def test_session_close_rejects_top_level_target() -> None:
                     "parent_session_id": None,
                 },
             )
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_caller":
+            return httpx.Response(
+                200, json={"id": "conv_caller", "root_conversation_id": "conv_root"}
+            )
         if request.method == "PATCH":
             patched = True
             return httpx.Response(200, json={"id": "conv_root"})
@@ -7775,8 +7835,8 @@ async def test_session_close_rejects_top_level_target() -> None:
             await _execute_session_query_tool(
                 "sys_session_close",
                 json.dumps({"conversation_id": "conv_root"}),
-                # Caller IS conv_root, so its self-snapshot is the same row.
-                conversation_id="conv_root",
+                # A sub-agent of conv_root may not close its root (closing itself is allowed).
+                conversation_id="conv_caller",
                 server_client=client,
             )
         )

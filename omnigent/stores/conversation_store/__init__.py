@@ -62,6 +62,12 @@ class ProjectSessionSweep:
 # the SQLAlchemy store both import it.
 FORK_SOURCE_LABEL_KEY = "omnigent.fork.source_id"
 
+# Every fork's parent: its id, its title, and the role it held, if any. The
+# runner tells a fork it does not hold that role (see omnigent.runtime.prompt).
+FORK_OF_LABEL_KEY = "omnigent.fork.of"
+FORK_OF_TITLE_LABEL_KEY = "omnigent.fork.of_title"
+FORK_OF_ROLE_LABEL_KEY = "omnigent.fork.of_role"
+
 # One-shot fork directive: the SOURCE session's runtime-native session id
 # (e.g. the source claude-native Claude Code session uuid), stamped on the
 # clone at fork time when the source had one. A native harness launching
@@ -303,9 +309,14 @@ _FORK_ONLY_DROPPED_LABEL_KEYS = IMPORT_PROVENANCE_LABEL_KEYS | {
     SCHEDULED_TASK_SOURCE_LABEL_KEY,
     SIDE_CHAT_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
+    FORK_OF_LABEL_KEY,
+    FORK_OF_TITLE_LABEL_KEY,
+    FORK_OF_ROLE_LABEL_KEY,
     _SANDBOX_REPO_LABEL_KEY,
     _SANDBOX_REQUESTED_HOST_ID_LABEL_KEY,
 }
+# The role holder's thread index (``thread.*``) stays with the holder.
+FORK_DROPPED_LABEL_PREFIX = "thread."
 
 
 @dataclass(frozen=True)

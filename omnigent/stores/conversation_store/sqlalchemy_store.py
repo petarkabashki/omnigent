@@ -103,6 +103,7 @@ from omnigent.stores.conversation_store import (
     ARCHIVED_AT_LABEL_KEY,
     FAMILY_PIN_LABEL_PREFIX,
     FORK_CARRY_HISTORY_LABEL_KEY,
+    FORK_DROPPED_LABEL_PREFIX,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
     FORK_SOURCE_LABEL_KEY,
     MAX_PENDING_INPUTS,
@@ -6970,6 +6971,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     presentation_labels=presentation_labels,
                 ).items()
                 if not key.startswith(PROFILE_LABEL_PREFIX)
+                and not key.startswith(FORK_DROPPED_LABEL_PREFIX)
                 and not key.startswith(f"{PINNED_LABEL_KEY}.")
                 and not key.startswith(FAMILY_PIN_LABEL_PREFIX)
                 and not key.startswith(f"{_SANDBOX_REPO_LABEL_KEY}.")

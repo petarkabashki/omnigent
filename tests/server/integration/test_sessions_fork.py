@@ -202,7 +202,13 @@ async def test_fork_preserves_labels(
 
     # Labels should be inherited from source — fork_conversation
     # copies labels in its transaction.
-    assert fork["labels"] == {"env": "prod", "team": "ml", "omnigent.client_surface": "cli"}, (
+    assert fork["labels"] == {
+        "env": "prod",
+        "team": "ml",
+        "omnigent.client_surface": "cli",
+        "omnigent.fork.of": session["id"],
+        "omnigent.fork.of_title": "Original",
+    }, (
         f"Fork labels should match source labels, "
         f"got {fork['labels']!r}. If empty, fork_conversation is "
         "not copying labels from the source."

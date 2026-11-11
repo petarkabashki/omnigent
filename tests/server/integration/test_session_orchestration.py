@@ -2315,6 +2315,9 @@ async def test_role_threads_index_history_guard_and_owner_thread(auth_client, pe
     assert labels["thread.of"] == "/Bench" and not [
         k for k in labels if k.startswith("thread.") and k != "thread.of"
     ]
+    # The side chat names its parent and the role it does not hold.
+    assert labels["omnigent.fork.of"] == successor["id"]
+    assert labels["omnigent.fork.of_role"].endswith("/Product")
     assert {
         r["counterpart"]: r["state"]
         for r in (await _tool(auth_client, successor, "sys_thread_list"))["threads"]

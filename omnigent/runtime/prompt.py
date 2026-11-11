@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from omnigent.entities import (
@@ -57,6 +57,45 @@ EMBEDDED_BROWSER_PRIORITY_INSTRUCTION = (
     "is unavailable (its tools fail because no Omnigent app window is "
     "attached) or for non-interactive bulk fetching."
 )
+
+
+def fork_identity_instruction(labels: Mapping[str, str] | None) -> str | None:
+    """Tell a fork which session it came from and that it does not hold that session's role.
+
+    A fork carries its parent's history, so after a compaction it can take
+    itself for the parent; this line keeps it from acting as the role holder.
+    """
+    from omnigent.stores.conversation_store import (
+        FORK_OF_LABEL_KEY,
+        FORK_OF_ROLE_LABEL_KEY,
+        FORK_OF_TITLE_LABEL_KEY,
+        FORK_SOURCE_LABEL_KEY,
+        SIDE_CHAT_SOURCE_LABEL_KEY,
+    )
+
+    labels = labels or {}
+    # Forks made before the parent was recorded still name it in a routing label.
+    parent_id = (
+        labels.get(FORK_OF_LABEL_KEY)
+        or labels.get(SIDE_CHAT_SOURCE_LABEL_KEY)
+        or labels.get(FORK_SOURCE_LABEL_KEY)
+    )
+    if not parent_id:
+        return None
+    title = labels.get(FORK_OF_TITLE_LABEL_KEY)
+    parent = f'"{title}" (session {parent_id})' if title else f"session {parent_id}"
+    text = f"This session is a fork of {parent}; it is not that session."
+    role = labels.get(FORK_OF_ROLE_LABEL_KEY)
+    if role:
+        text += (
+            f" It does not hold the role {role}; session {parent_id} does. Do not act as"
+            f" {role} beyond this conversation: no plan steps, owner asks or instructions"
+            " to other sessions on its behalf."
+        )
+    thread = labels.get("thread.of")
+    if thread:
+        text += f" It answers thread {thread} only."
+    return text
 
 
 def _framework_instructions_for(spec: AgentSpec) -> list[str]:
