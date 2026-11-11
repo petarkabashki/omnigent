@@ -79,6 +79,7 @@ async def test_stale_unread_thread_gets_one_reminder(harness: Harness) -> None:
         f"[Message from hub (reminder {NOW})] [thread Product]\n2 messages from"
     )
     holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
     view = role_threads.thread_conversation(
         harness.store, holder, "Product", user_id=None, limit=10
     )
