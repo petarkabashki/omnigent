@@ -100,6 +100,7 @@ from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store import (
     _FORK_ONLY_DROPPED_LABEL_KEYS,
     _SANDBOX_REPO_LABEL_KEY,
+    ALIAS_LABEL_KEY,
     ARCHIVED_AT_LABEL_KEY,
     FAMILY_PIN_LABEL_PREFIX,
     FORK_CARRY_HISTORY_LABEL_KEY,
@@ -4090,12 +4091,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                     .exists()
                 )
+                handle_match = self._role_handle_match(session, search_query)
                 if search_scope == "title":
-                    stmt = stmt.where(title_match)
+                    stmt = stmt.where(or_(title_match, handle_match))
                 elif search_scope == "content":
                     stmt = stmt.where(~title_match, content_match)
                 else:
-                    stmt = stmt.where(or_(title_match, content_match))
+                    stmt = stmt.where(or_(title_match, handle_match, content_match))
             if project is not None or project_id is not None:
                 # Dual-read by project NAME: a session is "in <name>" if it has
                 # EITHER the first-class membership (metadata.project_id → the
@@ -5883,6 +5885,51 @@ class SqlAlchemyConversationStore(ConversationStore):
             return True
 
         return run_write_transaction(self._session_immediate, "rollback_profiled_runner", write)
+
+    def _role_handle_match(self, session: Session, search_query: str) -> ColumnElement[bool]:
+        """
+        Match sessions whose role handle contains ``search_query``.
+
+        A handle reads ``<project>/<alias>``: the query's last path segment matches the
+        alias label and any prefix matches the name of the project the session is
+        filed in. Role holders are few, so their ids are resolved first.
+
+        :param session: The open conversation-DB session.
+        :param search_query: The user's search string.
+        :returns: A filter on ``SqlConversation.id``.
+        """
+        project_part, _, alias_part = search_query.strip().rpartition("/")
+        alias_part = alias_part.strip()
+        if not alias_part:
+            return SqlConversation.id.in_([])
+        holder_ids = list(
+            session.execute(
+                select(SqlConversationLabel.conversation_id).where(
+                    SqlConversationLabel.workspace_id == current_workspace_id(),
+                    SqlConversationLabel.key == ALIAS_LABEL_KEY,
+                    func.lower(SqlConversationLabel.value).like(
+                        _like_contains_pattern(alias_part), escape=_LIKE_ESCAPE
+                    ),
+                )
+            ).scalars()
+        )
+        project_name = project_part.strip().rpartition("/")[2].strip()
+        if holder_ids and project_name:
+            with self._session("list_conversations") as meta_sess:
+                holder_ids = list(
+                    meta_sess.execute(
+                        select(SqlConversationMetadata.id)
+                        .join(SqlProject, SqlConversationMetadata.project_id == SqlProject.id)
+                        .where(
+                            SqlConversationMetadata.workspace_id == current_workspace_id(),
+                            SqlConversationMetadata.id.in_(holder_ids),
+                            func.lower(SqlProject.name).like(
+                                _like_contains_pattern(project_name), escape=_LIKE_ESCAPE
+                            ),
+                        )
+                    ).scalars()
+                )
+        return SqlConversation.id.in_(holder_ids)
 
     def list_conversations_by_runner_id(
         self,

@@ -6,6 +6,7 @@ import { getOptimisticTitle } from "@/lib/optimisticTitles";
 import { PROJECT_LABEL_KEY, PINNED_LABEL_KEY } from "@/lib/sessionListCache";
 import type { SidebarCustomOrder } from "@/lib/sidebarViewPreferences";
 import { orderSessionFamilies, isIndividuallyPinnedSibling } from "@/lib/sessionFamilies";
+import { ALIAS_LABEL_KEY, FORK_OF_LABEL_KEY } from "@/lib/rolesApi";
 
 export const PINNED_CONVERSATION_IDS_STORAGE_KEY = "omnigent:pinned-conversation-ids";
 
@@ -205,6 +206,32 @@ export function filterConversations(
     const id = conversation.id.toLocaleLowerCase();
     return display.includes(query) || id.includes(query);
   });
+}
+
+/** Whether a row holds a role handle. Forks are never holders, whatever labels they carry. */
+export function holdsRoleHandle(row: Conversation): boolean {
+  return !!row.labels?.[ALIAS_LABEL_KEY]?.trim() && !row.labels?.[FORK_OF_LABEL_KEY];
+}
+
+/** Role holders first, each keeping its family block, otherwise in the order given. */
+export function hoistRoleHolders(rows: readonly Conversation[]): Conversation[] {
+  const blocks: Conversation[][] = [];
+  const blockByFamily = new Map<string, Conversation[]>();
+  for (const row of rows) {
+    const familyId = row.family?.id;
+    const block = familyId ? blockByFamily.get(familyId) : undefined;
+    if (block) {
+      block.push(row);
+      continue;
+    }
+    const fresh = [row];
+    blocks.push(fresh);
+    if (familyId) blockByFamily.set(familyId, fresh);
+  }
+  const holdsRole = (block: Conversation[]) => block.some(holdsRoleHandle);
+  const holders = blocks.filter(holdsRole);
+  if (holders.length === 0) return [...rows];
+  return [...holders, ...blocks.filter((block) => !holdsRole(block))].flat();
 }
 
 /** A saved Custom order indexed for sorting. */

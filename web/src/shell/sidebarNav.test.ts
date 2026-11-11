@@ -11,6 +11,8 @@ import {
   filterConversations,
   getConversationIconKind,
   groupConversations,
+  hoistRoleHolders,
+  holdsRoleHandle,
   getConversationAgentType,
   customSortOrder,
   migratePinnedConversationIds,
@@ -847,6 +849,36 @@ it("orders equal-updated_at rows by id whether or not the order is frozen", () =
   // With the pointer outside, arrival order still must not show through.
   expect(first).toEqual(["c", "b", "a"]);
   expect(sortConversations([c, a, b], null).map((row) => row.id)).toEqual(["c", "b", "a"]);
+});
+
+describe("hoistRoleHolders", () => {
+  const when = new Date("2026-10-14T10:00:00Z");
+  const plain = (id: string) => conversation(id, id, when);
+  const holder = (id: string, extra: Record<string, string> = {}) =>
+    conversation(id, id, when, { labels: { "omnigent.alias": "Architect", ...extra } });
+
+  it("moves role holders to the front and keeps every other row in place", () => {
+    const rows = [plain("a"), plain("b"), holder("role"), plain("c")];
+    expect(hoistRoleHolders(rows).map((row) => row.id)).toEqual(["role", "a", "b", "c"]);
+    expect(hoistRoleHolders([plain("a"), plain("b")]).map((row) => row.id)).toEqual(["a", "b"]);
+  });
+
+  it("does not hoist a fork, even one still carrying an alias label", () => {
+    const rows = [plain("a"), holder("fork", { "omnigent.fork.of": "src" })];
+    expect(holdsRoleHandle(rows[1])).toBe(false);
+    expect(hoistRoleHolders(rows).map((row) => row.id)).toEqual(["a", "fork"]);
+  });
+
+  it("carries a holder's family block along with it", () => {
+    const family = { id: "fam", representative_id: "role", pinned: false };
+    const rows = [
+      plain("a"),
+      { ...holder("role"), family },
+      { ...plain("peer"), family },
+      plain("b"),
+    ];
+    expect(hoistRoleHolders(rows).map((row) => row.id)).toEqual(["role", "peer", "a", "b"]);
+  });
 });
 
 describe("Custom order", () => {

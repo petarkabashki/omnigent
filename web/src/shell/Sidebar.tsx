@@ -309,6 +309,7 @@ import {
   EXPANDED_PROJECT_SECTIONS_STORAGE_KEY,
   groupConversations,
   moveCustomOrder,
+  hoistRoleHolders,
   orderByPinnedTimestamp,
   pinOrderWrites,
   isPinOrderUnit,
@@ -2498,8 +2499,11 @@ function ConversationList({
           depth,
           ancestorKeys,
           parentId,
-          conversations: orderSessionFamilies(
-            sortConversations(inProject, activeOverride, frozenKeys, sortBy, customOrder),
+          // Permanent role sessions sit above the rest, however old they are.
+          conversations: hoistRoleHolders(
+            orderSessionFamilies(
+              sortConversations(inProject, activeOverride, frozenKeys, sortBy, customOrder),
+            ),
           ),
         };
       },

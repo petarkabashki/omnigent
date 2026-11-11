@@ -5,6 +5,8 @@ import { authenticatedFetch } from "@/lib/identity";
 import { apiErrorFromResponse } from "@/lib/sessionsApi";
 
 export const ALIAS_LABEL_KEY = "omnigent.alias";
+/** Set on a fork to its source session; a fork never holds its source's role. */
+export const FORK_OF_LABEL_KEY = "omnigent.fork.of";
 
 export type RoleState = "held" | "vacant";
 

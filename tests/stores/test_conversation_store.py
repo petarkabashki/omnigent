@@ -1989,6 +1989,35 @@ def test_list_conversations_search_query_matches_content(
     assert conv_neither.id not in matched_ids, "non-matching conversation excluded"
 
 
+def test_list_conversations_search_query_matches_role_handle(
+    conversation_store: SqlAlchemyConversationStore, db_uri: str
+) -> None:
+    """
+    ``search_query`` finds a role holder by its alias or by ``<project>/<alias>``.
+
+    :param conversation_store: The conversation store fixture.
+    :param db_uri: The store's database URI, shared with the project store.
+    """
+    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    project = SqlAlchemyProjectStore(db_uri).create("c" * 32, "Harbor", None)
+    holder = conversation_store.create_conversation(title="Permanent role")
+    conversation_store.set_labels(holder.id, {ALIAS_LABEL_KEY: "Architect"})
+    conversation_store.set_conversation_project(holder.id, project.id)
+    unfiled_holder = conversation_store.create_conversation(title="Loose role")
+    conversation_store.set_labels(unfiled_holder.id, {ALIAS_LABEL_KEY: "Architect"})
+    by_title = conversation_store.create_conversation(title="Roof architecture notes")
+
+    def matched(query: str) -> set[str]:
+        return {c.id for c in conversation_store.list_conversations(search_query=query).data}
+
+    assert matched("architect") == {holder.id, unfiled_holder.id, by_title.id}
+    assert matched("harbor/architect") == {holder.id}
+    assert matched("other/architect") == set()
+    assert matched("harbor/") == set()
+
+
 def test_list_conversations_search_scope_splits_title_and_content_matches(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
