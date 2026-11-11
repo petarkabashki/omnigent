@@ -117,6 +117,7 @@ from omnigent.server.failed_status_diagnostics import (
     failed_status_intake_attributes,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
+from omnigent.server.role_mail import addressed_to_role
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -2245,7 +2246,7 @@ def register_events_routes(
                 # Sent to a role, not a session id: the message follows the role.
                 role_id=(
                     conv.labels.get(ROLE_ID_LABEL_KEY)
-                    if peer_message and sent_address not in (None, session_id)
+                    if peer_message and addressed_to_role(sent_address)
                     else None
                 ),
             )

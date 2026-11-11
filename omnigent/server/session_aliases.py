@@ -445,13 +445,11 @@ def _bring_role_mail(
 
     for source in {source for source in sources if source is not None}:
         try:
-            moved = relocate_role_mail(conversations, projects, source)
+            for batch in relocate_role_mail(conversations, projects, source):
+                if batch.host_id is not None:
+                    wake_startup_worker(batch.host_id)
         except Exception:
             _logger.exception("Unable to move queued role messages from session %s", source)
-            continue
-        for batch in moved:
-            if batch.host_id is not None:
-                wake_startup_worker(batch.host_id)
 
 
 def _create_role_row(

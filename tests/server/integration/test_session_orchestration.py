@@ -3243,8 +3243,13 @@ async def test_claimed_role_mail_moves_only_from_a_closed_holder(
     ).status_code == 200
 
     if not holder_closed:
+        # A live holder keeps its claimed row: it still blocks the queue and is shown.
         assert [r.id for r in store.list_pending_inputs(product["id"])] == [row.id]
         assert store.list_pending_inputs(successor["id"]) == []
+        startup = auth_app.state.startup_inputs
+        assert await startup.has_undelivered(product["id"])
+        queued, _ = await startup.snapshot(product["id"])
+        assert "claimed" in json.dumps(queued)
         return
     assert store.list_pending_inputs(product["id"]) == []
     [moved] = store.list_pending_inputs(successor["id"])
@@ -3276,3 +3281,25 @@ async def test_role_mail_claim_fails_once_the_session_lost_the_role(
         await auth_client.put(f"/v1/sessions/{product['id']}/alias", json={"alias": "Product"})
     ).status_code == 200
     assert await context.claim(store, product["id"])
+
+
+@pytest.mark.parametrize("form", ["hyphenated", "uppercase"])
+async def test_mail_sent_to_a_session_id_stays_when_the_role_moves(
+    auth_client, auth_app, peers, db_uri, monkeypatch, form
+):
+    from uuid import UUID
+
+    architect, product, successor, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    address = str(UUID(product["id"])) if form == "hyphenated" else product["id"].upper()
+    assert (await _send_to_address(auth_client, architect, address, "by id"))["queued"]
+    [row] = store.list_pending_inputs(product["id"])
+    assert row.data.startup_options.role_id is None
+
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    assert [r.id for r in store.list_pending_inputs(product["id"])] == [row.id]
+    assert store.list_pending_inputs(successor["id"]) == []

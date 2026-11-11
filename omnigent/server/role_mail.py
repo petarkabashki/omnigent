@@ -18,6 +18,7 @@ from omnigent.entities.conversation import (
     SlashCommandData,
     StartupInputOptions,
 )
+from omnigent.runner.session_requests import normalize_session_id
 from omnigent.server.startup_inputs import (
     MOVED_FROM_CLOSED_NOTICE,
     add_delivery_markers,
@@ -46,10 +47,28 @@ def input_role_id(item: ConversationItem) -> str | None:
     return options.role_id if options is not None else None
 
 
+def addressed_to_role(address: object) -> bool:
+    """Whether a peer message was addressed by role handle rather than by session id."""
+    if not isinstance(address, str):
+        return False
+    try:
+        normalize_session_id(address)
+    except ValueError:
+        return True
+    return False
+
+
 def is_parked(item: ConversationItem, conv: Conversation) -> bool:
-    """Whether ``item`` waits for a role that ``conv`` no longer holds."""
+    """Whether queued ``item`` waits for a role that ``conv`` no longer holds.
+
+    A claimed row stays with the session that claimed it until its receipt arrives.
+    """
     role_id = input_role_id(item)
-    return role_id is not None and conv.labels.get(ROLE_ID_LABEL_KEY) != role_id
+    return (
+        item.status == "in_progress"
+        and role_id is not None
+        and conv.labels.get(ROLE_ID_LABEL_KEY) != role_id
+    )
 
 
 def _moved_data(item: ConversationItem, role_handle: str) -> ItemData:
@@ -85,9 +104,7 @@ def relocate_role_mail(
     groups: dict[tuple[str, str | None], list[ConversationItem]] = {}
     for item in conversations.list_pending_inputs(session_id):
         role_id = input_role_id(item)
-        movable = (item.status == "in_progress" and is_parked(item, conv)) or (
-            item.status == "incomplete" and not live
-        )
+        movable = is_parked(item, conv) or (item.status == "incomplete" and not live)
         if role_id is not None and movable:
             groups.setdefault((role_id, item.created_by), []).append(item)
     moved: list[MovedMail] = []

@@ -57,3 +57,21 @@ def test_unregistered_marker_is_rejected_on_both_paths() -> None:
     for content in (_blocks("hello"), [image]):
         with pytest.raises(ValueError, match="unregistered delivery marker"):
             add_delivery_markers(content, ["[Not a marker]"])
+
+
+@pytest.mark.parametrize(
+    ("address", "is_role"),
+    [
+        ("Product", True),
+        ("omnigent/Product", True),
+        ("/Product", True),
+        ("0123456789abcdef0123456789abcdef", False),
+        ("01234567-89AB-CDEF-0123-456789ABCDEF", False),
+        ("12345", False),
+        (None, False),
+    ],
+)
+def test_role_addresses_are_told_apart_from_session_ids(address, is_role):
+    from omnigent.server.role_mail import addressed_to_role
+
+    assert addressed_to_role(address) is is_role

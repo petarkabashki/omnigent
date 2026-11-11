@@ -174,6 +174,7 @@ class StartupInputContext:
         start_fire_stage("input_claim", session_id=session_id)
         if self.role_id is not None:
             # A role released since dispatch parks the input instead of delivering it.
+            # A release racing the CAS may still deliver here once; a move cannot repeat it.
             conv = await asyncio.to_thread(store.get_conversation, session_id)
             if conv is None or conv.labels.get(ROLE_ID_LABEL_KEY) != self.role_id:
                 return False
