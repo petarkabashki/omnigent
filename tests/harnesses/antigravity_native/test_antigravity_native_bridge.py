@@ -2198,6 +2198,8 @@ def test_seed_isolated_agy_home_exposes_user_skill_dirs(
     # Linked, not copied: a skill authored mid-session is visible immediately.
     assert iso_global.is_symlink() and iso_shared.is_symlink() and iso_config.is_symlink()
     assert (iso_config / "config-skill" / "SKILL.md").read_text(encoding="utf-8") == "# config"
+    # Without the marker agy migrates on first launch and replaces these links.
+    assert (iso_gemini / "config" / ".migrated").is_file()
     assert (iso_global / "global-skill" / "SKILL.md").read_text(encoding="utf-8") == "# global"
     assert (iso_shared / "shared-skill" / "SKILL.md").read_text(encoding="utf-8") == "# shared"
     (real_shared / "later").mkdir()
