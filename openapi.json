@@ -9567,6 +9567,18 @@
             "title": "Status",
             "type": "string"
           },
+          "status_since": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Since"
+          },
           "title": {
             "anyOf": [
               {
@@ -11355,6 +11367,19 @@
             "title": "Status",
             "type": "string"
           },
+          "status_since": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Epoch seconds of the last status transition this server observed, e.g. `1794260000`; `None` when none was seen.",
+            "title": "Status Since"
+          },
           "sub_agent_name": {
             "anyOf": [
               {
@@ -11467,6 +11492,18 @@
             "description": "`False` when the caller skipped usage aggregation with `include_usage=false`. Both usage fields are then unknown, not zero or this session's own-only spend. Display clients can load them with a separate `GET /v1/sessions/{id}` using `include_usage=true`, `include_items=false`, `include_liveness=false`, and `refresh_state=false`.",
             "title": "Usage Included",
             "type": "boolean"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the loop is parked when the relay status is `\"waiting\"` (the collapsed `status` reads `\"running\"`), e.g. `\"2 background shells\"`; `None` otherwise.",
+            "title": "Waiting Reason"
           },
           "workspace": {
             "anyOf": [
@@ -19165,7 +19202,7 @@
     },
     "/v1/sessions/threads/history": {
       "get": {
-        "description": "Messages of one thread from every session that held the role.",
+        "description": "Both sides of one thread, from every session that held either role.",
         "operationId": "role_thread_history_v1_sessions_threads_history_get",
         "parameters": [
           {
@@ -19222,7 +19259,7 @@
     },
     "/v1/sessions/threads/note": {
       "post": {
-        "description": "Set a thread's state or summary on the role holder; `sys_thread_note` calls this.\n\nA side chat opened for a thread notes its own thread; the reply names the\nholder session so the runner can send the holder a summary line.",
+        "description": "Set a thread's state or summary on the role holder; `sys_thread_note` calls this.\n\nA side chat notes its own thread unless it names another; noting its own thread\nreturns the holder session so the runner can send the holder a summary line.\nGroup threads are summarized with `sys_thread_post`, not noted here.",
         "operationId": "note_role_thread_v1_sessions_threads_note_post",
         "requestBody": {
           "content": {
@@ -19259,6 +19296,30 @@
           }
         },
         "summary": "Note Role Thread",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/waiting": {
+      "get": {
+        "description": "What each of the caller's busy or blocked sessions is waiting on.",
+        "operationId": "list_waiting_sessions_v1_sessions_waiting_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Waiting Sessions V1 Sessions Waiting Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Waiting Sessions",
         "tags": [
           "sessions"
         ]
@@ -24747,6 +24808,51 @@
           }
         },
         "summary": "Open File",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/waiting": {
+      "get": {
+        "description": "What one session is waiting on, where, and since when.",
+        "operationId": "get_session_waiting_v1_sessions__session_id__waiting_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Session Waiting V1 Sessions  Session Id  Waiting Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session Waiting",
         "tags": [
           "sessions"
         ]
