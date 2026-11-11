@@ -2306,7 +2306,7 @@ def register_core_routes(
             conversation_store,
             conv,
             status=raw,
-            status_since=session_live_state.status_since(conv.id),
+            status_since=session_live_state.status_since(conv.id, conv.live_status_since),
             runner_online=liveness.runner_online if liveness is not None else None,
             shells=_session_background_tasks_cache.get(conv.id) or [],
             child_status_of=lambda child: (

@@ -2339,8 +2339,8 @@ class SessionResponse(BaseModel):
         before building this snapshot; the literal stays a superset
         of what the runtime can produce so a server that forwards
         the raw status never 500s on serialization.
-    :param status_since: Epoch seconds of the last status transition this
-        server observed, e.g. ``1794260000``; ``None`` when none was seen.
+    :param status_since: Epoch seconds of the session's last status change,
+        e.g. ``1794260000``; ``None`` when none is recorded.
     :param waiting_reason: Why the loop is parked when the relay status is
         ``"waiting"`` (the collapsed ``status`` reads ``"running"``), e.g.
         ``"2 background shells"``; ``None`` otherwise.
@@ -3459,7 +3459,7 @@ class SessionListItem(BaseModel):
     agent_name: str | None = None
     harness: str | None = None
     status: Literal["idle", "running", "waiting", "failed"]
-    # Epoch seconds of this hub process's last observed status change.
+    # Epoch seconds of the session's last status change, from its stored row.
     status_since: int | None = None
     created_at: int
     updated_at: int

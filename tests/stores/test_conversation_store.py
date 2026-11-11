@@ -3809,6 +3809,25 @@ def test_settle_intentionally_stopped_session_requires_current_runner(
     assert not conversation_store.settle_intentionally_stopped_session("0" * 32, "runner-stopped")
 
 
+def test_live_status_since_changes_only_with_the_status(
+    conversation_store: SqlAlchemyConversationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored status records when it last changed; a repeat keeps the stamp."""
+    conv = conversation_store.create_conversation(runner_id="runner-since")
+    assert conversation_store.get_conversation(conv.id).live_status_since is None
+    monkeypatch.setattr(store_module, "now_epoch", lambda: 1000)
+    conversation_store.set_session_live_status(conv.id, "running")
+    monkeypatch.setattr(store_module, "now_epoch", lambda: 2000)
+    conversation_store.set_session_live_status(conv.id, "running")
+    assert conversation_store.get_conversation(conv.id).live_status_since == 1000
+    conversation_store.set_session_live_status(conv.id, "waiting")
+    assert conversation_store.get_conversation(conv.id).live_status_since == 2000
+    monkeypatch.setattr(store_module, "now_epoch", lambda: 3000)
+    assert conversation_store.settle_intentionally_stopped_session(conv.id, "runner-since")
+    settled = conversation_store.get_conversation(conv.id)
+    assert (settled.live_status, settled.live_status_since) == ("idle", 3000)
+
+
 def test_intentional_stop_preserves_unknown_live_status(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

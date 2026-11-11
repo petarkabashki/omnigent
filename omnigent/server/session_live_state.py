@@ -253,9 +253,16 @@ def forget_live_status(session_id: str) -> None:
     _status_since.pop(session_id, None)
 
 
-def status_since(session_id: str) -> int | None:
-    """Epoch seconds of this process's last observed status change, or ``None`` if unseen."""
-    return _status_since.get(session_id)
+def status_since(session_id: str, stored: int | None = None) -> int | None:
+    """
+    Epoch seconds of the session's last status change, or ``None`` if not recorded.
+
+    The row's ``live_status_since`` is the record. This process's own observation
+    is preferred while its write may still be queued.
+
+    :param stored: The row's ``live_status_since``, e.g. ``1794260000``.
+    """
+    return _status_since.get(session_id, stored)
 
 
 def persist_scheduled_run_completion(

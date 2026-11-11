@@ -364,6 +364,7 @@ def _to_conversation(
             if meta and meta.live_status is not None
             else None
         ),
+        live_status_since=meta.live_status_since if meta else None,
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
         runner_last_seen=meta.runner_last_seen if meta else None,
         background_work_running=meta.background_work_running if meta else None,
@@ -371,6 +372,28 @@ def _to_conversation(
         project_id=meta.project_id if meta else None,
         side_chat_parent_id=meta.side_chat_parent_id if meta else None,
         family_id=meta.family_id if meta else None,
+    )
+
+
+def _live_status_values(encoded_status: int) -> tuple[tuple[Any, Any], ...]:
+    """
+    SET pairs that store a live status and stamp ``live_status_since`` when it changes.
+
+    The stamp comes first: MySQL evaluates SET left to right, so it must compare
+    against the status before this update overwrites it.
+    """
+    return (
+        (
+            SqlConversationMetadata.live_status_since,
+            case(
+                (
+                    SqlConversationMetadata.live_status.is_distinct_from(encoded_status),
+                    now_epoch(),
+                ),
+                else_=SqlConversationMetadata.live_status_since,
+            ),
+        ),
+        (SqlConversationMetadata.live_status, encoded_status),
     )
 
 
@@ -5144,7 +5167,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationMetadata.workspace_id == current_workspace_id(),
                     SqlConversationMetadata.id == conversation_id,
                 )
-                .values(live_status=encoded_status)
+                .ordered_values(*_live_status_values(encoded_status))
             )
 
         run_write_transaction(self._session_immediate, "set_session_live_status", write)
@@ -5172,7 +5195,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                             ),
                         ),
                     )
-                    .values(live_status=encode_session_live_status("idle"))
+                    .ordered_values(*_live_status_values(encode_session_live_status("idle")))
                 ),
             )
             return result.rowcount == 1
@@ -5204,7 +5227,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                             SqlConversationMetadata.runner_last_seen < stale_before,
                         ),
                     )
-                    .values(live_status=encode_session_live_status("idle"))
+                    .ordered_values(*_live_status_values(encode_session_live_status("idle")))
                 ),
             )
             return result.rowcount == 1

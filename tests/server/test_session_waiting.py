@@ -219,5 +219,7 @@ def test_status_since_records_only_real_transitions(store, monkeypatch) -> None:
         assert session_live_state.status_since("s1") == 200
         session_live_state.forget_live_status("s1")
         assert session_live_state.status_since("s1") is None
+        # Another replica, or a restarted hub, reads the row's stamp.
+        assert session_live_state.status_since("s1", 180) == 180
     finally:
         session_live_state.configure(None)

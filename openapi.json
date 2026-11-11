@@ -11377,7 +11377,7 @@
                 "type": "null"
               }
             ],
-            "description": "Epoch seconds of the last status transition this server observed, e.g. `1794260000`; `None` when none was seen.",
+            "description": "Epoch seconds of the session's last status change, e.g. `1794260000`; `None` when none is recorded.",
             "title": "Status Since"
           },
           "sub_agent_name": {

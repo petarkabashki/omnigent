@@ -330,7 +330,10 @@ class Conversation:
     # ``background_work_running`` is whether a background shell outlives the
     # ended turn (None = never written); ``blocked_on`` is why a running
     # session's agent is parked on a terminal prompt (None = not parked).
+    # ``live_status_since`` is when the stored status last changed (epoch
+    # seconds, None = not recorded).
     live_status: str | None = None
+    live_status_since: int | None = None
     pending_elicitation_count: int | None = None
     runner_last_seen: int | None = None
     background_work_running: bool | None = None

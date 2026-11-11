@@ -703,6 +703,8 @@ class SqlConversationMetadata(OmnigentBase):
     # Last relay-observed turn status (enum_codecs.SESSION_LIVE_STATUS);
     # NULL means no relay has ever reported on this session.
     live_status: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Epoch seconds the stored live_status last changed; NULL = not recorded.
+    live_status_since: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Outstanding elicitation (approval-prompt) count; NULL = never written.
     pending_elicitation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Whether the agent's work outlives its ended turn, e.g. a background shell;

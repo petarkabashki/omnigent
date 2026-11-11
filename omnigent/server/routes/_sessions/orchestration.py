@@ -1382,7 +1382,7 @@ def _build_session_list_item(
         project_id=conv.project_id,
         pull_request=pull_request,
         pull_requests_synced=pull_requests_synced,
-        status_since=session_live_state.status_since(conv.id),
+        status_since=session_live_state.status_since(conv.id, conv.live_status_since),
     )
 
 
@@ -14565,7 +14565,7 @@ async def _get_session_snapshot(
             and response.family.representative_id == conv.id
         ):
             response.labels[PINNED_LABEL_KEY] = response.family.pinned_at or "1"
-    response.status_since = session_live_state.status_since(session_id)
+    response.status_since = session_live_state.status_since(session_id, conv.live_status_since)
     response.waiting_reason = waiting_reason(
         _session_status_cache.get(session_id, conv.live_status) or "idle",
         shell_count=_session_background_task_count_cache.get(session_id, 0),
