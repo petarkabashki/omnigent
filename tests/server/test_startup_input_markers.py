@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from omnigent.server.role_threads import thread_of_header
 from omnigent.server.startup_inputs import RESENT_NOTICE, add_delivery_markers
 
@@ -48,3 +50,10 @@ def test_content_without_text_gets_a_marker_block_and_is_not_mutated() -> None:
 
     assert marked == [{"type": "input_text", "text": RESENT_NOTICE}, image]
     assert content == [image]
+
+
+def test_unregistered_marker_is_rejected_on_both_paths() -> None:
+    image = {"type": "input_image", "image_url": "https://example.com/a.png"}
+    for content in (_blocks("hello"), [image]):
+        with pytest.raises(ValueError, match="unregistered"):
+            add_delivery_markers(content, ["[Not a marker]"])

@@ -73,9 +73,15 @@ def _with_markers(text: str, markers: Sequence[str]) -> str:
     present = 0
     while present < len(body) and body[present] in DELIVERY_MARKERS:
         present += 1
-    wanted = set(body[:present]) | set(markers)
-    ordered = [marker for marker in DELIVERY_MARKERS if marker in wanted]
-    return "\n".join([*header, *ordered, *body[present:]])
+    return "\n".join([*header, *_ordered_markers([*body[:present], *markers]), *body[present:]])
+
+
+def _ordered_markers(markers: Sequence[str]) -> list[str]:
+    """Return *markers* once each in :data:`DELIVERY_MARKERS` order; reject unknown ones."""
+    unknown = set(markers) - set(DELIVERY_MARKERS)
+    if unknown:
+        raise ValueError(f"unregistered delivery markers: {sorted(unknown)}")
+    return [marker for marker in DELIVERY_MARKERS if marker in markers]
 
 
 def add_delivery_markers(
@@ -87,7 +93,7 @@ def add_delivery_markers(
         if block.get("type") == "input_text" and isinstance(block.get("text"), str):
             block["text"] = _with_markers(block["text"], markers)
             return marked
-    return [{"type": "input_text", "text": "\n".join(markers)}, *marked]
+    return [{"type": "input_text", "text": "\n".join(_ordered_markers(markers))}, *marked]
 
 
 def input_content(item: ConversationItem) -> list[dict[str, Any]]:
