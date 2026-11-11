@@ -404,7 +404,10 @@ def record_outbound(
 
 
 def record_dropped(store: ConversationStore, sender_id: str, counterpart: str) -> None:
-    """Count one message to ``counterpart`` that was dropped before any holder got it."""
+    """Count one message to ``counterpart`` that was dropped before any holder got it.
+
+    Unlocked read-modify-write: concurrent drops can lose a count, which is fine for a hint.
+    """
     sender = store.get_conversation(sender_id)
     if sender is None:
         return

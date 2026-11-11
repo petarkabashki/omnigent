@@ -3341,17 +3341,22 @@ async def test_role_mail_without_a_holder_shows_as_waiting_until_one_takes_the_r
     ] == 0
 
 
-@pytest.mark.parametrize("successor_holds", [False, True])
+@pytest.mark.parametrize("case", ["vacant", "successor", "parent_deleted"])
 async def test_deleting_a_session_moves_or_drops_its_role_mail(
-    auth_client, auth_app, peers, db_uri, monkeypatch, caplog, successor_holds
+    auth_client, auth_app, peers, db_uri, monkeypatch, caplog, case
 ):
+    from sqlalchemy import update
+
+    from omnigent.db.db_models import SqlConversation
+
     architect, product, successor, store, _ = await _role_mail_setup(
         auth_client, auth_app, peers, db_uri, monkeypatch
     )
     sent = await _send_to_address(auth_client, architect, "Product", "before the delete")
     [row] = store.list_pending_inputs(product["id"])
     thread = row.data.startup_options.sender_thread
-    if successor_holds:
+    doomed = product["id"]
+    if case in ("successor", "parent_deleted"):
         monkeypatch.setattr(session_aliases, "_bring_role_mail", lambda *_: None)
         assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
         assert (
@@ -3359,14 +3364,23 @@ async def test_deleting_a_session_moves_or_drops_its_role_mail(
                 f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"}
             )
         ).status_code == 200
+    if case == "parent_deleted":
+        # The holder is in the deleted subtree too, so the role counts as vacant.
+        doomed = (await _create_session_as(auth_client, "", "alice"))["id"]
+        with store._engine.begin() as connection:
+            connection.execute(
+                update(SqlConversation)
+                .where(SqlConversation.id.in_([product["id"], successor["id"]]))
+                .values(parent_conversation_id=doomed, root_conversation_id=doomed)
+            )
 
-    assert (await auth_client.delete(f"/v1/sessions/{product['id']}")).status_code == 200
+    assert (await auth_client.delete(f"/v1/sessions/{doomed}")).status_code == 200
     [listed] = [
         t
         for t in (await _tool(auth_client, architect, "sys_thread_list"))["threads"]
         if t["counterpart"] == thread
     ]
-    if successor_holds:
+    if case == "successor":
         assert [r.id for r in store.list_pending_inputs(successor["id"])] == [row.id]
         assert listed["dropped"] == 0
         return

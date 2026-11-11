@@ -343,7 +343,11 @@ from omnigent.server.session_aliases import release_role_after_lifecycle
 from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
-from omnigent.server.startup_inputs import StartupDispatch, StartupInputContext
+from omnigent.server.startup_inputs import (
+    StartupDispatch,
+    StartupInputContext,
+    wake_startup_worker,
+)
 from omnigent.server.subagent_activity import (
     native_subagent_terminal_status,
     record_subagent_activity,
@@ -5038,9 +5042,14 @@ def register_events_routes(
         final_usage = (final_conv or conv).session_usage
         # Role mail queued here goes to the role's live holder, or is dropped and counted.
         try:
-            await asyncio.to_thread(
-                rescue_role_mail, conversation_store, project_store, session_id
+            woken = await asyncio.to_thread(
+                rescue_role_mail,
+                conversation_store,
+                project_store,
+                [session_id, *descendant_ids],
             )
+            for host_id in woken:
+                wake_startup_worker(host_id)
         except Exception:
             _logger.exception("Unable to move queued role messages off session %s", session_id)
         deleted = await conversation_store.delete_conversation(session_id)

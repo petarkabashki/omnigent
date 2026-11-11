@@ -197,64 +197,72 @@ def _header_message_id(item: ConversationItem) -> str | None:
 
 
 def rescue_role_mail(
-    conversations: ConversationStore, projects: ProjectStore | None, session_id: str
-) -> None:
-    """Before ``session_id`` is deleted, move its role mail to a live holder or drop it.
+    conversations: ConversationStore, projects: ProjectStore | None, session_ids: list[str]
+) -> set[str]:
+    """Before ``session_ids`` are deleted, move their role mail to a live holder or drop it.
 
-    A dropped message is counted on the sender's thread row and logged by message id.
+    A holder inside ``session_ids`` counts as vacant. A dropped message is counted on the
+    sender's thread row and logged by message id. Returns the hosts of the holders that got mail.
     """
     from omnigent.server.role_threads import record_dropped
-    from omnigent.server.session_aliases import _is_live, _role_store
+    from omnigent.server.session_aliases import _is_live, _role_store, session_handle
 
     roles = _role_store(projects)
     if roles is None:
-        return
-    groups: dict[tuple[str, str | None], list[ConversationItem]] = {}
-    for item in conversations.list_pending_inputs(session_id):
-        role_id = input_role_id(item)
-        if role_id is not None and item.status in ("in_progress", "incomplete"):
-            groups.setdefault((role_id, item.created_by), []).append(item)
-    for (role_id, owner), items in groups.items():
-        role = roles.get(role_id, user_id=owner)
-        holder_id = role.holder_session_id if role is not None else None
-        holder = (
-            conversations.get_conversation(holder_id)
-            if holder_id is not None and holder_id != session_id
-            else None
-        )
-        if holder is not None and _is_live(holder):
-            from omnigent.server.session_aliases import session_handle
-
-            handle = session_handle(holder, projects, owner) or role_id
-            moved = conversations.move_pending_inputs(
-                session_id,
-                holder.id,
-                [item.id for item in items],
-                statuses=("in_progress", "incomplete"),
-                transform=lambda item, handle=handle: _moved_data(item, handle),
+        return set()
+    doomed = set(session_ids)
+    woken: set[str] = set()
+    for session_id in session_ids:
+        groups: dict[tuple[str, str | None], list[ConversationItem]] = {}
+        for item in conversations.list_pending_inputs(session_id):
+            role_id = input_role_id(item)
+            if role_id is not None and item.status in ("in_progress", "incomplete"):
+                groups.setdefault((role_id, item.created_by), []).append(item)
+        for (role_id, owner), items in groups.items():
+            role = roles.get(role_id, user_id=owner)
+            holder_id = role.holder_session_id if role is not None else None
+            holder = (
+                conversations.get_conversation(holder_id)
+                if holder_id is not None and holder_id not in doomed
+                else None
             )
-            moved_ids = {item.id for item in moved}
-            items = [item for item in items if item.id not in moved_ids]
-        if not items:
-            continue
-        _logger.warning(
-            "Dropped %d message(s) for role %s with session %s, which had no other live "
-            "holder: %s",
-            len(items),
-            role_id,
-            session_id,
-            ", ".join(_header_message_id(item) or item.id for item in items),
-        )
-        for item in items:
-            options = _options(item)
-            if options is not None and options.sender_id and options.sender_thread:
-                record_dropped(conversations, options.sender_id, options.sender_thread)
+            if holder is not None and _is_live(holder):
+                handle = session_handle(holder, projects, owner) or role_id
+                moved = conversations.move_pending_inputs(
+                    session_id,
+                    holder.id,
+                    [item.id for item in items],
+                    statuses=("in_progress", "incomplete"),
+                    transform=lambda item, handle=handle: _moved_data(item, handle),
+                )
+                if moved and holder.host_id is not None:
+                    woken.add(holder.host_id)
+                moved_ids = {item.id for item in moved}
+                items = [item for item in items if item.id not in moved_ids]
+            if not items:
+                continue
+            _logger.warning(
+                "Dropped %d message(s) for role %s with session %s, which had no other live "
+                "holder: %s",
+                len(items),
+                role_id,
+                session_id,
+                ", ".join(_header_message_id(item) or item.id for item in items),
+            )
+            for item in items:
+                options = _options(item)
+                if options is not None and options.sender_id and options.sender_thread:
+                    record_dropped(conversations, options.sender_id, options.sender_thread)
+    return woken
 
 
 def waiting_counts(
     conversations: ConversationStore, projects: ProjectStore | None, sender_id: str
 ) -> dict[str, int]:
-    """How many of ``sender_id``'s messages wait for a holder, per sender thread key."""
+    """How many of ``sender_id``'s messages wait for a holder, per sender thread key.
+
+    Scans every session with pending rows; fine while rows are capped, not for a hot path.
+    """
     counts: dict[str, int] = {}
     for _, item in waiting_for_holder(conversations, projects, sender_id=sender_id):
         options = _options(item)
@@ -269,7 +277,10 @@ def waiting_thread_rows(
     sender_id: str,
     counterpart: str,
 ) -> list[dict[str, object]]:
-    """``sender_id``'s messages in one thread that still wait for a holder, as history rows."""
+    """``sender_id``'s messages in one thread that still wait for a holder, as history rows.
+
+    Scans every session with pending rows; fine while rows are capped, not for a hot path.
+    """
     from omnigent.server.role_threads import _history_row, _item_text
 
     rows: list[dict[str, object]] = []
