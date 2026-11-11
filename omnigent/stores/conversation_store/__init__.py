@@ -15,6 +15,7 @@ from omnigent.entities import (
     ContextResetData,
     Conversation,
     ConversationItem,
+    ItemData,
     NewConversationItem,
     PagedList,
 )
@@ -700,8 +701,12 @@ class ConversationStore(ABC):
         *,
         expected: str,
         status: str | None,
+        data: ItemData | None = None,
     ) -> bool:
-        """Compare-and-set delivery state; None discards a canceled, unsent input."""
+        """Compare-and-set delivery state; None discards a canceled, unsent input.
+
+        ``data``, when given, replaces the input's payload in the same write.
+        """
         raise NotImplementedError
 
     def count_running_sessions_by_host(self, host_ids: Sequence[str]) -> dict[str, int]:  # noqa: ARG002

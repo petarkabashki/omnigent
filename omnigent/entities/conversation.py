@@ -356,6 +356,11 @@ class StartupInputOptions(BaseModel):
     tools: list[dict[str, Any]] | None = None
     background_titles_enabled: bool = False
     scheduled_run: ScheduledRunLogContext | None = None
+    # The sender's original target (role handle or session id), kept so the
+    # message can be re-routed if that address later resolves elsewhere.
+    address: str | None = None
+    # Set when a hub restart left delivery in doubt and the input was re-sent.
+    resent: bool = False
 
 
 # Longest harness message phase kept, e.g. Codex ``"partial_answer"``.

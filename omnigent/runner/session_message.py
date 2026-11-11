@@ -45,7 +45,7 @@ async def execute_message_tool(
         return json.dumps({"error": "Messaging other sessions is disabled on this runner"})
     try:
         path = f"/v1/sessions/{target}/events"
-        payload = {"type": "session_message", "data": {"message": message}}
+        payload = {"type": "session_message", "data": {"message": message, "address": address}}
         headers = {ORCHESTRATION_SOURCE_HEADER: source_id}
         response = await client.post(path, headers=headers, json=payload, timeout=60)
         if is_wrong_replica(response):

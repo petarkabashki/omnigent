@@ -89,6 +89,7 @@ from omnigent.entities import (
     ContextResetData,
     Conversation,
     ConversationItem,
+    ItemData,
     NewConversationItem,
     PagedList,
     parse_item_data,
@@ -3065,10 +3066,16 @@ class SqlAlchemyConversationStore(ConversationStore):
         *,
         expected: str,
         status: str | None,
+        data: ItemData | None = None,
     ) -> bool:
         item = self.get_item(conversation_id, item_id)
         if item is None or item.response_id != PENDING_INPUT_RESPONSE_ID:
             return False
+        encoded = (
+            self._encode_item_data(strip_nul_bytes(json.dumps(data.model_dump(exclude_none=True))))
+            if data is not None
+            else None
+        )
 
         def write(session: Session) -> bool:
             self._lock_conversation(session, conversation_id)
@@ -3091,6 +3098,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                 session.delete(row)
             else:
                 row.status = encode_item_status(status)
+                if encoded is not None:
+                    row.data = encoded
             return True
 
         return run_write_transaction(

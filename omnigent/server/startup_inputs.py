@@ -46,11 +46,24 @@ from omnigent.stores.host_store import host_is_live
 
 _logger = logging.getLogger(__name__)
 STARTUP_LABEL = "omnigent.startup"
+RESENT_NOTICE = "[Re-sent after a hub restart; it may be a repeat]"
+# Inputs this process submitted; any other submitted input predates a restart.
+_claimed_here: set[tuple[int, str, str]] = set()
 
 
 def initial_input_id(session_id: str) -> str:
     """Stable identity for a create request's first input."""
     return uuid5(NAMESPACE_URL, f"initial-input:{session_id}").hex
+
+
+def _mark_resent(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefix the first text block with :data:`RESENT_NOTICE`."""
+    marked = [dict(block) for block in content]
+    for block in marked:
+        if block.get("type") == "input_text" and isinstance(block.get("text"), str):
+            block["text"] = f"{RESENT_NOTICE}\n{block['text']}"
+            return marked
+    return [{"type": "input_text", "text": RESENT_NOTICE}, *marked]
 
 
 def input_content(item: ConversationItem) -> list[dict[str, Any]]:
@@ -112,6 +125,7 @@ class StartupInputContext:
             status="incomplete",
         )
         if self.submitted:
+            _claimed_here.add((current_workspace_id(), session_id, self.input_id))
             start_fire_stage("prompt_send", session_id=session_id)
         return self.submitted
 
@@ -154,6 +168,7 @@ class ManagedStartupInputs:
         user_id: str | None,
         headers: Headers,
         first: bool = True,
+        address: str | None = None,
     ) -> ConversationItem:
         from omnigent.server.background_session_titles import background_session_titles_enabled
         from omnigent.server.routes._sessions.helpers import (
@@ -189,6 +204,7 @@ class ManagedStartupInputs:
                     tools=event.tools,
                     background_titles_enabled=background_session_titles_enabled(headers),
                     scheduled_run=current_scheduled_run(),
+                    address=address,
                 )
             }
         )
@@ -326,7 +342,7 @@ class ManagedStartupInputs:
                 wake.set()
                 return
             worker.cancel()
-        if connection is None or not connection.registered_with_managed_token:
+        if connection is None:
             return
         wake = asyncio.Event()
 
@@ -384,6 +400,12 @@ class ManagedStartupInputs:
             # Delivered even without the label: a message saved while the label
             # was being cleared still belongs to this session's startup.
             key = (current_workspace_id(), session_id)
+            if (
+                head.status == "incomplete"
+                and not connection.registered_with_managed_token
+                and key not in self._deliveries
+            ):
+                head = await self._resend_in_doubt(session_id, head)
             if head.status == "in_progress" and key not in self._deliveries:
                 task = asyncio.create_task(
                     self._deliver(app, session_id, head), name=f"startup-input-{session_id}"
@@ -411,6 +433,36 @@ class ManagedStartupInputs:
             # A runner is bound and nothing is left to deliver.
             await self._finish(session_id)
         return False
+
+    async def _resend_in_doubt(self, session_id: str, item: ConversationItem) -> ConversationItem:
+        """Queue again an input submitted before a restart, marked as a possible repeat.
+
+        A surviving runner drops it by its unchanged pending id; a lost one runs it.
+        """
+        if (current_workspace_id(), session_id, item.id) in _claimed_here:
+            return item
+        data = item.data
+        if isinstance(data, (MessageData, SlashCommandData)):
+            options = data.startup_options or StartupInputOptions()
+            update: dict[str, Any] = {
+                "startup_options": options.model_copy(update={"resent": True})
+            }
+            if isinstance(data, MessageData) and not options.resent:
+                update["content"] = _mark_resent(data.content)
+            data = data.model_copy(update=update)
+        moved = await asyncio.to_thread(
+            self.conversations.transition_pending_input,
+            session_id,
+            item.id,
+            expected="incomplete",
+            status="in_progress",
+            data=data,
+        )
+        if not moved:
+            return item
+        _logger.info("Re-sending input %s for session %s after a restart", item.id, session_id)
+        current = await asyncio.to_thread(self.conversations.get_item, session_id, item.id)
+        return current if current is not None else item
 
     async def _finish(self, session_id: str) -> None:
         """Clear a drained session's startup state so later reads skip it."""

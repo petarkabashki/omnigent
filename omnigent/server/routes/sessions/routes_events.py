@@ -1073,6 +1073,26 @@ def register_events_routes(
         runner_id = getattr(conv, "runner_id", None)
         return isinstance(runner_id, str) and token_bound_runner_id(token) == runner_id
 
+    def _holds_agent_message_for_busy_session(
+        request: Request | _RunnerEventContext | StartupInputContext,
+        conv: Any,
+        startup: Any,
+        *,
+        peer_message: bool,
+    ) -> bool:
+        """Whether another agent's message to a busy session waits in the durable queue."""
+        sender_runner = _reporting_runner_id(request)
+        from_agent = peer_message or (
+            sender_runner is not None and sender_runner != conv.runner_id
+        )
+        return (
+            from_agent
+            and conv.host_id is not None
+            and startup.hosts.get(conv.host_id) is not None
+            and conv.live_status in ("running", "waiting")
+            and conv.labels.get(CLOSED_LABEL_KEY) != CLOSED_LABEL_VALUE
+        )
+
     def _reporting_runner_id(
         request: Request | _RunnerEventContext | StartupInputContext,
     ) -> str | None:
@@ -1765,7 +1785,15 @@ def register_events_routes(
             )
         start_fire_stage("input_validation", session_id=session_id)
         peer_message = body.type == "session_message"
+        # The address the sending agent used (role or session), kept on a queued message.
+        sent_address: str | None = None
         if peer_message:
+            raw_address = body.data.get("address")
+            sent_address = (
+                raw_address
+                if isinstance(raw_address, str) and 0 < len(raw_address) <= 256
+                else session_id
+            )
             if not isinstance(request, Request):
                 raise OmnigentError(
                     "Session messages require a runner HTTP request", code=ErrorCode.FORBIDDEN
@@ -2186,7 +2214,12 @@ def register_events_routes(
                 (body.type == "message" and body.data.get("role") == "user")
                 or (body.type == _SLASH_COMMAND_TYPE and body.data.get("kind") == "skill")
             )
-            and await startup.accepts(conv, request.app)
+            and (
+                await startup.accepts(conv, request.app)
+                or _holds_agent_message_for_busy_session(
+                    request, conv, startup, peer_message=peer_message
+                )
+            )
         ):
             if peer_message:
                 await asyncio.to_thread(
@@ -2199,8 +2232,15 @@ def register_events_routes(
                 )
             # Identity is needed for deferred authorization; a saved task stays
             # accepted after later sharing.
+            if sent_address is None and _reporting_runner_id(request) is not None:
+                sent_address = session_id
             saved = await startup.enqueue(
-                session_id, body, user_id=user_id, headers=request.headers, first=False
+                session_id,
+                body,
+                user_id=user_id,
+                headers=request.headers,
+                first=False,
+                address=sent_address,
             )
             if conv.host_id is not None:
                 startup.host_changed(request.app, conv.host_id)

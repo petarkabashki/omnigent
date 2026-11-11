@@ -1050,6 +1050,43 @@ async def test_startup_queue_admission_and_replay(
         assert refusal in (await _send(auth_client, source, target))["detail"]
 
 
+@pytest.mark.parametrize("busy", [True, False])
+async def test_peer_message_to_a_busy_session_waits_in_the_durable_queue(
+    auth_client, auth_app, peers, db_uri, monkeypatch, busy
+):
+    from unittest.mock import AsyncMock
+
+    from omnigent.host.frames import HostHelloFrame
+
+    source, target, captured = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    host_id = uuid4().hex
+    store.set_host_id(target["id"], host_id, "/tmp/inbox-workspace")
+    auth_app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="inbox", runners=[]),
+        owner=None,
+    )
+    store.set_session_live_status(target["id"], "running" if busy else "idle")
+    startup = auth_app.state.startup_inputs
+    monkeypatch.setattr(startup, "host_changed", lambda *_: None)
+
+    result = await _send(auth_client, source, target)
+    pending = store.list_pending_inputs(target["id"])
+    if not busy:
+        assert pending == []
+        return
+    assert result["queued"] is True
+    assert result["pending_id"] and result["message_id"].startswith("msg_")
+    assert not [path for path, _ in captured.get("posts", []) if path.endswith("/events")]
+    [row] = pending
+    assert row.data.startup_options.address == target["id"]
+    await startup._deliver(auth_app, target["id"], row)
+    delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
+    assert len(delivered) == 1 and result["message_id"] in json.dumps(delivered)
+
+
 @pytest.mark.parametrize("two_replica_stack", ["authenticated"], indirect=True)
 @pytest.mark.parametrize("target_kind", ["root", "child", "side_chat"])
 @pytest.mark.parametrize("legacy_host", [False, True])

@@ -12869,6 +12869,17 @@
       "StartupInputOptions": {
         "description": "Request options retained only while a startup input awaits delivery.",
         "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
           "background_titles_enabled": {
             "default": false,
             "title": "Background Titles Enabled",
@@ -12884,6 +12895,11 @@
               }
             ],
             "title": "Model Override"
+          },
+          "resent": {
+            "default": false,
+            "title": "Resent",
+            "type": "boolean"
           },
           "scheduled_run": {
             "anyOf": [
