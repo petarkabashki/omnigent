@@ -50,6 +50,34 @@ describe("RoleThreadHistory", () => {
     );
   });
 
+  it("names whom each owner post reached", async () => {
+    useSession.mockReturnValue({
+      session: { id: "sess_product", title: "x", labels: { "omnigent.alias": "Product" } },
+    });
+    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([
+      { direction: "owner", sessionId: "s", itemId: "i1", createdAt: 1, text: "A", to: "both" },
+      { direction: "owner", sessionId: "s", itemId: "i2", createdAt: 2, text: "B", to: "holder" },
+      {
+        direction: "owner",
+        sessionId: "s",
+        itemId: "i3",
+        createdAt: 3,
+        text: "C",
+        to: "counterpart",
+      },
+    ]);
+    renderHistory();
+
+    const history = screen.getByTestId("role-thread-history");
+    await within(history).findByText("A");
+    const messages = within(history).getAllByTestId("role-thread-message");
+    expect(messages.map((m) => m.textContent?.split(" · ")[1])).toEqual([
+      "to the thread",
+      "only to Product",
+      "only to /Architect",
+    ]);
+  });
+
   it("shows the loop-guard notice when the thread has a held message", async () => {
     useSession.mockReturnValue({
       session: {

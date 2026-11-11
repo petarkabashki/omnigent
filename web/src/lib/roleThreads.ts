@@ -158,6 +158,8 @@ export interface RoleThreadMessage {
   itemId: string;
   createdAt: number;
   text: string;
+  /** Whom an owner post reached; absent on other messages. */
+  to?: RoleThreadPostTarget;
 }
 
 interface WireThreadMessage {
@@ -166,6 +168,7 @@ interface WireThreadMessage {
   item_id: string;
   created_at: number;
   text: string;
+  to?: RoleThreadPostTarget;
 }
 
 /** `GET /v1/sessions/{id}/threads/messages`: both sides of one thread, oldest first. */
@@ -185,6 +188,7 @@ export async function fetchRoleThreadMessages(
     itemId: m.item_id,
     createdAt: m.created_at,
     text: m.text,
+    ...(m.to ? { to: m.to } : {}),
   }));
 }
 

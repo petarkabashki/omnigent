@@ -584,6 +584,7 @@ def thread_conversation(
 ) -> list[dict[str, Any]]:
     """
     Both sides of a thread, oldest first; ``direction`` is ``in``, ``out``, ``owner`` or ``hub``.
+    Owner rows add ``to``: ``both``, ``holder`` or ``counterpart``.
 
     Sent messages are read where they were delivered: on the counterpart role's sessions,
     tagged with the holder's role; on an unroled ``session:<id>``, by the sender header.
@@ -593,13 +594,17 @@ def thread_conversation(
     role = holder.labels.get(THREAD_ROLE_LABEL)
     if role and counterpart.startswith("session:"):
         prefix = f"[Message from {role} ("
+        owner_prefix = f"[Message from {OWNER_SENDER} ("
+
+        def sent_in_thread(text: str) -> bool:
+            if text.startswith(owner_prefix):
+                return thread_of_header(text) == role
+            return text.startswith(prefix) and thread_of_header(text) is None
+
         rows += [
             {**row, "direction": "out"}
             for row in _scan_messages(
-                store,
-                [counterpart.removeprefix("session:")],
-                lambda text: text.startswith(prefix) and thread_of_header(text) is None,
-                limit,
+                store, [counterpart.removeprefix("session:")], sent_in_thread, limit
             )
         ]
     elif role:
@@ -609,7 +614,11 @@ def thread_conversation(
             {**row, "direction": "out"}
             for row in _tagged_messages(store, receivers, sent_keys, limit)
         ]
-    # An owner post reaches both sides; show it once, as the owner's.
+    # An owner post shows once, as the owner's, with the sides it reached as ``to``.
+    owner_sides: dict[str, set[str]] = {}
+    for row in rows:
+        if _from_owner(row):
+            owner_sides.setdefault(row["message_id"], set()).add(row["direction"])
     seen_owner_posts: set[str] = set()
     merged: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda row: row["created_at"]):
@@ -617,7 +626,9 @@ def thread_conversation(
             if row["message_id"] in seen_owner_posts:
                 continue
             seen_owner_posts.add(row["message_id"])
-            row = {**row, "direction": OWNER_SENDER}
+            sides = owner_sides[row["message_id"]]
+            to = "both" if len(sides) > 1 else "holder" if "in" in sides else "counterpart"
+            row = {**row, "direction": OWNER_SENDER, "to": to}
         elif str(row.get("header", "")).startswith(f"[Message from {HUB_SENDER} ("):
             row = {**row, "direction": HUB_SENDER}
         merged.append(row)

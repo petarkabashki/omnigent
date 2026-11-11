@@ -2031,10 +2031,14 @@ async def test_owner_posts_into_a_role_thread(auth_client, peers, db_uri):
     view = await auth_client.get(
         f"/v1/sessions/{product['id']}/threads/messages", params={"counterpart": "/Architect"}
     )
-    assert [(m["direction"], m["text"]) for m in view.json()["messages"]] == [
-        ("in", "Plan the API"),
-        ("owner", "Use v2"),
+    assert [(m["direction"], m.get("to"), m["text"]) for m in view.json()["messages"]] == [
+        ("in", None, "Plan the API"),
+        ("owner", "both", "Use v2"),
     ]
+
+    # A post to one side reaches only that side.
+    aside = await post(message="Product only", to="holder")
+    assert aside.json()["delivered"] == [product["id"]]
 
     # Noting a thread marks it read, even when the state stays the same.
     assert (await rows(product))["/Architect"]["unread"] > 0
@@ -2042,11 +2046,38 @@ async def test_owner_posts_into_a_role_thread(auth_client, peers, db_uri):
     await _tool(auth_client, product, "sys_thread_note", counterpart="/Architect", summary="Seen")
     assert (await rows(product))["/Architect"]["unread"] == 0
 
-    # A post to one side reaches only that side.
     nudge = await post(message="Architect, answer the schema question", to="counterpart")
     assert nudge.json()["delivered"] == [architect["id"]]
     assert (await rows(product))["/Architect"]["state"] == "open"
+    # The thread view shows every post once, oldest first, with whom it reached.
+    view = await auth_client.get(
+        f"/v1/sessions/{product['id']}/threads/messages", params={"counterpart": "/Architect"}
+    )
+    owner_posts = [
+        (m["to"], m["text"]) for m in view.json()["messages"] if m["direction"] == "owner"
+    ]
+    assert owner_posts == [
+        ("both", "Use v2"),
+        ("holder", "Product only"),
+        ("counterpart", "Architect, answer the schema question"),
+    ]
     assert (await post(message="x", to="nobody")).status_code == 422
+
+    # A session without a role still files an owner post in the thread.
+    plain = await _create_session_as(auth_client, "", "alice")
+    _bind_runner(db_uri, plain["id"])
+    to_plain = await auth_client.post(
+        f"/v1/sessions/{product['id']}/threads/post",
+        json={"counterpart": f"session:{plain['id']}", "message": "Hi there", "to": "counterpart"},
+    )
+    assert to_plain.json()["delivered"] == [plain["id"]]
+    view = await auth_client.get(
+        f"/v1/sessions/{product['id']}/threads/messages",
+        params={"counterpart": f"session:{plain['id']}"},
+    )
+    assert [(m["direction"], m["to"], m["text"]) for m in view.json()["messages"]] == [
+        ("owner", "counterpart", "Hi there")
+    ]
 
     # A thread side chat writing to the counterpart speaks as its holder.
     opened = await auth_client.post(

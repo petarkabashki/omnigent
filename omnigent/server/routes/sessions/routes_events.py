@@ -1371,9 +1371,9 @@ def register_events_routes(
         }[body.to]
         delivered: list[str] = []
         for target, key in recipients:
-            threaded = holds_role(target)
-            data = owner_thread_message(body.message, key if threaded else None, message_id)
-            if threaded:
+            # Tagged on every side, so a session without a role still files it in the thread.
+            data = owner_thread_message(body.message, key, message_id)
+            if holds_role(target):
                 target_handle = await asyncio.to_thread(
                     session_handle, target, project_store, user_id
                 )

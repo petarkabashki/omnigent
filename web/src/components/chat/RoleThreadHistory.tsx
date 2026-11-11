@@ -89,7 +89,15 @@ export function RoleThreadHistory({
             {[
               SENDER_TEXT[message.direction] ??
                 (message.direction === "out" ? holderName : counterpart),
-              ...(message.direction === "owner" ? ["to the thread"] : []),
+              ...(message.direction === "owner"
+                ? [
+                    message.to === "holder"
+                      ? `only to ${holderName}`
+                      : message.to === "counterpart"
+                        ? `only to ${counterpart}`
+                        : "to the thread",
+                  ]
+                : []),
               relativeTime(message.createdAt * 1000),
             ].join(" · ")}
           </p>
