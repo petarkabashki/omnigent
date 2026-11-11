@@ -27,6 +27,12 @@ def _write_role(root: Path, name: str, text: str) -> Path:
     return path
 
 
+def _trust(home: Path, workspace: Path) -> None:
+    listing = home / ".omnigent" / "trusted_role_workspaces"
+    listing.parent.mkdir(parents=True, exist_ok=True)
+    listing.write_text(f"# comment\n{workspace}\n")
+
+
 def _write_skill(directory: Path, name: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "SKILL.md").write_text(
@@ -38,6 +44,7 @@ def test_workspace_role_layers_over_home(tmp_path: Path) -> None:
     home, workspace = tmp_path / "home", tmp_path / "ws"
     home_source = _write_role(home, "Product.md", "home text")
     ws_source = _write_role(workspace, "Product.md", "workspace text\n")
+    _trust(home, workspace)
     text = load_role_instructions("Product", str(workspace), home=home)
     assert text == (
         f"## Role: Product\n\nRole instructions from {home_source}:\n\nhome text\n\n"
@@ -66,7 +73,7 @@ def test_empty_or_absent_role_file(tmp_path: Path) -> None:
 
 def test_role_file_is_truncated(tmp_path: Path) -> None:
     _write_role(tmp_path, "Big.md", "x" * (MAX_ROLE_FILE_BYTES + 100))
-    text = load_role_instructions("Big", str(tmp_path), home=tmp_path / "h")
+    text = load_role_instructions("Big", None, home=tmp_path)
     assert text is not None and text.count("x") == MAX_ROLE_FILE_BYTES
 
 
@@ -74,7 +81,7 @@ def test_front_matter_description_heads_the_role(tmp_path: Path) -> None:
     _write_role(
         tmp_path, "Bench.md", "---\ndescription: Evals and verification\n---\nRun evals.\n"
     )
-    text = load_role_instructions("Bench", str(tmp_path), home=tmp_path / "h")
+    text = load_role_instructions("Bench", None, home=tmp_path)
     assert text is not None
     assert text.startswith("## Role: Bench (Evals and verification)\n")
     assert text.endswith("Run evals.") and "description:" not in text
@@ -82,7 +89,7 @@ def test_front_matter_description_heads_the_role(tmp_path: Path) -> None:
 
 def test_unreadable_front_matter_keeps_the_body(tmp_path: Path) -> None:
     _write_role(tmp_path, "Bench.md", "---\n: [unclosed\n---\nRun evals.\n")
-    text = load_role_instructions("Bench", str(tmp_path), home=tmp_path / "h")
+    text = load_role_instructions("Bench", None, home=tmp_path)
     assert text is not None and text.startswith("## Role: Bench\n") and text.endswith("Run evals.")
 
 
@@ -118,9 +125,24 @@ def test_folder_role_with_params_skills_and_mcp(tmp_path: Path) -> None:
     assert server.args == ["--root", str(workspace), "omnigent"]
 
 
-def test_workspace_role_cannot_add_skills_or_mcp_unless_trusted(
+def test_untrusted_workspace_role_is_skipped_with_one_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    home, workspace = tmp_path / "home", tmp_path / "ws"
+    _write_role(home, "Bench.md", "---\nparams: {repo: home}\n---\nHome.\n")
+    _write_role(workspace, "Bench/ROLE.md", "---\nparams: {repo: ws}\n---\nWorkspace.\n")
+    _write_role(workspace, "Product.md", "Workspace product.\n")
+    with caplog.at_level(logging.WARNING):
+        overlay = load_role_overlay("Bench", str(workspace), home=home)
+        assert load_role_overlay("Product", str(workspace), home=home) is None
+    assert overlay is not None
+    assert overlay.params == {"repo": "home"}
+    assert overlay.instructions is not None and "Workspace." not in overlay.instructions
+    [warning] = [r.getMessage() for r in caplog.records if "untrusted workspace" in r.getMessage()]
+    assert "Bench/ROLE.md, Product.md" in warning
+
+
+def test_trusted_workspace_role_adds_text_skills_and_mcp(tmp_path: Path) -> None:
     home, workspace = tmp_path / "home", tmp_path / "ws"
     _write_role(home, "Bench.md", "---\nparams: {repo: home}\n---\nHome.\n")
     ws_role = _write_role(
@@ -130,20 +152,25 @@ def test_workspace_role_cannot_add_skills_or_mcp_unless_trusted(
         "mcp_servers: {notes: {command: notes-mcp}}\n---\nWorkspace.\n",
     )
     _write_skill(ws_role.parent / "skills" / "evals", "evals")
-    with caplog.at_level(logging.WARNING):
-        untrusted = load_role_overlay("Bench", str(workspace), home=home)
-    assert untrusted is not None
-    assert untrusted.params == {"repo": "ws"}
-    assert untrusted.instructions is not None and untrusted.instructions.endswith("Workspace.")
-    assert (untrusted.skills, untrusted.mcp_servers) == ([], [])
-    assert "untrusted workspace role" in caplog.text
+    _trust(home, workspace)
+    overlay = load_role_overlay("Bench", str(workspace), home=home)
+    assert overlay is not None
+    assert overlay.params == {"repo": "ws"}
+    assert overlay.instructions is not None and overlay.instructions.endswith("Workspace.")
+    assert [skill.name for skill in overlay.skills] == ["evals"]
+    assert [server.name for server in overlay.mcp_servers] == ["notes"]
 
-    trust_list = home / ".omnigent" / "trusted_role_workspaces"
-    trust_list.write_text(f"# comment\n{workspace}\n")
-    trusted = load_role_overlay("Bench", str(workspace), home=home)
-    assert trusted is not None
-    assert [skill.name for skill in trusted.skills] == ["evals"]
-    assert [server.name for server in trusted.mcp_servers] == ["notes"]
+
+def test_workspace_without_role_files_uses_home_without_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    home = tmp_path / "home"
+    _write_role(home, "Bench.md", "Home.\n")
+    with caplog.at_level(logging.WARNING):
+        overlay = load_role_overlay("Bench", str(tmp_path / "ws"), home=home)
+    assert overlay is not None and overlay.instructions is not None
+    assert overlay.instructions.endswith("Home.")
+    assert "untrusted" not in caplog.text
 
 
 def _spec() -> AgentSpec:

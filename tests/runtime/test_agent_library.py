@@ -154,6 +154,8 @@ def test_role_precedence_is_workspace_then_library_then_home(library: Library) -
     assert LIBRARY_BODY in text and "home text" not in text
 
     _write_role(library.project, "Architect.md", "workspace text")
+    trust = library.home / ".omnigent" / "trusted_role_workspaces"
+    trust.write_text(f"{library.project}\n")
     text = _architect(library)
     assert text.index(LIBRARY_BODY) < text.index("workspace text")
     assert "home text" not in text
