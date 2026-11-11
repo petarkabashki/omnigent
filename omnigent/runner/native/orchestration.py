@@ -9476,6 +9476,7 @@ async def _auto_create_claude_terminal(
         session_id=session_id,
         session_init=session_init,
     )
+    timings.mark("launch_metadata")
     # Pick the bridge id this session's dir is keyed on. Normally session_id,
     # and we (re)assert the label = session_id so a STALE label from a rotation
     # that timed out before its terminal transfer can't make

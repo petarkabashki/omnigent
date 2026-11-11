@@ -14,10 +14,11 @@ REVISION = "ze3f4a5b6c7d"
 TABLES = {"group_threads", "group_thread_members", "group_thread_posts"}
 
 
-def test_is_the_single_head_after_the_roles_tables() -> None:
+def test_follows_the_roles_tables_under_a_single_head() -> None:
     script = ScriptDirectory.from_config(_build_alembic_config("sqlite://"))
 
-    assert script.get_heads() == [REVISION]
+    (head,) = script.get_heads()
+    assert REVISION in {revision.revision for revision in script.iterate_revisions(head, "base")}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
