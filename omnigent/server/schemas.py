@@ -31,6 +31,7 @@ from omnigent.entities import (
     DEFAULT_GENERATED_TITLE_MAX_CHARS,
     USER_SESSION_TITLE_MAX_CHARS,
     CompactionData,
+    ContextResetData,
     ConversationItem,
     ErrorData,
     FunctionCallData,
@@ -3659,6 +3660,12 @@ class SessionTerminalCommandItem(_SessionItemCommon, TerminalCommandData):
     type: Literal["terminal_command"]
 
 
+class SessionContextResetItem(_SessionItemCommon, ContextResetData):
+    """``context_reset`` item: common fields plus ``ContextResetData``."""
+
+    type: Literal["context_reset"]
+
+
 class SessionItem(
     RootModel[
         Annotated[
@@ -3672,7 +3679,8 @@ class SessionItem(
             | SessionResourceEventItem
             | SessionRoutingDecisionItem
             | SessionSlashCommandItem
-            | SessionTerminalCommandItem,
+            | SessionTerminalCommandItem
+            | SessionContextResetItem,
             Field(discriminator="type"),
         ]
     ]

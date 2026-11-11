@@ -3157,6 +3157,240 @@
         "title": "ExtensionResponse",
         "type": "object"
       },
+      "ExternalTaskCreateRequest": {
+        "description": "Body of `POST /v1/external-tasks`.",
+        "properties": {
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "unit": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "unit"
+        ],
+        "title": "ExternalTaskCreateRequest",
+        "type": "object"
+      },
+      "ExternalTaskResponse": {
+        "description": "The external task row as returned by create and update.",
+        "properties": {
+          "created": {
+            "default": false,
+            "title": "Created",
+            "type": "boolean"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          }
+        },
+        "required": [
+          "id",
+          "session_id",
+          "title",
+          "status",
+          "state",
+          "exit_code",
+          "detail",
+          "unit",
+          "host_id",
+          "project_id",
+          "labels"
+        ],
+        "title": "ExternalTaskResponse",
+        "type": "object"
+      },
+      "ExternalTaskUpdateRequest": {
+        "description": "Body of `PATCH /v1/external-tasks/{session_id}`.",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ExternalTaskUpdateRequest",
+        "type": "object"
+      },
       "FailedEvent": {
         "description": "Terminal event for a turn that ended with an error.\n\nCarries a `omnigent.server.schemas.FailedResponseObject`\nwhose `error` field describes the failure. Response metadata may\nbe absent when the failure occurs before response allocation.",
         "properties": {
@@ -3518,6 +3752,201 @@
           "level"
         ],
         "title": "GrantPermissionRequest",
+        "type": "object"
+      },
+      "GroupThreadCreateRequest": {
+        "additionalProperties": false,
+        "description": "The owner starts a group thread, optionally with its first members and post.",
+        "properties": {
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/GroupThreadMemberInput"
+            },
+            "maxItems": 20,
+            "title": "Members",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "GroupThreadCreateRequest",
+        "type": "object"
+      },
+      "GroupThreadInviteRequest": {
+        "additionalProperties": false,
+        "description": "The owner invites a member; `primer` decides what it learns of earlier posts.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "role",
+              "session"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "primer": {
+            "default": "summary",
+            "enum": [
+              "summary",
+              "full",
+              "none"
+            ],
+            "title": "Primer",
+            "type": "string"
+          },
+          "ref": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "title": "GroupThreadInviteRequest",
+        "type": "object"
+      },
+      "GroupThreadMemberInput": {
+        "additionalProperties": false,
+        "description": "A group thread member: a `project/Role` handle or a session id.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "role",
+              "session"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "ref": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "title": "GroupThreadMemberInput",
+        "type": "object"
+      },
+      "GroupThreadPostRequest": {
+        "additionalProperties": false,
+        "description": "A post into a group thread.\n\n`to` is `\"everyone\"` or a list of member refs; those members get a turn.\nOmitted, the owner's post goes to everyone and an agent's post to nobody.",
+        "properties": {
+          "message": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "const": "everyone",
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "GroupThreadPostRequest",
+        "type": "object"
+      },
+      "GroupThreadUpdateRequest": {
+        "additionalProperties": false,
+        "description": "The owner renames, summarizes or closes a group thread.",
+        "properties": {
+          "state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "open",
+                  "done"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "GroupThreadUpdateRequest",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -7727,6 +8156,119 @@
         "title": "SessionContentBlock",
         "type": "object"
       },
+      "SessionContextResetItem": {
+        "description": "`context_reset` item: common fields plus `ContextResetData`.",
+        "properties": {
+          "created_at": {
+            "description": "Unix epoch seconds of creation.",
+            "format": "int64",
+            "title": "Created At",
+            "type": "integer"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Identity of the human author; omitted for agent, tool, and system items.",
+            "title": "Created By"
+          },
+          "engine_change": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine Change"
+          },
+          "epoch": {
+            "format": "int64",
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Store-assigned item ID, e.g. `\"msg_abc123\"`.",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Item Id"
+          },
+          "previous_external_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous External Session Id"
+          },
+          "reason": {
+            "default": "user",
+            "enum": [
+              "user",
+              "agent",
+              "api"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "response_id": {
+            "description": "ID of the task/response that produced this item.",
+            "title": "Response Id",
+            "type": "string"
+          },
+          "status": {
+            "description": "Item status, e.g. `\"completed\"`.",
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "type": {
+            "const": "context_reset",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "epoch",
+          "id",
+          "response_id",
+          "status",
+          "created_at",
+          "type"
+        ],
+        "title": "SessionContextResetItem",
+        "type": "object"
+      },
       "SessionCreatedEvent": {
         "description": "A child (sub-agent) session was spawned from this session.\n\nEmitted by `omnigent/tools/builtins/spawn.py:_spawn_one`\nonto the **parent** session's conversation stream after the\nchild conversation row is created and the child task has been\nstarted. Per the session-rearchitecture spec \u00a73 (\"Event types\nand direction\") and \u00a77 (\"Flow: client interacts with\nsub-agent\"), this lets clients watching the parent session's\nSSE subscribe directly to the child's stream without polling\nhistory for the tunneled `function_call` item.\n\nThe wire shape is FLAT (not enveloped):\n`{\"type\": \"session.created\", \"conversation_id\": <parent>, \"child_session_id\": <child>, \"agent_id\": <agent or None>, \"parent_session_id\": <parent>, \"sequence_number\": null}`.\n\nThe existing tunneled `function_call` ConversationItem\n(carried inside `OutputItemDoneEvent`) is retained\nfor compatibility \u2014 clients that don't yet implement the\n\"subscribe to child stream\" pattern can keep rendering sub-\nagent calls from the parent's persistent history.",
         "properties": {
@@ -8081,6 +8623,18 @@
             ],
             "description": "Per-session native-terminal pass-through args to apply to the fork, e.g. `[\"--permission-mode\", \"auto\"]` (the fork dialog's permission-/approval-mode selector). **Omitting** the field keeps today's behavior \u2014 the source's args are carried on a same-agent fork and dropped on an agent switch. A list (including `[]`, which clears them) replaces them wholesale. Bounds (count / length) are validated server-side.",
             "title": "Terminal Launch Args"
+          },
+          "thread": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread"
           },
           "title": {
             "anyOf": [
@@ -8531,6 +9085,7 @@
         "discriminator": {
           "mapping": {
             "compaction": "#/components/schemas/SessionCompactionItem",
+            "context_reset": "#/components/schemas/SessionContextResetItem",
             "error": "#/components/schemas/SessionErrorItem",
             "function_call": "#/components/schemas/SessionFunctionCallItem",
             "function_call_output": "#/components/schemas/SessionFunctionCallOutputItem",
@@ -8577,6 +9132,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionTerminalCommandItem"
+          },
+          {
+            "$ref": "#/components/schemas/SessionContextResetItem"
           }
         ],
         "title": "SessionItem"
@@ -12449,6 +13007,108 @@
         "title": "TerminalCommandData",
         "type": "object"
       },
+      "ThreadHeldRequest": {
+        "additionalProperties": false,
+        "description": "The owner's decision on a message the loop guard held.",
+        "properties": {
+          "action": {
+            "enum": [
+              "release",
+              "allow",
+              "discard"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "counterpart": {
+            "maxLength": 200,
+            "title": "Counterpart",
+            "type": "string"
+          }
+        },
+        "required": [
+          "counterpart",
+          "action"
+        ],
+        "title": "ThreadHeldRequest",
+        "type": "object"
+      },
+      "ThreadNoteRequest": {
+        "additionalProperties": false,
+        "description": "Set a role thread's state or summary (`sys_thread_note`).",
+        "properties": {
+          "counterpart": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counterpart"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "title": "ThreadNoteRequest",
+        "type": "object"
+      },
+      "ThreadPostRequest": {
+        "additionalProperties": false,
+        "description": "The owner posts into a role thread, to its holder, its counterpart, or both.",
+        "properties": {
+          "counterpart": {
+            "maxLength": 200,
+            "title": "Counterpart",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "to": {
+            "default": "both",
+            "enum": [
+              "both",
+              "holder",
+              "counterpart"
+            ],
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "counterpart",
+          "message"
+        ],
+        "title": "ThreadPostRequest",
+        "type": "object"
+      },
       "ToolOutputDeltaEvent": {
         "description": "Incremental output from an in-progress function call.",
         "properties": {
@@ -14391,6 +15051,101 @@
         ]
       }
     },
+    "/v1/external-tasks": {
+      "post": {
+        "description": "Create (or return the existing) read-only row for an external unit.",
+        "operationId": "create_external_task_v1_external_tasks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExternalTaskCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create External Task",
+        "tags": [
+          "external_tasks"
+        ]
+      }
+    },
+    "/v1/external-tasks/{session_id}": {
+      "patch": {
+        "description": "Update an external task row's status, exit code and detail.",
+        "operationId": "update_external_task_v1_external_tasks__session_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExternalTaskUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update External Task",
+        "tags": [
+          "external_tasks"
+        ]
+      }
+    },
     "/v1/harnesses": {
       "get": {
         "operationId": "list_harnesses_v1_harnesses_get",
@@ -14416,20 +15171,14 @@
     },
     "/v1/hosts": {
       "get": {
-        "description": "List all hosts owned by the authenticated user.\n\nReturns both online and offline hosts, with live runner\ninformation for online hosts.\n\n**Returns:** `{\"hosts\": [...]}` with host details \u2014 `host_id`, `name`, `owner`, `status`, `sandbox_provider`, `configured_harnesses`, and `gateway_inference` (`None` when no connected host has reported it to this replica).",
+        "description": "List all hosts owned by the authenticated user.\n\nReturns both online and offline hosts, with live runner\ninformation for online hosts.\n\n**Returns:** `{\"hosts\": [...], \"server_version\": ..., \"server_build_commit\": ...}`. Each host has `host_id`, `name`, `owner`, `status`, `sandbox_provider`, `configured_harnesses`, `gateway_inference` (`None` when no connected host has reported it to this replica), and the `version` / `build_commit` its connection reported (`None` when it is not connected to this replica). Comparing `build_commit` with `server_build_commit` shows hosts that lag.",
         "operationId": "list_hosts_v1_hosts_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "additionalProperties": true,
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
+                  "additionalProperties": true,
                   "title": "Response List Hosts V1 Hosts Get",
                   "type": "object"
                 }
@@ -16612,6 +17361,148 @@
         ]
       }
     },
+    "/v1/projects/{project_id}/shells": {
+      "get": {
+        "description": "List the project's shells with their liveness, as the host reports them.",
+        "operationId": "list_project_shells_v1_projects__project_id__shells_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Project Shells V1 Projects  Project Id  Shells Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Project Shells",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "description": "Start a shell on the project's default host in its default workspace.",
+        "operationId": "create_project_shell_v1_projects__project_id__shells_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Project Shell V1 Projects  Project Id  Shells Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Project Shell",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/shells/{shell_id}": {
+      "delete": {
+        "description": "Kill one of the project's shells.",
+        "operationId": "close_project_shell_v1_projects__project_id__shells__shell_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "shell_id",
+            "required": true,
+            "schema": {
+              "title": "Shell Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Close Project Shell V1 Projects  Project Id  Shells  Shell Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Close Project Shell",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
     "/v1/runners": {
       "get": {
         "description": "Return currently online runners owned by the requesting user.\n\nWhen auth is active, only runners whose tunnel was\nestablished by the same user are returned. Without auth,\nall online runners are listed (single-user / dev mode).\n\n**Returns:** A `{\"data\": [...]}` list with runner ids and advertised harnesses.",
@@ -17828,6 +18719,400 @@
         ]
       }
     },
+    "/v1/sessions/group-threads": {
+      "get": {
+        "description": "The owner's threads, or the threads the calling agent is a member of.",
+        "operationId": "list_group_threads_v1_sessions_group_threads_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Group Threads V1 Sessions Group Threads Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Group Threads",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "description": "The owner starts a group thread with its members and an optional first post.",
+        "operationId": "create_group_thread_v1_sessions_group_threads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupThreadCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Group Thread V1 Sessions Group Threads Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Group Thread",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/group-threads/{thread_key}": {
+      "get": {
+        "description": "A thread with its members and where each is reached now.",
+        "operationId": "get_group_thread_v1_sessions_group_threads__thread_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Group Thread V1 Sessions Group Threads  Thread Key  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Group Thread",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "patch": {
+        "description": "The owner renames, summarizes or closes a thread.",
+        "operationId": "update_group_thread_v1_sessions_group_threads__thread_key__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupThreadUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Group Thread V1 Sessions Group Threads  Thread Key  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Group Thread",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/group-threads/{thread_key}/members": {
+      "post": {
+        "description": "The owner invites a role or session; a primer is its first event.",
+        "operationId": "invite_group_thread_member_v1_sessions_group_threads__thread_key__members_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupThreadInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Invite Group Thread Member V1 Sessions Group Threads  Thread Key  Members Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Invite Group Thread Member",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/group-threads/{thread_key}/members/{member_id}": {
+      "delete": {
+        "description": "The owner removes a member; its past posts stay in the transcript.",
+        "operationId": "remove_group_thread_member_v1_sessions_group_threads__thread_key__members__member_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "member_id",
+            "required": true,
+            "schema": {
+              "title": "Member Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Remove Group Thread Member V1 Sessions Group Threads  Thread Key  Members  Member Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Group Thread Member",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/group-threads/{thread_key}/posts": {
+      "get": {
+        "description": "The newest `limit` posts after seq `after`, oldest first.",
+        "operationId": "list_group_thread_posts_v1_sessions_group_threads__thread_key__posts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Group Thread Posts V1 Sessions Group Threads  Thread Key  Posts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Group Thread Posts",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "post": {
+        "description": "The owner or a member agent posts; the members in `to` get a turn.",
+        "operationId": "post_to_group_thread_v1_sessions_group_threads__thread_key__posts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_key",
+            "required": true,
+            "schema": {
+              "title": "Thread Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupThreadPostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Post To Group Thread V1 Sessions Group Threads  Thread Key  Posts Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post To Group Thread",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/projects": {
       "get": {
         "description": "Return the caller's project summaries in their preferred display order.\n\nDual-reads both project representations and unions them (first-class by\nid, label-projects by name against root projects):\n- **First-class projects** (`project_store`) \u2014 carry an `id` and\n  appear even when empty (the whole point of the first-class entity).\n- **Legacy label-projects** (implicit `omni_project` label) \u2014 exist\n  while at least one owned session carries the label; `id` is\n  `None` until such a project is promoted to first-class.\n\nA label name equal to a root project's name collapses into that entry,\nwhich keeps the first-class `id`. Filing is owner-only, so both halves are scoped to\nthe caller (label-projects to their owned sessions, first-class to\ntheir owned rows) \u2014 a project shared to them but owned by another user\ndoes not surface as one of their own folders.\n\n**Returns:** Project summaries in custom order, or alphabetical order by default.",
@@ -17849,6 +19134,131 @@
           }
         },
         "summary": "List Session Projects",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/threads": {
+      "get": {
+        "description": "The calling role's thread index; `sys_thread_list` reads this.",
+        "operationId": "list_role_threads_v1_sessions_threads_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Role Threads V1 Sessions Threads Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Role Threads",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/threads/history": {
+      "get": {
+        "description": "Messages of one thread from every session that held the role.",
+        "operationId": "role_thread_history_v1_sessions_threads_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "counterpart",
+            "required": true,
+            "schema": {
+              "title": "Counterpart",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Role Thread History V1 Sessions Threads History Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Role Thread History",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/threads/note": {
+      "post": {
+        "description": "Set a thread's state or summary on the role holder; `sys_thread_note` calls this.\n\nA side chat opened for a thread notes its own thread; the reply names the\nholder session so the runner can send the holder a summary line.",
+        "operationId": "note_role_thread_v1_sessions_threads_note_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadNoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Note Role Thread V1 Sessions Threads Note Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Note Role Thread",
         "tags": [
           "sessions"
         ]
@@ -23116,6 +24526,174 @@
           }
         },
         "summary": "Stream Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/threads/held": {
+      "post": {
+        "description": "The owner releases, allows or discards the message the loop guard held.\n\n`release` delivers it as sent; `allow` delivers it and restarts the pair's\ncounters; `discard` drops it and tells the sender.",
+        "operationId": "act_on_held_thread_message_v1_sessions__session_id__threads_held_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadHeldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Act On Held Thread Message",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/threads/messages": {
+      "get": {
+        "description": "Both sides of one of a role session's threads, for the owner's thread view.",
+        "operationId": "role_thread_messages_v1_sessions__session_id__threads_messages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "counterpart",
+            "required": true,
+            "schema": {
+              "title": "Counterpart",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Role Thread Messages V1 Sessions  Session Id  Threads Messages Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Role Thread Messages",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/threads/post": {
+      "post": {
+        "description": "The owner posts into a role thread; each recipient gets it word for word.\n\n`session_id` holds the role. The post is filed in the thread on every side it\nreaches, resets the thread's hop count, and clears a wait on the owner.",
+        "operationId": "post_owner_thread_message_v1_sessions__session_id__threads_post_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadPostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Owner Thread Message",
         "tags": [
           "sessions"
         ]

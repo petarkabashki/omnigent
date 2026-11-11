@@ -1515,13 +1515,15 @@ def register_core_routes(
         new_labels: dict[str, str] = {}
         if executor_name is not None:
             new_labels[EXECUTOR_LABEL_KEY] = executor_name
-        if inherit_project and source is not None:
-            if source.project_id is not None:
-                await asyncio.to_thread(
-                    conversation_store.set_conversation_project, resp.id, source.project_id
-                )
-            elif PROJECT_LABEL_KEY in source.labels:
-                new_labels[PROJECT_LABEL_KEY] = source.labels[PROJECT_LABEL_KEY]
+        # Filing in the source's project happens at creation (created_by_project_id);
+        # only a legacy project label still needs copying.
+        if (
+            inherit_project
+            and source is not None
+            and source.project_id is None
+            and PROJECT_LABEL_KEY in source.labels
+        ):
+            new_labels[PROJECT_LABEL_KEY] = source.labels[PROJECT_LABEL_KEY]
         if new_labels:
             await asyncio.to_thread(conversation_store.set_labels, resp.id, new_labels)
         # Claimed once filed, and before the response and any launch, so the

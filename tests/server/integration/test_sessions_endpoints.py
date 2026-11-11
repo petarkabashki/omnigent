@@ -12043,7 +12043,10 @@ async def test_patch_approval_mode_requires_live_runner_before_persisting(
         store = SqlAlchemyConversationStore(db_uri)
         sibling = store.create_conversation(agent_id=agent["id"])
         store.add_new_sibling(session["id"], sibling.id, user_id=None)
+        from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
         project_id = "a" * 32
+        SqlAlchemyProjectStore(db_uri).create(project_id, "Local project", None)
         store.set_conversation_project(session["id"], project_id)
         resp = await client.patch(
             f"/v1/sessions/{session['id']}",
