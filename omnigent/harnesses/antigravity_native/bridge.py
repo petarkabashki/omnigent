@@ -442,8 +442,10 @@ _AGY_IMPORT_MANIFEST = "import_manifest.json"
 _AGY_HOOKS_FILE = "hooks.json"
 
 
-# agy's non-plugin skill trees, relative to the Gemini dir — the "Global" and
-# "Shared" sources its ``/skills`` panel names. They are linked for the same
+# agy's non-plugin skill trees, relative to the Gemini dir — the "Global" (new
+# and old location) and "Shared" sources its ``/skills`` panel names. agy follows
+# links in these trees (live-verified, 1.5.x), unlike a workspace's
+# ``.agents/skills``, where a link out of the project is ignored. They are linked for the same
 # reason plugins are: :func:`~omnigent.spec.skill_sources._agy_skill_dirs`
 # enumerates them from the user's REAL home, so a session that could not resolve
 # them under ``--gemini_dir`` would offer a skill agy then fails to expand.
@@ -453,6 +455,7 @@ _AGY_HOOKS_FILE = "hooks.json"
 # ``antigravity-cli/builtin/skills`` in whatever Gemini dir it is launched with
 # (live-verified — isolated dirs carry the same builtins as the real home).
 _AGY_SKILL_DIRS = (
+    Path("config") / "skills",
     Path("antigravity-cli") / "skills",
     Path("skills"),
 )

@@ -1187,18 +1187,19 @@ def test_antigravity_provider_tolerates_missing_and_unreadable_dirs(
     assert resolve_harness_skills(_ctx(tmp_path / "ws", home), "antigravity-native") == []
 
 
-def test_antigravity_provider_surfaces_all_five_agy_sources(
+def test_antigravity_provider_surfaces_every_agy_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every source agy's own /skills panel lists is surfaced.
+    """Every source agy reads is surfaced.
 
-    Live-verified against agy 1.1.9, whose panel names them: Workspace
-    (``<ws>/.agents/skills``), Global (``antigravity-cli/skills``), Shared
+    Live-verified: Workspace (``<ws>/.agents/skills``), Global in both its 1.5.x
+    (``config/skills``) and older (``antigravity-cli/skills``) locations, Shared
     (``.gemini/skills``), plus imported plugins and shipped builtins.
     """
     home = tmp_path / "home"
     ws = tmp_path / "ws"
     _write_skill(ws / ".agents" / "skills", "ws-skill")
+    _write_skill(home / ".gemini" / "config" / "skills", "config-skill")
     _write_skill(home / ".gemini" / "antigravity-cli" / "skills", "global-skill")
     _write_skill(home / ".gemini" / "skills", "shared-skill")
     _write_agy_plugin(home, "superpowers", "brainstorming")
@@ -1208,11 +1209,27 @@ def test_antigravity_provider_surfaces_all_five_agy_sources(
     names = sorted(s.name for s in resolve_harness_skills(_ctx(ws, home), "antigravity-native"))
     assert names == [
         "antigravity-guide",
+        "config-skill",
         "global-skill",
         "shared-skill",
         "superpowers:brainstorming",
         "ws-skill",
     ]
+
+
+def test_antigravity_provider_lists_a_migrated_global_dir_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agy's migration can leave ``antigravity-cli/skills`` linked to ``config/skills``."""
+    home = tmp_path / "home"
+    config_skills = home / ".gemini" / "config" / "skills"
+    _write_skill(config_skills, "config-skill")
+    (home / ".gemini" / "antigravity-cli").mkdir(parents=True)
+    (home / ".gemini" / "antigravity-cli" / "skills").symlink_to(config_skills)
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+    names = [s.name for s in resolve_harness_skills(_ctx(tmp_path, home), "antigravity-native")]
+    assert names == ["config-skill"]
 
 
 def test_antigravity_provider_reads_agents_skills_not_claude_skills(

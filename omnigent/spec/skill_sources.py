@@ -958,11 +958,11 @@ def _agy_skill_dirs(ctx: SkillSourceContext) -> list[tuple[Path, str | None]]:
     """
     agy's skill directories with their namespace, in discovery order.
 
-    The five sources agy's own ``/skills`` panel lists (live-verified, agy
-    1.1.9 — the panel prints these paths verbatim)::
+    The sources agy reads (live-verified on agy 1.1.9 and 1.5.x)::
 
         <workspace>/.agents/skills/<skill>/SKILL.md          "Workspace"
-        ~/.gemini/antigravity-cli/skills/<skill>/SKILL.md    "Global"
+        ~/.gemini/config/skills/<skill>/SKILL.md             "Global" (1.5.x)
+        ~/.gemini/antigravity-cli/skills/<skill>/SKILL.md    "Global" (older; still read)
         ~/.gemini/skills/<skill>/SKILL.md                    "Shared"
         ~/.gemini/config/plugins/<plugin>/skills/<skill>/…   imported plugins
         ~/.gemini/antigravity-cli/builtin/skills/<skill>/…   shipped builtins
@@ -997,11 +997,15 @@ def _agy_skill_dirs(ctx: SkillSourceContext) -> list[tuple[Path, str | None]]:
         workspace_skills = root / ".agents" / "skills"
         if workspace_skills.is_dir():
             dirs.append((workspace_skills, None))
+    seen: set[Path] = set()
     for bare in (
+        gemini / "config" / "skills",
         gemini / "antigravity-cli" / "skills",
         gemini / "skills",
     ):
-        if bare.is_dir():
+        # agy's migration can leave the old Global dir as a link to the new one.
+        if bare.is_dir() and bare.resolve() not in seen:
+            seen.add(bare.resolve())
             dirs.append((bare, None))
     plugins_root = gemini / "config" / "plugins"
     try:

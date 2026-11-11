@@ -2170,12 +2170,15 @@ def test_seed_isolated_agy_hooks_keeps_previous_copy_on_refresh_error(
 def test_seed_isolated_agy_home_exposes_user_skill_dirs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """agy's Global and Shared skill trees resolve under ``--gemini_dir``.
+    """agy's Global (new and old location) and Shared skill trees resolve under ``--gemini_dir``.
 
     The ``/skills`` menu enumerates these from the REAL home, so a session that
     cannot resolve them there would offer a skill agy then fails to expand.
     """
     fake_home = tmp_path / "real-home"
+    real_config = fake_home / ".gemini" / "config" / "skills"
+    (real_config / "config-skill").mkdir(parents=True)
+    (real_config / "config-skill" / "SKILL.md").write_text("# config", encoding="utf-8")
     real_global = fake_home / ".gemini" / "antigravity-cli" / "skills"
     real_shared = fake_home / ".gemini" / "skills"
     (real_global / "global-skill").mkdir(parents=True)
@@ -2191,8 +2194,10 @@ def test_seed_isolated_agy_home_exposes_user_skill_dirs(
     iso_gemini = agy_gemini_dir(bridge_dir)
     iso_global = iso_gemini / "antigravity-cli" / "skills"
     iso_shared = iso_gemini / "skills"
+    iso_config = iso_gemini / "config" / "skills"
     # Linked, not copied: a skill authored mid-session is visible immediately.
-    assert iso_global.is_symlink() and iso_shared.is_symlink()
+    assert iso_global.is_symlink() and iso_shared.is_symlink() and iso_config.is_symlink()
+    assert (iso_config / "config-skill" / "SKILL.md").read_text(encoding="utf-8") == "# config"
     assert (iso_global / "global-skill" / "SKILL.md").read_text(encoding="utf-8") == "# global"
     assert (iso_shared / "shared-skill" / "SKILL.md").read_text(encoding="utf-8") == "# shared"
     (real_shared / "later").mkdir()
