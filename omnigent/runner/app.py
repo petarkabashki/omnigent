@@ -669,14 +669,14 @@ def _session_role_resolver(
     raw_resolver: SpecResolver,
     session_snapshot: Callable[[str], Awaitable[_SessionSnapshot]],
 ) -> SpecResolver:
-    """Wrap ``raw_resolver`` so every caller sees the session's role overlay."""
+    """Wrap ``raw_resolver`` so every caller sees the session's role and library skills."""
 
     async def resolve(agent_id: str, session_id: str | None) -> _SpecEntry | None:
         entry = await raw_resolver(agent_id, session_id)
         if entry is None or not session_id:
             return entry
         snapshot = await session_snapshot(session_id)
-        if not snapshot.labels:
+        if not snapshot.labels and not snapshot.workspace:
             return entry
         # Role loading reads files and walks skill directories; keep it off the loop.
         return await asyncio.to_thread(

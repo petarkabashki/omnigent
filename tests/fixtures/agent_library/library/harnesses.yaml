@@ -1,0 +1,13 @@
+format_version: 1
+blocks:
+  agent-rules: {begin: "<!-- agent-rules:begin -->", end: "<!-- agent-rules:end -->"}
+  fleet-memory: {begin: "<!-- BEGIN AG-FLEET SHARED MEMORY -->", end: "<!-- END AG-FLEET SHARED MEMORY -->"}
+harnesses:
+  claude:
+    link: true
+    skills: {project: [.claude/skills], user: [~/.claude/skills]}
+    globals: [{path: ~/.claude/CLAUDE.md, blocks: [fleet-memory]}]
+  codex:
+    link: true
+    skills: {project: [.agents/skills], user: [~/.agents/skills]}
+    globals: [{path: ~/.codex/AGENTS.md, blocks: [agent-rules]}]

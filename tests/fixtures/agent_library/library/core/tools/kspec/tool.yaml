@@ -1,0 +1,6 @@
+description: Query kspec signal specifications over MCP
+kind: mcp
+mcp:
+  transport: stdio
+  command: kspec-mcp
+  args: [--readonly]

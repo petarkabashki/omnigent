@@ -2,7 +2,9 @@
 
 A session aliased ``Architect`` loads ``~/.omnigent/roles/Architect.md`` (or
 ``Architect/ROLE.md``) as the base and layers
-``<workspace>/.omnigent/roles/Architect.md`` on top. An ``omnigent.role_overlay``
+``<workspace>/.omnigent/roles/Architect.md`` on top. In a workspace that uses the
+shared agent library (see :mod:`omnigent.runtime.agent_library`), the library's
+role replaces the home file as the base. An ``omnigent.role_overlay``
 label names the file instead, so a role can reuse another's file while keeping
 its own alias. A role file is Markdown with optional YAML front matter::
 
@@ -63,10 +65,14 @@ class RoleSource:
 
     :param path: The Markdown file, e.g. ``~/.omnigent/roles/Bench/ROLE.md``.
     :param trusted: Whether this source may add skills and MCP servers.
+    :param body: Final text from the agent library; the file is then not read.
+    :param meta: Front matter that comes with ``body``.
     """
 
     path: Path
     trusted: bool
+    body: str | None = None
+    meta: Mapping[str, object] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,12 +127,37 @@ def is_trusted_role_workspace(workspace: str, home: Path | None = None) -> bool:
     return any(entry.is_absolute() and entry.resolve() == target for entry in entries)
 
 
+# Library metadata keys a role may carry; skills, tools and executors stay out.
+_LIBRARY_ROLE_META_KEYS = ("description", "params")
+
+
+def _library_role_source(alias: str, workspace: str | None) -> RoleSource | None:
+    """The agent library's role for ``alias`` when the workspace uses the library."""
+    from omnigent.runtime.agent_library import resolve_library
+
+    resolution = resolve_library(workspace, alias)
+    role = resolution.role(alias) if resolution is not None else None
+    if role is None:
+        return None
+    meta = {key: role.metadata[key] for key in _LIBRARY_ROLE_META_KEYS if key in role.metadata}
+    return RoleSource(role.path, trusted=True, body=role.body, meta=meta)
+
+
 def find_role_sources(
     alias: str, workspace: str | None, *, home: Path | None = None
 ) -> list[RoleSource]:
-    """Return the home role then the workspace role, whichever exist."""
-    home_file = _find_role_file((home or Path.home()).joinpath(*ROLES_DIR_PARTS), alias)
-    sources = [RoleSource(home_file, trusted=True)] if home_file is not None else []
+    """Return the base role then the workspace role, whichever exist.
+
+    The base is the agent library's role when the workspace uses the library and
+    defines it, else the home role file.
+    """
+    home_file: Path | None = None
+    library_source = _library_role_source(alias, workspace)
+    if library_source is not None:
+        sources = [library_source]
+    else:
+        home_file = _find_role_file((home or Path.home()).joinpath(*ROLES_DIR_PARTS), alias)
+        sources = [RoleSource(home_file, trusted=True)] if home_file is not None else []
     if workspace:
         ws_dir = Path(workspace).expanduser().joinpath(*ROLES_DIR_PARTS)
         ws_file = _find_role_file(ws_dir, alias)
@@ -134,6 +165,18 @@ def find_role_sources(
             trusted = is_trusted_role_workspace(workspace, home)
             sources.append(RoleSource(ws_file, trusted=trusted))
     return sources
+
+
+def _read_role_source(source: RoleSource) -> tuple[dict[str, object], str] | None:
+    """Return a source's front matter and body, or ``None`` when its file is unreadable."""
+    if source.body is not None:
+        return dict(source.meta or {}), source.body
+    try:
+        raw = source.path.read_bytes()[:MAX_ROLE_FILE_BYTES]
+    except OSError as exc:
+        _logger.warning("Could not read role file %s: %s", source.path, exc)
+        return None
+    return split_role_file(raw.decode("utf-8", errors="replace"))
 
 
 def split_role_file(text: str) -> tuple[dict[str, object], str]:
@@ -165,11 +208,10 @@ def role_executor_name(
         return None
     chosen: str | None = None
     for source in find_role_sources(alias, workspace, home=home):
-        try:
-            raw = source.path.read_bytes()[:MAX_ROLE_FILE_BYTES]
-        except OSError:
+        read = _read_role_source(source)
+        if read is None:
             continue
-        meta, _ = split_role_file(raw.decode("utf-8", errors="replace"))
+        meta, _ = read
         name = meta.get("executor")
         if not isinstance(name, str) or not name.strip():
             continue
@@ -322,12 +364,10 @@ def load_role_overlay(
         return None
     loaded: list[tuple[RoleSource, dict[str, object], str]] = []
     for source in find_role_sources(alias, workspace, home=home):
-        try:
-            raw = source.path.read_bytes()[:MAX_ROLE_FILE_BYTES]
-        except OSError as exc:
-            _logger.warning("Could not read role file %s: %s", source.path, exc)
+        read = _read_role_source(source)
+        if read is None:
             continue
-        meta, body = split_role_file(raw.decode("utf-8", errors="replace"))
+        meta, body = read
         loaded.append((source, meta, body.strip()))
     if not loaded:
         return None
@@ -430,6 +470,38 @@ def apply_role_overlay(spec: AgentSpec, overlay: RoleOverlay) -> AgentSpec:
     )
 
 
+def session_role_name(labels: Mapping[str, str] | None) -> str | None:
+    """The role-file name a session's labels select, or ``None``."""
+    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY
+
+    labels = labels or {}
+    name = labels.get(ROLE_OVERLAY_LABEL_KEY) or labels.get(ALIAS_LABEL_KEY)
+    return name if name and ALIAS_PATTERN.match(name) else None
+
+
+def apply_library_skills(
+    spec: AgentSpec, labels: Mapping[str, str] | None, workspace: str | None
+) -> AgentSpec:
+    """Add the agent library's skills for the session's workspace and role.
+
+    Skills the spec already names (its bundle or role skills) keep their place.
+    """
+    from omnigent.runtime.agent_library import library_skills, resolve_library
+
+    if not workspace:
+        return spec
+    resolution = resolve_library(workspace, session_role_name(labels))
+    if resolution is None:
+        return spec
+    present = {skill.name for skill in spec.skills}
+    extra = [
+        skill
+        for skill in library_skills(resolution, workspace, spec.skills_filter)
+        if skill.name not in present
+    ]
+    return dataclasses.replace(spec, skills=[*spec.skills, *extra]) if extra else spec
+
+
 def apply_session_role(
     spec: AgentSpec, labels: Mapping[str, str] | None, workspace: str | None
 ) -> AgentSpec:
@@ -438,6 +510,7 @@ def apply_session_role(
 
     overlay = load_session_role_overlay(labels, workspace)
     spec = apply_role_overlay(spec, overlay) if overlay is not None else spec
+    spec = apply_library_skills(spec, labels, workspace)
     fork_line = fork_identity_instruction(labels)
     if fork_line is None or fork_line in (spec.instructions or ""):
         return spec

@@ -1,0 +1,6 @@
+description: Download daily prices into the shared parquet store
+kind: script
+script:
+  path: fetch_prices.py
+  interpreter: python3
+  usage: fetch_prices.py SYMBOL [--since YYYY-MM-DD]

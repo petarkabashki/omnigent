@@ -1,0 +1,235 @@
+{
+  "format": "agent-library.resolve",
+  "format_version": 1,
+  "library": {
+    "root": "{library}",
+    "commit": null
+  },
+  "scope": {
+    "kind": "project",
+    "root": "{project}",
+    "project_file": "{project}/.agents/library.yaml",
+    "role": null
+  },
+  "layers": [
+    {
+      "id": "core",
+      "kind": "core",
+      "name": null,
+      "path": "{library}/core",
+      "selected_by": "always"
+    },
+    {
+      "id": "collection:base-data",
+      "kind": "collection",
+      "name": "base-data",
+      "path": "{library}/collections/base-data",
+      "selected_by": "include:python"
+    },
+    {
+      "id": "collection:python",
+      "kind": "collection",
+      "name": "python",
+      "path": "{library}/collections/python",
+      "selected_by": "project"
+    },
+    {
+      "id": "collection:research",
+      "kind": "collection",
+      "name": "research",
+      "path": "{library}/collections/research",
+      "selected_by": "project"
+    },
+    {
+      "id": "project",
+      "kind": "project",
+      "name": null,
+      "path": "{project}/.agents/library",
+      "selected_by": "always"
+    }
+  ],
+  "assets": {
+    "skills": [
+      {
+        "name": "coding-style",
+        "layer": "collection:python",
+        "path": "{library}/collections/python/skills/coding-style",
+        "file": "{library}/collections/python/skills/coding-style/SKILL.md",
+        "description": "Python coding style (ruff, PEP 8). Use when writing or reviewing Python.",
+        "shadowed": [
+          {
+            "layer": "core",
+            "path": "{library}/core/skills/coding-style"
+          }
+        ]
+      },
+      {
+        "name": "data-loading",
+        "layer": "collection:research",
+        "path": "{library}/collections/research/skills/data-loading",
+        "file": "{library}/collections/research/skills/data-loading/SKILL.md",
+        "description": "Load research datasets (CSV, papers' supplements). Use when a task needs research data.",
+        "shadowed": [
+          {
+            "layer": "collection:base-data",
+            "path": "{library}/collections/base-data/skills/data-loading"
+          }
+        ]
+      },
+      {
+        "name": "python-core",
+        "layer": "collection:python",
+        "path": "{library}/collections/python/skills/python-core",
+        "file": "{library}/collections/python/skills/python-core/SKILL.md",
+        "description": "Python conventions (uv, pytest, typing). Use in Python projects.",
+        "shadowed": []
+      },
+      {
+        "name": "release-notes",
+        "layer": "project",
+        "path": "{project}/.agents/library/skills/release-notes",
+        "file": "{project}/.agents/library/skills/release-notes/SKILL.md",
+        "description": "Write this project's release notes. Use when tagging a release.",
+        "shadowed": []
+      }
+    ],
+    "roles": [
+      {
+        "name": "Architect",
+        "layer": "project",
+        "path": "{project}/.agents/library/roles/Architect.md",
+        "shadowed": [
+          {
+            "layer": "core",
+            "path": "{library}/core/roles/Architect.md"
+          }
+        ],
+        "description": "Architecture and implementation owner for this project",
+        "metadata": {
+          "description": "Architecture and implementation owner for this project"
+        },
+        "body": "You are this project's Architect.\n\nIn this project you also own the CLI's resolve format.\n",
+        "chain": [
+          {
+            "layer": "core",
+            "path": "{library}/core/roles/Architect.md",
+            "merge": "base"
+          },
+          {
+            "layer": "project",
+            "path": "{project}/.agents/library/roles/Architect.md",
+            "merge": "append"
+          }
+        ]
+      }
+    ],
+    "prompts": [
+      {
+        "name": "review",
+        "layer": "project",
+        "path": "{project}/.agents/library/prompts/review.md",
+        "shadowed": [
+          {
+            "layer": "core",
+            "path": "{library}/core/prompts/review.md"
+          }
+        ],
+        "description": "Review the current change for correctness bugs",
+        "metadata": {
+          "description": "Review the current change for correctness bugs",
+          "arguments": [
+            {
+              "name": "target",
+              "description": "branch, path or commit to review",
+              "required": false
+            }
+          ]
+        },
+        "body": "Review {{target}} for correctness bugs and for changes to the resolve format.\n",
+        "chain": [
+          {
+            "layer": "core",
+            "path": "{library}/core/prompts/review.md",
+            "merge": "base"
+          },
+          {
+            "layer": "project",
+            "path": "{project}/.agents/library/prompts/review.md",
+            "merge": "replace"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "name": "fleet-memory",
+        "layer": "core",
+        "path": "{library}/core/rules/fleet-memory.md",
+        "shadowed": [],
+        "block": "fleet-memory",
+        "order": 10,
+        "harnesses": null,
+        "body": "# ag-fleet Shared Fleet Memory\n\n- Canonical hub: `hub-host`\n"
+      },
+      {
+        "name": "shared-rules",
+        "layer": "core",
+        "path": "{library}/core/rules/shared-rules.md",
+        "shadowed": [],
+        "block": "agent-rules",
+        "order": 10,
+        "harnesses": null,
+        "body": "# Global working rules\n\nKeep shell output small.\n"
+      }
+    ],
+    "tools": [
+      {
+        "name": "fetch-prices",
+        "layer": "collection:base-data",
+        "path": "{library}/collections/base-data/tools/fetch-prices",
+        "shadowed": [],
+        "description": "Download daily prices into the shared parquet store",
+        "kind": "script",
+        "script": {
+          "path": "{library}/collections/base-data/tools/fetch-prices/fetch_prices.py",
+          "interpreter": "python3",
+          "usage": "fetch_prices.py SYMBOL [--since YYYY-MM-DD]"
+        }
+      },
+      {
+        "name": "kspec",
+        "layer": "core",
+        "path": "{library}/core/tools/kspec",
+        "shadowed": [],
+        "description": "Query kspec signal specifications over MCP",
+        "kind": "mcp",
+        "mcp": {
+          "transport": "stdio",
+          "command": "kspec-mcp",
+          "args": [
+            "--readonly"
+          ]
+        }
+      }
+    ]
+  },
+  "excluded": [
+    {
+      "type": "skills",
+      "name": "plotting",
+      "layer": "core",
+      "path": "{library}/core/skills/plotting",
+      "reason": "exclude",
+      "by": "project"
+    }
+  ],
+  "diagnostics": [
+    {
+      "level": "warning",
+      "code": "collection-collision",
+      "type": "skills",
+      "name": "data-loading",
+      "message": "skills/data-loading is defined by collection:base-data and collection:research; collection:research wins (later in the project's collection order). Set prefer.skills.data-loading in the project file to choose explicitly."
+    }
+  ]
+}
