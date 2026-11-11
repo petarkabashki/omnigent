@@ -12896,10 +12896,26 @@
             ],
             "title": "Model Override"
           },
+          "moved": {
+            "default": false,
+            "title": "Moved",
+            "type": "boolean"
+          },
           "resent": {
             "default": false,
             "title": "Resent",
             "type": "boolean"
+          },
+          "role_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Id"
           },
           "scheduled_run": {
             "anyOf": [

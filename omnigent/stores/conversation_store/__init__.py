@@ -709,6 +709,27 @@ class ConversationStore(ABC):
         """
         raise NotImplementedError
 
+    def move_pending_inputs(
+        self,
+        from_id: str,
+        to_id: str,
+        item_ids: Sequence[str],
+        *,
+        statuses: Sequence[str] = ("in_progress",),
+        transform: Callable[[ConversationItem], ItemData] | None = None,
+    ) -> list[ConversationItem]:
+        """Move pending inputs to the tail of another session's queue in one write.
+
+        Only rows still on ``from_id`` in one of ``statuses`` move; each arrives
+        queued (``in_progress``) with the same id, in original order. ``transform``
+        rewrites a row's payload on the way. Returns the rows as written on ``to_id``.
+        """
+        raise NotImplementedError
+
+    def list_pending_input_conversation_ids(self) -> list[str]:
+        """Return the sessions that have any pending input, for recovery sweeps."""
+        return []
+
     def count_running_sessions_by_host(self, host_ids: Sequence[str]) -> dict[str, int]:  # noqa: ARG002
         """Count sessions mid-turn, waiting, or holding a fresh runner, keyed by host id."""
         return {}

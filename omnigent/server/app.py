@@ -2256,6 +2256,11 @@ def create_app(
             user_id=RESERVED_USER_LOCAL if auth_provider is not None else None,
         )
         session_pull_requests.install_refresher(pull_request_refresher)
+        role_mail_sweep = (
+            asyncio.create_task(startup_inputs.sweep_role_mail(app_inst), name="role-mail-sweep")
+            if startup_inputs is not None
+            else None
+        )
         try:
             with monitor_event_loop():
                 yield
@@ -2289,6 +2294,8 @@ def create_app(
             await cancel_managed_launch_tasks(
                 drain_s=sandbox_config.shutdown_drain_s if sandbox_config is not None else 0.0
             )
+            if role_mail_sweep is not None:
+                role_mail_sweep.cancel()
             if startup_inputs is not None:
                 await startup_inputs.shutdown()
             await background_title_coordinator.shutdown()
@@ -2332,7 +2339,7 @@ def create_app(
     # Only managed creates accept a durable first input, and only managed hosts
     # need their startup recovered on the replica holding the tunnel.
     startup_inputs = (
-        ManagedStartupInputs(conversation_store, host_registry)
+        ManagedStartupInputs(conversation_store, host_registry, project_store)
         if sandbox_config is not None and sandbox_config.managed_launch_supported
         else None
     )

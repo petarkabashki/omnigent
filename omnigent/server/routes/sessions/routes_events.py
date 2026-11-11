@@ -354,6 +354,7 @@ from omnigent.session_event_batch import (
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
+    ROLE_ID_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
     SIDE_CHAT_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -2241,6 +2242,12 @@ def register_events_routes(
                 headers=request.headers,
                 first=False,
                 address=sent_address,
+                # Sent to a role, not a session id: the message follows the role.
+                role_id=(
+                    conv.labels.get(ROLE_ID_LABEL_KEY)
+                    if peer_message and sent_address not in (None, session_id)
+                    else None
+                ),
             )
             if conv.host_id is not None:
                 startup.host_changed(request.app, conv.host_id)

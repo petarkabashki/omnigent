@@ -361,6 +361,10 @@ class StartupInputOptions(BaseModel):
     address: str | None = None
     # Set when a hub restart left delivery in doubt and the input was re-sent.
     resent: bool = False
+    # The role the sender addressed; the input is delivered only on its holder.
+    role_id: str | None = None
+    # Set once the input moved from an earlier holder to the role's current one.
+    moved: bool = False
 
 
 # Longest harness message phase kept, e.g. Codex ``"partial_answer"``.

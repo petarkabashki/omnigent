@@ -429,7 +429,29 @@ def take_role(
     _write_mirror(conversations, session, taken)
     if stale_holder is not None:
         _clear_mirror(conversations, stale_holder)
+    _bring_role_mail(conversations, projects, {stale_holder, taken.previous_session_id})
     return taken
+
+
+def _bring_role_mail(
+    conversations: ConversationStore, projects: ProjectStore, sources: set[str | None]
+) -> None:
+    """Move messages queued for the role on earlier holders to its new holder.
+
+    Best effort: the inbox worker's sweep repairs any move this misses.
+    """
+    from omnigent.server.role_mail import relocate_role_mail
+    from omnigent.server.startup_inputs import wake_startup_worker
+
+    for source in {source for source in sources if source is not None}:
+        try:
+            moved = relocate_role_mail(conversations, projects, source)
+        except Exception:
+            _logger.exception("Unable to move queued role messages from session %s", source)
+            continue
+        for batch in moved:
+            if batch.host_id is not None:
+                wake_startup_worker(batch.host_id)
 
 
 def _create_role_row(

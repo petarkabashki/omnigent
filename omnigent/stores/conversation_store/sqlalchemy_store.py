@@ -3106,6 +3106,73 @@ class SqlAlchemyConversationStore(ConversationStore):
             self._conv_session_immediate, "transition_pending_input", write
         )
 
+    def move_pending_inputs(
+        self,
+        from_id: str,
+        to_id: str,
+        item_ids: Sequence[str],
+        *,
+        statuses: Sequence[str] = ("in_progress",),
+        transform: Callable[[ConversationItem], ItemData] | None = None,
+    ) -> list[ConversationItem]:
+        if from_id == to_id or not item_ids:
+            return []
+        workspace_id = current_workspace_id()
+
+        def write(session: Session) -> list[ConversationItem]:
+            for conversation_id in sorted((from_id, to_id)):
+                self._lock_conversation(session, conversation_id)
+            rows = list(
+                session.scalars(
+                    select(SqlConversationItem)
+                    .where(
+                        SqlConversationItem.workspace_id == workspace_id,
+                        SqlConversationItem.conversation_id == from_id,
+                        SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+                        SqlConversationItem.id.in_(list(item_ids)),
+                        SqlConversationItem.status.in_(
+                            [encode_item_status(status) for status in statuses]
+                        ),
+                    )
+                    .order_by(SqlConversationItem.position)
+                )
+            )
+            if not rows:
+                return []
+            decoded = self._decode_item_data_batch([row.data for row in rows])
+            moving = [_to_item(row, data) for row, data in zip(rows, decoded, strict=True)]
+            for row in rows:
+                session.delete(row)
+            session.flush()
+            new_items = [
+                NewConversationItem(
+                    type=item.type,
+                    response_id=PENDING_INPUT_RESPONSE_ID,
+                    data=transform(item) if transform is not None else item.data,
+                    created_by=item.created_by,
+                    stable_id=item.id,
+                    status="in_progress",
+                )
+                for item in moving
+            ]
+            now = now_epoch()
+            prepared = self._prepare_item_rows(to_id, new_items, now)
+            return self._write_prepared_items(session, to_id, new_items, prepared, now)
+
+        return run_write_transaction(self._conv_session_immediate, "move_pending_inputs", write)
+
+    def list_pending_input_conversation_ids(self) -> list[str]:
+        query = (
+            select(SqlConversationItem.conversation_id)
+            .where(
+                SqlConversationItem.workspace_id == current_workspace_id(),
+                SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+            )
+            .distinct()
+        )
+        with self._conv_session("list_pending_input_conversations") as session:
+            return list(session.scalars(query))
+
     def get_item(self, conversation_id: str, item_id: str) -> ConversationItem | None:
         """
         Fetch one persisted item by id, or ``None`` when absent.

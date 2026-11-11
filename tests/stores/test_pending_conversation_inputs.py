@@ -221,3 +221,39 @@ def test_pending_input_pages_continue_in_submission_order(db_uri):
     assert [item.id for item in store.list_pending_inputs(session.id)] == [
         item.id for item in saved
     ]
+
+
+def test_move_pending_inputs_keeps_ids_and_order_and_moves_each_row_once(db_uri):
+    store = SqlAlchemyConversationStore(db_uri)
+    source, target = store.create_conversation(), store.create_conversation()
+    first, claimed, second, own = store.append(
+        source.id, [_input("first"), _input("claimed"), _input("second"), _input("own")]
+    )
+    assert store.transition_pending_input(
+        source.id, claimed.id, expected="in_progress", status="incomplete"
+    )
+    store.append(target.id, [_input("already there")])
+
+    def mark(item):
+        text = item.data.content[0]["text"]
+        return item.data.model_copy(
+            update={"content": [{"type": "input_text", "text": f"~{text}"}]}
+        )
+
+    moved = store.move_pending_inputs(
+        source.id, target.id, [second.id, claimed.id, first.id], transform=mark
+    )
+    # A claimed row stays unless its status is asked for; the session's own row stays too.
+    assert [item.id for item in moved] == [first.id, second.id]
+    assert [item.id for item in store.list_pending_inputs(source.id)] == [claimed.id, own.id]
+    texts = [item.data.content[0]["text"] for item in store.list_pending_inputs(target.id)]
+    assert texts == ["already there", "~first", "~second"]
+    # Repeating the move finds nothing left to move.
+    assert store.move_pending_inputs(source.id, target.id, [first.id, second.id]) == []
+
+    [requeued] = store.move_pending_inputs(
+        source.id, target.id, [claimed.id], statuses=("in_progress", "incomplete")
+    )
+    assert (requeued.id, requeued.status) == (claimed.id, "in_progress")
+    assert [item.id for item in store.list_pending_inputs(source.id)] == [own.id]
+    assert set(store.list_pending_input_conversation_ids()) == {source.id, target.id}

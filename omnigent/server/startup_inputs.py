@@ -39,10 +39,12 @@ from omnigent.server.scheduled.telemetry import (
 from omnigent.server.schemas import SessionEventInput, SessionStartupInput
 from omnigent.stores.conversation_store import (
     PENDING_INPUT_RESPONSE_ID,
+    ROLE_ID_LABEL_KEY,
     ConversationNotFoundError,
     ConversationStore,
 )
 from omnigent.stores.host_store import host_is_live
+from omnigent.stores.project_store import ProjectStore
 
 _logger = logging.getLogger(__name__)
 STARTUP_LABEL = "omnigent.startup"
@@ -57,31 +59,53 @@ def initial_input_id(session_id: str) -> str:
 
 
 # Delivery markers, in the fixed order they appear after a message header.
-DELIVERY_MARKERS: tuple[str, ...] = (RESENT_NOTICE,)
+MOVED_FROM_CLOSED_NOTICE = "[Moved from a closed holder; it may be a repeat]"
+
+# Delivery marker kinds, in the fixed order they appear after a message header.
+# A message carries at most one marker of each kind.
+DELIVERY_MARKERS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\[Sent to [^\]\n]+ before you held it\]"),
+    re.compile(re.escape(RESENT_NOTICE)),
+    re.compile(re.escape(MOVED_FROM_CLOSED_NOTICE)),
+)
 _MESSAGE_HEADER_PREFIX = "[Message from "
+
+
+def sent_before_held_marker(role_handle: str) -> str:
+    """The routing marker on a message that reached a role's later holder."""
+    return f"[Sent to {role_handle} before you held it]"
+
+
+def _marker_kind(line: str) -> int | None:
+    return next(
+        (kind for kind, pattern in enumerate(DELIVERY_MARKERS) if pattern.fullmatch(line)), None
+    )
 
 
 def _with_markers(text: str, markers: Sequence[str]) -> str:
     """Put *markers* after a ``[Message from …]`` header line, or first without one.
 
-    Markers already present are kept once, and all are written in
-    :data:`DELIVERY_MARKERS` order, so header-first parsers still match.
+    Markers already present win over new ones of the same kind, and all are
+    written in :data:`DELIVERY_MARKERS` order, so header-first parsers still match.
     """
     lines = text.split("\n")
     header = lines[:1] if lines[0].startswith(_MESSAGE_HEADER_PREFIX) else []
     body = lines[len(header) :]
     present = 0
-    while present < len(body) and body[present] in DELIVERY_MARKERS:
+    while present < len(body) and _marker_kind(body[present]) is not None:
         present += 1
     return "\n".join([*header, *_ordered_markers([*body[:present], *markers]), *body[present:]])
 
 
 def _ordered_markers(markers: Sequence[str]) -> list[str]:
-    """Return *markers* once each in :data:`DELIVERY_MARKERS` order; reject unknown ones."""
-    unknown = set(markers) - set(DELIVERY_MARKERS)
-    if unknown:
-        raise ValueError(f"unregistered delivery markers: {sorted(unknown)}")
-    return [marker for marker in DELIVERY_MARKERS if marker in markers]
+    """The first marker of each kind, in :data:`DELIVERY_MARKERS` order; unknown ones raise."""
+    by_kind: dict[int, str] = {}
+    for marker in markers:
+        kind = _marker_kind(marker)
+        if kind is None:
+            raise ValueError(f"unregistered delivery marker: {marker!r}")
+        by_kind.setdefault(kind, marker)
+    return [by_kind[kind] for kind in sorted(by_kind)]
 
 
 def add_delivery_markers(
@@ -139,6 +163,7 @@ class StartupInputContext:
     user_id: str | None
     input_id: str
     submitted: bool = False
+    role_id: str | None = None
 
     async def is_disconnected(self) -> bool:
         return False
@@ -147,6 +172,11 @@ class StartupInputContext:
         # Leave the row queued throughout launch, authorization and policy checks.
         # A submitted native input is never replayed without its transcript receipt.
         start_fire_stage("input_claim", session_id=session_id)
+        if self.role_id is not None:
+            # A role released since dispatch parks the input instead of delivering it.
+            conv = await asyncio.to_thread(store.get_conversation, session_id)
+            if conv is None or conv.labels.get(ROLE_ID_LABEL_KEY) != self.role_id:
+                return False
         self.submitted = await asyncio.to_thread(
             store.transition_pending_input,
             session_id,
@@ -173,16 +203,31 @@ def wake_startup_worker(host_id: str) -> None:
     key = (current_workspace_id(), host_id)
     for service in _services:
         entry = service._workers.get(key)
-        if entry is not None:
+        if entry is None:
+            continue
+        loop = entry[1].get_loop()
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
             entry[2].set()
+        else:  # Called from a worker thread, such as a role take.
+            loop.call_soon_threadsafe(entry[2].set)
 
 
 class ManagedStartupInputs:
     """Recover pending conversation items on the replica connected to their host."""
 
-    def __init__(self, conversations: ConversationStore, hosts: HostRegistry) -> None:
+    def __init__(
+        self,
+        conversations: ConversationStore,
+        hosts: HostRegistry,
+        projects: ProjectStore | None = None,
+    ) -> None:
         self.conversations = conversations
         self.hosts = hosts
+        self.projects = projects
         _services.add(self)
         self.dispatch: StartupDispatch | None = None
         self._workers: dict[
@@ -199,6 +244,7 @@ class ManagedStartupInputs:
         headers: Headers,
         first: bool = True,
         address: str | None = None,
+        role_id: str | None = None,
     ) -> ConversationItem:
         from omnigent.server.background_session_titles import background_session_titles_enabled
         from omnigent.server.routes._sessions.helpers import (
@@ -235,6 +281,7 @@ class ManagedStartupInputs:
                     background_titles_enabled=background_session_titles_enabled(headers),
                     scheduled_run=current_scheduled_run(),
                     address=address,
+                    role_id=role_id,
                 )
             }
         )
@@ -333,8 +380,11 @@ class ManagedStartupInputs:
 
     async def has_undelivered(self, session_id: str) -> bool:
         """Whether a saved input is still to be delivered (or confirmed) here."""
-        return any(
-            item.status in ("in_progress", "incomplete")
+        from omnigent.server.role_mail import is_parked
+
+        conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+        return conv is not None and any(
+            item.status in ("in_progress", "incomplete") and not is_parked(item, conv)
             for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         )
 
@@ -351,9 +401,13 @@ class ManagedStartupInputs:
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
         if conv is None or conv.labels.get(STARTUP_LABEL) == "cancelled":
             return [], []
+        from omnigent.server.role_mail import is_parked
+
         queued: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
         for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id):
+            if item.status != "failed" and is_parked(item, conv):
+                continue
             entry = {
                 "pending_id": pending_inputs.make_pending_id(session_id, item.id),
                 "content": input_content(item),
@@ -422,10 +476,20 @@ class ManagedStartupInputs:
             if not items:
                 await self._finish(session_id)
             return False
+        from omnigent.server.role_mail import input_role_id, is_parked
+
+        if any(
+            input_role_id(item) is not None for item in items
+        ) and await self.relocate_role_mail(app, session_id):
+            items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         # A refused input waits for an explicit retry without holding back the
         # ones behind it. One submitted to a native harness and awaiting its
-        # transcript receipt still does: it may already have run.
-        head = next((item for item in items if item.status != "failed"), None)
+        # transcript receipt still does: it may already have run. A parked input
+        # waits for its role's next holder without blocking this session's own.
+        head = next(
+            (item for item in items if item.status != "failed" and not is_parked(item, conv)),
+            None,
+        )
         if head is not None:
             # Delivered even without the label: a message saved while the label
             # was being cleared still belongs to this session's startup.
@@ -463,6 +527,28 @@ class ManagedStartupInputs:
             # A runner is bound and nothing is left to deliver.
             await self._finish(session_id)
         return False
+
+    async def relocate_role_mail(self, app: Any, session_id: str) -> bool:
+        """Move ``session_id``'s parked role mail to live holders; wake their hosts."""
+        from omnigent.server.role_mail import relocate_role_mail
+
+        moved = await asyncio.to_thread(
+            relocate_role_mail, self.conversations, self.projects, session_id
+        )
+        for batch in moved:
+            if batch.host_id is not None:
+                self.host_changed(app, batch.host_id)
+        return bool(moved)
+
+    async def sweep_role_mail(self, app: Any) -> None:
+        """Repair moves a crash or restart interrupted, across every session."""
+        try:
+            for session_id in await asyncio.to_thread(
+                self.conversations.list_pending_input_conversation_ids
+            ):
+                await self.relocate_role_mail(app, session_id)
+        except Exception:
+            _logger.exception("Unable to sweep queued role messages")
 
     async def _resend_in_doubt(self, session_id: str, item: ConversationItem) -> ConversationItem:
         """Queue again an input submitted before a restart, marked as a possible repeat.
@@ -554,6 +640,7 @@ class ManagedStartupInputs:
                 ),
                 item.created_by,
                 item.id,
+                role_id=options.role_id if options else None,
             )
             event = SessionEventInput(
                 type=item.type,

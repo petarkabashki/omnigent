@@ -3112,3 +3112,167 @@ async def test_owner_releases_allows_or_discards_a_held_message(auth_client, pee
     assert allowed.status_code == 200 and allowed.json()["delivered"] == [product["id"]]
     assert "third held" in (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
     assert (await _send(auth_client, architect, product, "after allow")).get("queued") is True
+
+
+async def _send_to_address(client, source, address, message):
+    return json.loads(
+        await execute_tool(
+            tool_name="sys_session_message",
+            arguments=json.dumps({"session_id": address, "message": message}),
+            server_client=client,
+            conversation_id=source["id"],
+        )
+    )
+
+
+async def _role_mail_setup(auth_client, auth_app, peers, db_uri, monkeypatch):
+    """Architect sends to a busy Product; a successor session waits on the same host."""
+    from unittest.mock import AsyncMock
+
+    from omnigent.host.frames import HostHelloFrame
+
+    architect, product, captured = peers
+    successor = await _create_session_as(auth_client, "", "alice")
+    store = SqlAlchemyConversationStore(db_uri)
+    host_id = uuid4().hex
+    for session in (product, successor):
+        store.set_host_id(session["id"], host_id, "/tmp/inbox-workspace")
+        store.set_session_live_status(session["id"], "running")
+    auth_app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="inbox", runners=[]),
+        owner=None,
+    )
+    monkeypatch.setattr(auth_app.state.startup_inputs, "host_changed", lambda *_: None)
+    for session, alias in ((architect, "Architect"), (product, "Product")):
+        assert (
+            await auth_client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+        ).status_code == 200
+    return architect, product, successor, store, captured
+
+
+def _texts(items):
+    return [item.data.content[0]["text"] for item in items]
+
+
+async def test_role_mail_follows_the_role_to_its_next_holder(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    from omnigent.server.role_threads import thread_of_header
+
+    architect, product, successor, store, captured = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    startup = auth_app.state.startup_inputs
+    for text in ("first", "second"):
+        assert (await _send_to_address(auth_client, architect, "Product", text))["queued"]
+    assert (await _send(auth_client, architect, product, "by id"))["queued"]
+    rows = store.list_pending_inputs(product["id"])
+    role_id = store.get_conversation(product["id"]).labels["omnigent.role_id"]
+    assert [row.data.startup_options.role_id for row in rows] == [role_id, role_id, None]
+    original = _texts(rows)
+
+    # Released: the role's rows park and stop blocking the session's own message.
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    queued, _ = await startup.snapshot(product["id"])
+    assert len(queued) == 1 and "by id" in json.dumps(queued)
+    await startup._deliver(auth_app, product["id"], rows[0])
+    assert [r.id for r in store.list_pending_inputs(product["id"])] == [r.id for r in rows]
+
+    # The next holder gets both, once, in order, header first and marked.
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    assert _texts(store.list_pending_inputs(product["id"])) == [original[2]]
+    moved = store.list_pending_inputs(successor["id"])
+    assert [row.id for row in moved] == [rows[0].id, rows[1].id]
+    for before, after in zip(original[:2], _texts(moved), strict=True):
+        header, body = before.split("\n", 1)
+        assert after == f"{header}\n[Sent to /Product before you held it]\n{body}"
+        assert thread_of_header(after) == "/Architect"
+    assert all(row.data.startup_options.moved for row in moved)
+
+    # Another sweep moves nothing more; delivery happens on the new holder.
+    await startup.sweep_role_mail(auth_app)
+    assert len(store.list_pending_inputs(successor["id"])) == 2
+    await startup._deliver(auth_app, successor["id"], moved[0])
+    delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
+    assert len(delivered) == 1 and "before you held it" in json.dumps(delivered)
+
+
+async def test_role_mail_sweep_repairs_a_missed_move(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    architect, product, successor, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    assert (await _send_to_address(auth_client, architect, "Product", "queued"))["queued"]
+    monkeypatch.setattr(session_aliases, "_bring_role_mail", lambda *_: None)
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    assert len(store.list_pending_inputs(product["id"])) == 1
+
+    await auth_app.state.startup_inputs.sweep_role_mail(auth_app)
+    assert store.list_pending_inputs(product["id"]) == []
+    assert len(store.list_pending_inputs(successor["id"])) == 1
+
+
+@pytest.mark.parametrize("holder_closed", [False, True])
+async def test_claimed_role_mail_moves_only_from_a_closed_holder(
+    auth_client, auth_app, peers, db_uri, monkeypatch, holder_closed
+):
+    from omnigent.server.startup_inputs import MOVED_FROM_CLOSED_NOTICE
+
+    architect, product, successor, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    assert (await _send_to_address(auth_client, architect, "Product", "claimed"))["queued"]
+    [row] = store.list_pending_inputs(product["id"])
+    assert store.transition_pending_input(
+        product["id"], row.id, expected="in_progress", status="incomplete"
+    )
+    if holder_closed:
+        store.set_labels(product["id"], {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
+    else:
+        assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+
+    if not holder_closed:
+        assert [r.id for r in store.list_pending_inputs(product["id"])] == [row.id]
+        assert store.list_pending_inputs(successor["id"]) == []
+        return
+    assert store.list_pending_inputs(product["id"]) == []
+    [moved] = store.list_pending_inputs(successor["id"])
+    assert moved.status == "in_progress"
+    lines = _texts([moved])[0].split("\n")
+    assert lines[1:3] == ["[Sent to /Product before you held it]", MOVED_FROM_CLOSED_NOTICE]
+
+
+async def test_role_mail_claim_fails_once_the_session_lost_the_role(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    from starlette.datastructures import Headers
+
+    from omnigent.server.startup_inputs import StartupInputContext
+
+    architect, product, _, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    assert (await _send_to_address(auth_client, architect, "Product", "racing"))["queued"]
+    [row] = store.list_pending_inputs(product["id"])
+    context = StartupInputContext(
+        auth_app, Headers(), "alice", row.id, role_id=row.data.startup_options.role_id
+    )
+    # Released between dispatch and claim: the claim refuses and the row stays queued.
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+    assert not await context.claim(store, product["id"])
+    assert [r.status for r in store.list_pending_inputs(product["id"])] == ["in_progress"]
+    assert (
+        await auth_client.put(f"/v1/sessions/{product['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    assert await context.claim(store, product["id"])
