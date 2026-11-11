@@ -101,6 +101,7 @@ import { cn } from "@/lib/utils";
 import { MOBILE_GLASS_SURFACE } from "./mobileGlass";
 import { conversationDisplayLabel } from "./sidebarNav";
 import { MobileHeaderButton } from "./MobileHeaderButton";
+import { forkParentId } from "./ForkOfSession";
 import { SessionMenuHeader } from "./SessionMenuHeader";
 
 interface HeaderConversationMenuProps {
@@ -584,7 +585,11 @@ export function HeaderConversationMenu({
           )}
         >
           {isMobile && !projectPickerOpen && (
-            <SessionMenuHeader title={label} workingDirectory={workingDirectory} />
+            <SessionMenuHeader
+              title={label}
+              workingDirectory={workingDirectory}
+              forkOfSessionId={forkParentId(conversation.labels)}
+            />
           )}
           {projectPickerOpen ? (
             <>

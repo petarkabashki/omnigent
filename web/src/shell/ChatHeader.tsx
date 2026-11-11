@@ -43,6 +43,7 @@ import { isMacPlatform } from "@/lib/hotkeys";
 import { isMacElectronShell } from "@/lib/nativeBridge";
 import { ConversationBreadcrumb } from "./ConversationBreadcrumb";
 import { CreatedBySession } from "./CreatedBySession";
+import { ForkOfSession } from "./ForkOfSession";
 import { HeaderConversationMenu } from "./HeaderConversationMenu";
 import { SessionActionMenuItem } from "@/components/SessionActionMenuItem";
 import { HeaderRoleHandle } from "@/components/roles/HeaderRoleHandle";
@@ -160,6 +161,8 @@ interface ChatHeaderProps {
   conversationId: string | undefined;
   workingDirectory?: string | null;
   createdBySessionId?: string | null;
+  /** The session this one was forked from; a fork has no workspace line of its own. */
+  forkOfSessionId?: string | null;
   /** Effective access to the active session. */
   permissionLevel?: number | null;
   /** Owner-managed top-level row backing the title-adjacent action menu. */
@@ -354,6 +357,7 @@ export function ChatHeader({
   conversationId,
   workingDirectory,
   createdBySessionId,
+  forkOfSessionId,
   permissionLevel,
   actionConversation = null,
   conversationTitle,
@@ -664,6 +668,9 @@ export function ChatHeader({
         {conversationId && createdBySessionId && (
           <CreatedBySession key={createdBySessionId} sessionId={createdBySessionId} />
         )}
+        {conversationId && forkOfSessionId && !isMobile && (
+          <ForkOfSession key={forkOfSessionId} sessionId={forkOfSessionId} />
+        )}
       </div>
 
       <MobileHeaderButtonGroup className="flex items-center gap-2 max-md:empty:hidden">
@@ -782,6 +789,7 @@ export function ChatHeader({
                   <SessionMenuHeader
                     title={conversationTitle || UNTITLED_CONVERSATION_LABEL}
                     workingDirectory={workingDirectory}
+                    forkOfSessionId={forkOfSessionId}
                   />
                 )}
                 {/* Chat/Terminal switch (terminal-first sessions) — self-gates to

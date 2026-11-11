@@ -136,6 +136,7 @@ import { useResizableSidebar } from "@/hooks/useResizableSidebar";
 import { ChatHeader } from "./ChatHeader";
 import { MobileHeaderControlsProvider } from "./MobileHeaderControlsSlot";
 import { CREATED_BY_SESSION_LABEL_KEY } from "./CreatedBySession";
+import { forkParentId } from "./ForkOfSession";
 import {
   FileViewerContext,
   type FilePosition,
@@ -2819,6 +2820,7 @@ function AppShellImpl() {
                       conversationId={conversationId}
                       workingDirectory={activeSession?.workspace ?? activeConv?.workspace}
                       createdBySessionId={activeSession?.labels?.[CREATED_BY_SESSION_LABEL_KEY]}
+                      forkOfSessionId={forkParentId(activeSession?.labels ?? activeConv?.labels)}
                       permissionLevel={permissionLevel}
                       actionConversation={actionConversation}
                       conversationTitle={headerConversationTitle}
