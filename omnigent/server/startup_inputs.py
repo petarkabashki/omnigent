@@ -7,7 +7,7 @@ import contextlib
 import logging
 import re
 import weakref
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -56,14 +56,38 @@ def initial_input_id(session_id: str) -> str:
     return uuid5(NAMESPACE_URL, f"initial-input:{session_id}").hex
 
 
-def _mark_resent(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Prefix the first text block with :data:`RESENT_NOTICE`."""
+# Delivery markers, in the fixed order they appear after a message header.
+DELIVERY_MARKERS: tuple[str, ...] = (RESENT_NOTICE,)
+_MESSAGE_HEADER_PREFIX = "[Message from "
+
+
+def _with_markers(text: str, markers: Sequence[str]) -> str:
+    """Put *markers* after a ``[Message from …]`` header line, or first without one.
+
+    Markers already present are kept once, and all are written in
+    :data:`DELIVERY_MARKERS` order, so header-first parsers still match.
+    """
+    lines = text.split("\n")
+    header = lines[:1] if lines[0].startswith(_MESSAGE_HEADER_PREFIX) else []
+    body = lines[len(header) :]
+    present = 0
+    while present < len(body) and body[present] in DELIVERY_MARKERS:
+        present += 1
+    wanted = set(body[:present]) | set(markers)
+    ordered = [marker for marker in DELIVERY_MARKERS if marker in wanted]
+    return "\n".join([*header, *ordered, *body[present:]])
+
+
+def add_delivery_markers(
+    content: list[dict[str, Any]], markers: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Add *markers* to the first text block; see :func:`_with_markers`."""
     marked = [dict(block) for block in content]
     for block in marked:
         if block.get("type") == "input_text" and isinstance(block.get("text"), str):
-            block["text"] = f"{RESENT_NOTICE}\n{block['text']}"
+            block["text"] = _with_markers(block["text"], markers)
             return marked
-    return [{"type": "input_text", "text": RESENT_NOTICE}, *marked]
+    return [{"type": "input_text", "text": "\n".join(markers)}, *marked]
 
 
 def input_content(item: ConversationItem) -> list[dict[str, Any]]:
@@ -448,7 +472,7 @@ class ManagedStartupInputs:
                 "startup_options": options.model_copy(update={"resent": True})
             }
             if isinstance(data, MessageData) and not options.resent:
-                update["content"] = _mark_resent(data.content)
+                update["content"] = add_delivery_markers(data.content, [RESENT_NOTICE])
             data = data.model_copy(update=update)
         moved = await asyncio.to_thread(
             self.conversations.transition_pending_input,

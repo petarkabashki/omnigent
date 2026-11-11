@@ -17,6 +17,7 @@ from omnigent.server.feature_flags import (
     resolve_feature_flags,
 )
 from omnigent.server.sharing_settings import write_peer_session_messaging_override
+from omnigent.server.startup_inputs import RESENT_NOTICE, add_delivery_markers
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
@@ -3028,6 +3029,17 @@ async def test_loop_guard_counts_short_messages_and_holds_the_seventh(auth_clien
     assert (await _held_row(auth_client, architect, "/Product"))["held"]["text"] == "ok 7"
     items = (await auth_client.get(f"/v1/sessions/{product['id']}/items")).text
     assert "ok 6" not in items
+
+    # A peer message re-sent after a hub restart is not owner input: the guard still holds.
+    header = "[Message from /Architect (session s1, message msg_1)] [thread /Architect]"
+    [resent_block] = add_delivery_markers(
+        [{"type": "input_text", "text": f"{header}\nok 5"}], [RESENT_NOTICE]
+    )
+    resent = {"type": "message", "data": {"role": "user", "content": [resent_block]}}
+    posted = await auth_client.post(f"/v1/sessions/{product['id']}/events", json=resent)
+    assert posted.status_code in (200, 202), posted.text
+    still_held = await _send(auth_client, architect, product, "ok 8")
+    assert "replaces the message held earlier" in json.dumps(still_held)
 
     # An owner message into either session restarts the counters.
     owner_message = {
