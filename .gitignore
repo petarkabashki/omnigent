@@ -4,6 +4,8 @@
 !.github/
 !.github/**
 .github/**/.*/
+# The agent-library test fixture is a project whose library lives in .agents/.
+!tests/fixtures/agent_library/project/.agents/
 
 .venv/
 build/
