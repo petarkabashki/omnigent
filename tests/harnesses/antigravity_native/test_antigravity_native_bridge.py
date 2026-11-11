@@ -2206,6 +2206,36 @@ def test_seed_isolated_agy_home_exposes_user_skill_dirs(
     assert (iso_shared / "later").is_dir()
 
 
+def test_seed_isolated_agy_home_links_user_global_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agy reads global instructions only under ``--gemini_dir``, so the seed links them."""
+    real_gemini = tmp_path / "real-home" / ".gemini"
+    (real_gemini / "config").mkdir(parents=True)
+    (real_gemini / "antigravity-cli").mkdir()
+    (real_gemini / "AGENTS.md").write_text("root rules", encoding="utf-8")
+    (real_gemini / "config" / "AGENTS.md").write_text("config rules", encoding="utf-8")
+    (real_gemini / "antigravity-cli" / "AGENTS.md").write_text("retired", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: real_gemini.parent))
+
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    seed_isolated_agy_home(bridge_dir)
+
+    iso_gemini = agy_gemini_dir(bridge_dir)
+    assert (iso_gemini / "AGENTS.md").is_symlink()
+    assert (iso_gemini / "config" / "AGENTS.md").read_text(encoding="utf-8") == "config rules"
+    assert not (iso_gemini / "GEMINI.md").exists()
+    assert not (iso_gemini / "antigravity-cli" / "AGENTS.md").exists()
+    (real_gemini / "AGENTS.md").write_text("edited rules", encoding="utf-8")
+    assert (iso_gemini / "AGENTS.md").read_text(encoding="utf-8") == "edited rules"
+
+    (real_gemini / "AGENTS.md").unlink()
+    seed_isolated_agy_home(bridge_dir)
+    assert not (iso_gemini / "AGENTS.md").is_symlink()
+    assert (iso_gemini / "config" / "AGENTS.md").is_symlink()
+
+
 def test_seed_isolated_agy_home_skill_dir_seed_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

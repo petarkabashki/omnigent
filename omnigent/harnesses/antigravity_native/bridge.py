@@ -460,6 +460,15 @@ _AGY_SKILL_DIRS = (
     Path("skills"),
 )
 
+# The user's global instruction files, which agy reads relative to ``--gemini_dir``
+# (live-verified on 1.5.6; it does not read ``antigravity-cli/AGENTS.md``).
+_AGY_INSTRUCTION_FILES = (
+    Path("AGENTS.md"),
+    Path("GEMINI.md"),
+    Path("config") / "AGENTS.md",
+    Path("config") / "GEMINI.md",
+)
+
 
 def agy_home_dir(bridge_dir: Path) -> Path:
     """Return the parent directory for this session's isolated agy state.
@@ -678,6 +687,7 @@ def seed_isolated_agy_home(
 
     _seed_isolated_agy_plugins(real_home, iso_gemini)
     _seed_isolated_agy_skills(real_home, iso_gemini)
+    _seed_isolated_agy_instructions(real_home, iso_gemini)
     _seed_isolated_agy_hooks(real_home, iso_gemini)
 
     if trusted_workspace is not None:
@@ -786,6 +796,25 @@ def _seed_isolated_agy_skills(real_home: Path, iso_gemini: Path) -> None:
     """
     for rel in _AGY_SKILL_DIRS:
         _link_into_isolated_gemini_dir(real_home / ".gemini" / rel, iso_gemini / rel)
+
+
+def _seed_isolated_agy_instructions(real_home: Path, iso_gemini: Path) -> None:
+    """Link the user's global instruction files into the isolated Gemini dir.
+
+    Links, like codex's ``AGENTS.md`` in ``CODEX_HOME``, so an edit reaches the next
+    turn; a file the user removed drops its stale link.
+
+    :param real_home: The user's real home directory.
+    :param iso_gemini: The bridge-owned ``--gemini_dir`` being seeded.
+    """
+    for rel in _AGY_INSTRUCTION_FILES:
+        real, link = real_home / ".gemini" / rel, iso_gemini / rel
+        with contextlib.suppress(OSError):
+            if link.is_symlink() or link.is_file():
+                link.unlink()
+            if real.is_file():
+                link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                link.symlink_to(real.resolve())
 
 
 def _seed_isolated_agy_hooks(real_home: Path, iso_gemini: Path) -> None:
