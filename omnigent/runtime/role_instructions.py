@@ -149,7 +149,8 @@ def find_role_sources(
     """Return the base role then the workspace role, whichever exist.
 
     The base is the agent library's role when the workspace uses the library and
-    defines it, else the home role file.
+    defines it, else the home role file. A workspace role is used only when the
+    workspace is listed in ``~/.omnigent/trusted_role_workspaces``.
     """
     home_file: Path | None = None
     library_source = _library_role_source(alias, workspace)
@@ -162,9 +163,35 @@ def find_role_sources(
         ws_dir = Path(workspace).expanduser().joinpath(*ROLES_DIR_PARTS)
         ws_file = _find_role_file(ws_dir, alias)
         if ws_file is not None and (home_file is None or ws_file.resolve() != home_file.resolve()):
-            trusted = is_trusted_role_workspace(workspace, home)
-            sources.append(RoleSource(ws_file, trusted=trusted))
+            if is_trusted_role_workspace(workspace, home):
+                sources.append(RoleSource(ws_file, trusted=True))
+            else:
+                _warn_untrusted_workspace_roles(ws_dir)
     return sources
+
+
+_warned_untrusted_role_dirs: set[Path] = set()
+
+
+def _warn_untrusted_workspace_roles(roles_dir: Path) -> None:
+    """Log, once per workspace, the role files skipped because it is not trusted."""
+    resolved = roles_dir.resolve()
+    if resolved in _warned_untrusted_role_dirs:
+        return
+    _warned_untrusted_role_dirs.add(resolved)
+    try:
+        names = sorted(
+            str(path.relative_to(roles_dir))
+            for path in [*roles_dir.glob("*.md"), *roles_dir.glob(f"*/{ROLE_FOLDER_FILE}")]
+        )
+    except OSError:
+        names = []
+    _logger.warning(
+        "Skipping role files in untrusted workspace %s: %s; list the workspace in "
+        "~/.omnigent/trusted_role_workspaces to use them",
+        roles_dir,
+        ", ".join(names) or "(unreadable)",
+    )
 
 
 def _read_role_source(source: RoleSource) -> tuple[dict[str, object], str] | None:
@@ -200,9 +227,9 @@ def role_executor_name(
 ) -> str | None:
     """Executor profile name a role file declares (``executor:`` front matter), if any.
 
-    The workspace role overrides the home one, but an untrusted workspace role
-    cannot set an executor. Reads the calling process's role files, so on the
-    server this only reflects roles on the server's own host.
+    The workspace role, used only in a trusted workspace, overrides the home one.
+    Reads the calling process's role files, so on the server this only reflects
+    roles on the server's own host.
     """
     if not alias or not ALIAS_PATTERN.match(alias):
         return None
@@ -215,10 +242,7 @@ def role_executor_name(
         name = meta.get("executor")
         if not isinstance(name, str) or not name.strip():
             continue
-        if source.trusted:
-            chosen = name.strip()
-        else:
-            _logger.warning("Ignoring executor in untrusted workspace role %s", source.path)
+        chosen = name.strip()
     return chosen
 
 
@@ -389,14 +413,6 @@ def load_role_overlay(
         if body:
             text = substitute_placeholders(body, values)
             sections.append(f"Role instructions from {source.path}:\n\n{text}")
-        if not source.trusted:
-            if meta.get("skills") or meta.get("mcp_servers"):
-                _logger.warning(
-                    "Ignoring skills/mcp_servers in untrusted workspace role %s; list the "
-                    "workspace in ~/.omnigent/trusted_role_workspaces to allow them",
-                    source.path,
-                )
-            continue
         role_skills = _parse_role_skills(meta.get("skills"), source, workspace, home)
         skills = _merge_by_name(skills, role_skills)
         role_servers = _parse_role_mcp_servers(meta.get("mcp_servers"), source, values)

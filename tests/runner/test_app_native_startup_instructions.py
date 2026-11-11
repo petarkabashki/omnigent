@@ -80,6 +80,9 @@ def test_native_startup_instructions_append_role_file(
     roles = tmp_path / "ws" / ".omnigent" / "roles"
     roles.mkdir(parents=True)
     (roles / "Architect.md").write_text("Own the server design.\n")
+    trust = tmp_path / "home" / ".omnigent" / "trusted_role_workspaces"
+    trust.parent.mkdir(parents=True)
+    trust.write_text(f"{tmp_path / 'ws'}\n")
 
     def init(labels: dict[str, str]) -> RunnerSessionInitEnvelope:
         return RunnerSessionInitEnvelope(
