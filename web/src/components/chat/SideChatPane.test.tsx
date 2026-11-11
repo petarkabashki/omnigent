@@ -13,6 +13,7 @@ import * as filesApi from "@/lib/filesApi";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { serializeReplyDraft, type StoredReplyDraft } from "@/lib/replyDraft";
+import * as roleThreadsApi from "@/lib/roleThreads";
 import * as sessionsApi from "@/lib/sessionsApi";
 import type { Session } from "@/lib/types";
 import type * as ChatStoreModule from "@/store/chatStore";
@@ -2088,3 +2089,80 @@ it.each([false, true])(
     }
   },
 );
+
+describe("thread side chat", () => {
+  const threadLabels = {
+    "thread.of": "/Architect",
+    "omnigent.side_chat.source_id": "sess_product",
+    "omnigent.alias": "Product",
+  };
+
+  it("posts to the thread by default and sends an aside only when switched", async () => {
+    mockSession.labels = threadLabels;
+    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([]);
+    const post = vi
+      .spyOn(roleThreadsApi, "postRoleThreadMessage")
+      .mockResolvedValue({ messageId: "msg_1", delivered: ["sess_arch"] });
+    renderPane(<SideChatPane childId={childId} />);
+
+    expect(screen.getByRole("radio", { name: "Post to the thread" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByTestId("side-chat-input")).toHaveAttribute(
+      "placeholder",
+      "Post to the thread as yourself…",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "/Architect" }));
+    fireEvent.change(screen.getByTestId("side-chat-input"), {
+      target: { value: "  Answer the schema question  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post to the thread" }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        "sess_product",
+        "/Architect",
+        "Answer the schema question",
+        "counterpart",
+      ),
+    );
+    await waitFor(() => expect(screen.getByTestId("side-chat-input")).toHaveValue(""));
+    expect(send).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Only to Product" }));
+    expect(screen.getByTestId("side-chat-input")).toHaveAttribute(
+      "placeholder",
+      "Only to Product…",
+    );
+    fireEvent.change(screen.getByTestId("side-chat-input"), {
+      target: { value: "Just between us" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send only to Product" }));
+    await waitFor(() =>
+      expect(send).toHaveBeenCalledWith("Just between us", "agent_side", undefined, {
+        pinnedConversationId: childId,
+      }),
+    );
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the owner's own turns as asides to the holder", () => {
+    mockSession.labels = threadLabels;
+    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([]);
+    conversationRegistry.acquire(childId).setState({
+      blocks: itemsToBlocks([
+        {
+          id: "u1",
+          response_id: "turn",
+          type: "message",
+          role: "user",
+          status: "completed",
+          content: [{ type: "input_text", text: "Just between us" }],
+        },
+      ]),
+    });
+    renderPane(<SideChatPane childId={childId} />);
+    expect(screen.getByText("Just between us")).toBeInTheDocument();
+    expect(screen.getByTestId("side-chat-aside-route")).toHaveTextContent("Only to Product");
+  });
+});

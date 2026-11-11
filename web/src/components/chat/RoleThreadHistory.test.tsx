@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as roleThreadsApi from "@/lib/roleThreads";
@@ -48,36 +48,6 @@ describe("RoleThreadHistory", () => {
       "sess_product",
       "/Architect",
     );
-  });
-
-  it("posts the owner's words to the chosen side of the thread", async () => {
-    useSession.mockReturnValue({
-      session: { id: "sess_product", title: "x", labels: { "omnigent.alias": "Product" } },
-    });
-    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([]);
-    const post = vi
-      .spyOn(roleThreadsApi, "postRoleThreadMessage")
-      .mockResolvedValue({ messageId: "msg_1", delivered: ["sess_arch"] });
-    renderHistory();
-
-    const box = screen.getByTestId("role-thread-post");
-    const postButton = within(box).getByRole("button", { name: "Post" });
-    expect(postButton).toBeDisabled();
-    fireEvent.click(within(box).getByRole("radio", { name: "/Architect" }));
-    fireEvent.change(within(box).getByLabelText("Post to the thread"), {
-      target: { value: "  Answer the schema question  " },
-    });
-    fireEvent.click(postButton);
-
-    await waitFor(() =>
-      expect(post).toHaveBeenCalledWith(
-        "sess_product",
-        "/Architect",
-        "Answer the schema question",
-        "counterpart",
-      ),
-    );
-    await waitFor(() => expect(within(box).getByLabelText("Post to the thread")).toHaveValue(""));
   });
 
   it("shows the loop-guard notice when the thread has a held message", async () => {

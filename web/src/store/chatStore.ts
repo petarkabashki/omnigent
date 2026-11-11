@@ -1168,6 +1168,8 @@ export interface SideChatComposerDraft {
   /** Focus the input once it accepts text; set by a `+` that opened the tab,
    *  consumed by the composer. */
   autoFocus?: boolean;
+  /** A thread side chat's route: into the thread (both sides or one) or an aside to the holder. */
+  threadRoute?: "both" | "holder" | "counterpart" | "aside";
   quotes?: ReplyQuote[];
   text: string;
   files: File[];

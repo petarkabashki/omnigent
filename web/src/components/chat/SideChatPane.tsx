@@ -6,6 +6,11 @@ import {
   THREAD_OF_LABEL_KEY,
 } from "./RoleThreadHistory";
 import {
+  onRoleThreadPostFocus,
+  postRoleThreadMessage,
+  type RoleThreadPostTarget,
+} from "@/lib/roleThreads";
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -195,6 +200,16 @@ export function SideChatPane({
   const readOnly = restoredReadOnly || session?.labels?.["omnigent.closed"] === "true";
   const threadCounterpart = session?.labels?.[THREAD_OF_LABEL_KEY];
   const threadHolderId = session?.labels?.[SIDE_CHAT_SOURCE_LABEL_KEY];
+  const { session: threadHolder } = useSession(threadHolderId ?? null);
+  const threadRoute: ThreadRoute | null =
+    threadCounterpart && threadHolderId
+      ? {
+          holderId: threadHolderId,
+          holderName:
+            threadHolder?.labels?.["omnigent.alias"]?.trim() || threadHolder?.title || "this role",
+          counterpart: threadCounterpart,
+        }
+      : null;
   useLayoutEffect(() => {
     if (!selectionParentId || readOnly || starting) return;
     const target = { childId, parentId: selectionParentId };
@@ -457,15 +472,30 @@ export function SideChatPane({
             </div>
           ) : (
             <div ref={listRef} className="flex flex-col gap-4">
-              {bubbles.map((bubble, index) => (
-                <BubbleView
-                  key={bubbleKey(bubble)}
-                  bubble={bubble}
-                  isLastAssistant={index === lastAssistantIndex}
-                  showsWorking={showsWorking}
-                  recoveryDisabled={readOnly}
-                />
-              ))}
+              {bubbles.map((bubble, index) => {
+                const view = (
+                  <BubbleView
+                    key={bubbleKey(bubble)}
+                    bubble={bubble}
+                    isLastAssistant={index === lastAssistantIndex}
+                    showsWorking={showsWorking}
+                    recoveryDisabled={readOnly}
+                  />
+                );
+                // In a thread side chat the owner's own turns went to the holder alone.
+                if (threadRoute === null || bubble.kind !== "user") return view;
+                return (
+                  <div key={bubbleKey(bubble)} className="flex flex-col items-end gap-0.5">
+                    {view}
+                    <span
+                      data-testid="side-chat-aside-route"
+                      className="text-[11px] text-muted-foreground"
+                    >
+                      Only to {threadRoute.holderName}
+                    </span>
+                  </div>
+                );
+              })}
               <WorkingIndicatorRow
                 key={childId}
                 show={shouldShowWorkingIndicator(showsWorking || showsBackgroundTasks, bubbles)}
@@ -506,6 +536,7 @@ export function SideChatPane({
                 starting={starting}
                 onStart={onStart ? startSideChat : undefined}
                 onSend={followSentMessage}
+                thread={threadRoute}
               />
             )}
           </div>
@@ -513,6 +544,13 @@ export function SideChatPane({
       </div>
     </ConversationScopeContext.Provider>
   );
+}
+
+/** A thread side chat's holder and counterpart; the composer routes by them. */
+interface ThreadRoute {
+  holderId: string;
+  holderName: string;
+  counterpart: string;
 }
 
 /**
@@ -536,6 +574,7 @@ function SideChatComposer({
   starting,
   onStart,
   onSend,
+  thread,
 }: {
   fullSession: boolean;
   childId: string;
@@ -551,6 +590,7 @@ function SideChatComposer({
   onStart?: (text: string) => Promise<void>;
   /** Called when a live tab sends or queues a follow-up. */
   onSend: () => void;
+  thread: ThreadRoute | null;
 }) {
   const send = useChatStore((s) => s.send);
   const sendSlashCommand = useChatStore((s) => s.sendSlashCommand);
@@ -566,6 +606,15 @@ function SideChatComposer({
   const composer = useChatStore((s) => s.sideChatComposers[childId]);
   const { text, files } = composer ?? EMPTY_SIDE_CHAT_COMPOSER;
   const updateComposer = useChatStore((s) => s.updateSideChatComposer);
+  // A thread side chat posts into the thread unless switched to an aside.
+  const threadRoute = thread === null || pending ? null : (composer?.threadRoute ?? "both");
+  const postsToThread = threadRoute !== null && threadRoute !== "aside";
+  const [threadPosting, setThreadPosting] = useState(false);
+  const setThreadRoute = useCallback(
+    (next: NonNullable<SideChatComposerDraft["threadRoute"]>) =>
+      updateComposer(childId, (current) => ({ ...current, threadRoute: next })),
+    [childId, updateComposer],
+  );
   const clearComposer = useChatStore((s) => s.clearSideChatComposer);
   const enqueueMessage = useChatStore((s) => s.enqueueMessage);
   const maybeFlushQueuedHead = useChatStore((s) => s.maybeFlushQueuedHead);
@@ -664,6 +713,17 @@ function SideChatComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const tailTextareaRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // "Open thread…" elsewhere asks for the thread box: route to the thread and focus.
+  const threadHolderId = thread?.holderId ?? null;
+  useEffect(() => {
+    if (threadHolderId === null) return;
+    return onRoleThreadPostFocus(() => {
+      if (useChatStore.getState().sideChatComposers[childId]?.threadRoute === "aside") {
+        setThreadRoute("both");
+      }
+      tailTextareaRef.current?.focus();
+    });
+  }, [threadHolderId, childId, setThreadRoute]);
   const voiceEditsRef = useRef(
     new Map<string | null, { before: string; after: string; quoteIds: Set<string> }>(),
   );
@@ -895,7 +955,7 @@ function SideChatComposer({
     clearText: () => setText(""),
   });
   // Like the main composer, a draft turns Interrupt into Send.
-  const showInterrupt = !pending && busy && (fullSession || !canSend);
+  const showInterrupt = !postsToThread && !pending && busy && (fullSession || !canSend);
 
   const interruptSideChat = () => {
     if (interrupting || !interruptReady) return;
@@ -912,6 +972,33 @@ function SideChatComposer({
       if (!canSend || starting || !onStart) return;
       // Keep the text so a failed fork can be retried without re-typing.
       void onStart(serializeReplyDraft({ quotes, text: trimmed }));
+      return;
+    }
+    if (postsToThread && thread !== null) {
+      if (!canSend || files.length > 0 || threadPosting) return;
+      const route: RoleThreadPostTarget = threadRoute;
+      setThreadPosting(true);
+      void postRoleThreadMessage(
+        thread.holderId,
+        thread.counterpart,
+        serializeReplyDraft({ quotes, text: text.trim() }),
+        route,
+      )
+        .then(() => {
+          updateComposer(childId, (current) => ({ ...current, text: "", quotes: undefined }));
+          onSend();
+          return Promise.all([
+            queryClient.invalidateQueries({
+              queryKey: ["role-thread-messages", thread.holderId],
+            }),
+            queryClient.invalidateQueries({ queryKey: ["conversations"] }),
+            queryClient.invalidateQueries({ queryKey: ["project-sessions"] }),
+          ]);
+        })
+        .catch((error: unknown) =>
+          toast.error(error instanceof Error ? error.message : "Couldn't post to the thread."),
+        )
+        .finally(() => setThreadPosting(false));
       return;
     }
     if ((busy && fullSession) || !canSend || agentId === null) return;
@@ -1053,6 +1140,66 @@ function SideChatComposer({
           />
         </TooltipProvider>
       )}
+      {thread !== null && threadRoute !== null && (
+        <div
+          data-testid="side-chat-thread-route"
+          className="mx-3 mb-1.5 flex flex-wrap items-center gap-1 text-xs text-muted-foreground"
+        >
+          <div role="radiogroup" aria-label="Send to" className="flex gap-0.5">
+            {(
+              [
+                ["both", "Post to the thread"],
+                ["aside", `Only to ${thread.holderName}`],
+              ] as const
+            ).map(([value, label]) => {
+              const selected = (value === "aside") === (threadRoute === "aside");
+              return (
+                <Button
+                  key={value}
+                  type="button"
+                  size="xs"
+                  role="radio"
+                  aria-checked={selected}
+                  variant={selected ? "secondary" : "ghost"}
+                  className="max-w-40 truncate"
+                  onClick={() => {
+                    if (!selected) setThreadRoute(value);
+                  }}
+                >
+                  {label}
+                </Button>
+              );
+            })}
+          </div>
+          {postsToThread && (
+            <>
+              <span className="ml-1">To</span>
+              <div role="radiogroup" aria-label="Post to" className="flex min-w-0 gap-0.5">
+                {(
+                  [
+                    ["both", "Both"],
+                    ["holder", thread.holderName],
+                    ["counterpart", thread.counterpart],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="xs"
+                    role="radio"
+                    aria-checked={threadRoute === value}
+                    variant={threadRoute === value ? "secondary" : "ghost"}
+                    className="max-w-28 truncate"
+                    onClick={() => setThreadRoute(value)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
       <ChatComposer
         hasContent={!pending && files.length > 0}
         data-side-chat="true"
@@ -1072,7 +1219,13 @@ function SideChatComposer({
           },
           // Menu rows preventDefault on mousedown so selecting one keeps focus.
           onBlur: () => setInputFocused(false),
-          placeholder: fullSession ? "Reply to this session..." : "Ask a side question...",
+          placeholder: postsToThread
+            ? "Post to the thread as yourself…"
+            : thread !== null && threadRoute === "aside"
+              ? `Only to ${thread.holderName}…`
+              : fullSession
+                ? "Reply to this session..."
+                : "Ask a side question...",
           disabled: !ready,
           "data-testid": "side-chat-input",
           onKeyDown: handleKeyDown,
@@ -1124,16 +1277,17 @@ function SideChatComposer({
             ) : undefined,
         }}
         actions={{
-          leading: pending ? null : (
-            <ComposerAddMenu
-              disabled={agentId === null}
-              onAttach={() => fileInputRef.current?.click()}
-              showGoal={false}
-              showPlan={false}
-              planActive={false}
-              testIdPrefix="side-chat"
-            />
-          ),
+          leading:
+            pending || postsToThread ? null : (
+              <ComposerAddMenu
+                disabled={agentId === null}
+                onAttach={() => fileInputRef.current?.click()}
+                showGoal={false}
+                showPlan={false}
+                planActive={false}
+                testIdPrefix="side-chat"
+              />
+            ),
           trailing: (
             <>
               {!fullSession && settingsSession?.id && (
@@ -1174,17 +1328,25 @@ function SideChatComposer({
               <ComposerSendButton
                 type="button"
                 label={
-                  fullSession
-                    ? showInterrupt
-                      ? "Interrupt session"
-                      : "Send message"
-                    : showInterrupt
-                      ? "Interrupt side chat"
-                      : "Send side question"
+                  postsToThread
+                    ? "Post to the thread"
+                    : thread !== null && threadRoute === "aside"
+                      ? `Send only to ${thread.holderName}`
+                      : fullSession
+                        ? showInterrupt
+                          ? "Interrupt session"
+                          : "Send message"
+                        : showInterrupt
+                          ? "Interrupt side chat"
+                          : "Send side question"
                 }
                 interrupt={showInterrupt}
-                busy={showInterrupt && interrupting}
-                disabled={showInterrupt ? interrupting || !interruptReady : !canSend || !ready}
+                busy={showInterrupt ? interrupting : threadPosting}
+                disabled={
+                  showInterrupt
+                    ? interrupting || !interruptReady
+                    : !canSend || !ready || (postsToThread && (files.length > 0 || threadPosting))
+                }
                 onClick={showInterrupt ? interruptSideChat : submit}
                 data-testid={showInterrupt ? "side-chat-interrupt" : "side-chat-send"}
               />
