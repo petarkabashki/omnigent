@@ -11493,6 +11493,13 @@
             "title": "Usage Included",
             "type": "boolean"
           },
+          "waiting_holder_inputs": {
+            "default": 0,
+            "description": "Messages sent to a role this session no longer holds, waiting here because the role has no live holder.",
+            "format": "int64",
+            "title": "Waiting Holder Inputs",
+            "type": "integer"
+          },
           "waiting_reason": {
             "anyOf": [
               {
@@ -12926,6 +12933,28 @@
                 "type": "null"
               }
             ]
+          },
+          "sender_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Id"
+          },
+          "sender_thread": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Thread"
           },
           "tools": {
             "anyOf": [

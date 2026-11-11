@@ -3303,3 +3303,72 @@ async def test_mail_sent_to_a_session_id_stays_when_the_role_moves(
     ).status_code == 200
     assert [r.id for r in store.list_pending_inputs(product["id"])] == [row.id]
     assert store.list_pending_inputs(successor["id"]) == []
+
+
+async def test_role_mail_without_a_holder_shows_as_waiting_until_one_takes_the_role(
+    auth_client, auth_app, peers, db_uri, monkeypatch
+):
+    architect, product, successor, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    assert (await _send_to_address(auth_client, architect, "Product", "anyone there"))["queued"]
+    [row] = store.list_pending_inputs(product["id"])
+    assert row.data.startup_options.sender_id == architect["id"]
+    thread = row.data.startup_options.sender_thread
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+
+    def waiting_on_thread(threads):
+        return next(t["waiting_holder"] for t in threads if t["counterpart"] == thread)
+
+    assert (
+        waiting_on_thread((await _tool(auth_client, architect, "sys_thread_list"))["threads"]) == 1
+    )
+    history = await _tool(auth_client, architect, "sys_thread_history", counterpart=thread)
+    [waiting] = [m for m in history["messages"] if m.get("waiting_holder")]
+    assert (waiting["direction"], waiting["text"]) == ("out", "anyone there")
+    snapshot = (await auth_client.get(f"/v1/sessions/{product['id']}")).json()
+    assert snapshot["waiting_holder_inputs"] == 1
+
+    # A new holder clears it with no notice: the message moved and is queued normally.
+    assert (
+        await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
+    ).status_code == 200
+    assert (
+        waiting_on_thread((await _tool(auth_client, architect, "sys_thread_list"))["threads"]) == 0
+    )
+    assert (await auth_client.get(f"/v1/sessions/{product['id']}")).json()[
+        "waiting_holder_inputs"
+    ] == 0
+
+
+@pytest.mark.parametrize("successor_holds", [False, True])
+async def test_deleting_a_session_moves_or_drops_its_role_mail(
+    auth_client, auth_app, peers, db_uri, monkeypatch, caplog, successor_holds
+):
+    architect, product, successor, store, _ = await _role_mail_setup(
+        auth_client, auth_app, peers, db_uri, monkeypatch
+    )
+    sent = await _send_to_address(auth_client, architect, "Product", "before the delete")
+    [row] = store.list_pending_inputs(product["id"])
+    thread = row.data.startup_options.sender_thread
+    if successor_holds:
+        monkeypatch.setattr(session_aliases, "_bring_role_mail", lambda *_: None)
+        assert (await auth_client.delete(f"/v1/sessions/{product['id']}/alias")).status_code == 204
+        assert (
+            await auth_client.put(
+                f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"}
+            )
+        ).status_code == 200
+
+    assert (await auth_client.delete(f"/v1/sessions/{product['id']}")).status_code == 200
+    [listed] = [
+        t
+        for t in (await _tool(auth_client, architect, "sys_thread_list"))["threads"]
+        if t["counterpart"] == thread
+    ]
+    if successor_holds:
+        assert [r.id for r in store.list_pending_inputs(successor["id"])] == [row.id]
+        assert listed["dropped"] == 0
+        return
+    assert listed["dropped"] == 1
+    assert sent["message_id"] in caplog.text

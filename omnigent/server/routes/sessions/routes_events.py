@@ -117,7 +117,7 @@ from omnigent.server.failed_status_diagnostics import (
     failed_status_intake_attributes,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
-from omnigent.server.role_mail import addressed_to_role
+from omnigent.server.role_mail import addressed_to_role, rescue_role_mail
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -2247,6 +2247,12 @@ def register_events_routes(
                 role_id=(
                     conv.labels.get(ROLE_ID_LABEL_KEY)
                     if peer_message and addressed_to_role(sent_address)
+                    else None
+                ),
+                sender_id=speaker.id if peer_message else None,
+                sender_thread=(
+                    (target_handle or f"session:{conv.id}")
+                    if peer_message and holds_role(speaker)
                     else None
                 ),
             )
@@ -5030,6 +5036,13 @@ def register_events_routes(
         # Re-read so the final snapshot includes spend flushed while the runner stopped.
         final_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         final_usage = (final_conv or conv).session_usage
+        # Role mail queued here goes to the role's live holder, or is dropped and counted.
+        try:
+            await asyncio.to_thread(
+                rescue_role_mail, conversation_store, project_store, session_id
+            )
+        except Exception:
+            _logger.exception("Unable to move queued role messages off session %s", session_id)
         deleted = await conversation_store.delete_conversation(session_id)
         if not deleted:
             raise _session_not_found()

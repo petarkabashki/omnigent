@@ -363,6 +363,10 @@ class StartupInputOptions(BaseModel):
     resent: bool = False
     # The role the sender addressed; the input is delivered only on its holder.
     role_id: str | None = None
+    # For role mail: the sending session and its thread key for the role, so a
+    # message waiting for a holder (or dropped) shows on the sender's thread row.
+    sender_id: str | None = None
+    sender_thread: str | None = None
     # Set once the input moved from an earlier holder to the role's current one.
     moved: bool = False
 

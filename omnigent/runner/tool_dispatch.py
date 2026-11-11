@@ -5743,6 +5743,8 @@ async def _session_get_info_via_rest(
             # waiting on.
             "pending_elicitations": pending,
             "pending_elicitation_count": len(pending),
+            # Messages to a role this session gave up, waiting for a new holder.
+            "waiting_holder_inputs": snap.get("waiting_holder_inputs", 0),
         }
     )
 

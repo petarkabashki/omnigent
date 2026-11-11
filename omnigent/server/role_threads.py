@@ -108,6 +108,8 @@ def thread_index(labels: Mapping[str, str]) -> list[dict[str, Any]]:
                 "updated_at": _to_int(fields.get("at")),
                 "promotion_candidate": messages >= PROMOTION_MESSAGE_THRESHOLD,
                 "held": _held_summary(fields),
+                # Messages to this role deleted with a holder while it was vacant.
+                "dropped": _to_int(fields.get("dropped")),
             }
         )
     rows.sort(key=lambda row: -row["updated_at"])
@@ -399,6 +401,18 @@ def record_outbound(
     if sender_handle:
         updates[THREAD_ROLE_LABEL] = sender_handle
     store.set_labels(sender.id, updates)
+
+
+def record_dropped(store: ConversationStore, sender_id: str, counterpart: str) -> None:
+    """Count one message to ``counterpart`` that was dropped before any holder got it."""
+    sender = store.get_conversation(sender_id)
+    if sender is None:
+        return
+    dropped = _to_int(_row_fields(sender.labels, counterpart).get("dropped")) + 1
+    store.set_labels(
+        sender_id,
+        {_label(counterpart, "cp"): counterpart, _label(counterpart, "dropped"): str(dropped)},
+    )
 
 
 def note_thread(
@@ -706,6 +720,12 @@ def _item_text(data: Any) -> str | None:
 
 
 _MESSAGE_ID = re.compile(r"message (msg_[0-9a-f]+)")
+
+
+def message_id_of_header(header: str) -> str | None:
+    """The ``msg_<hex>`` id a peer message header carries."""
+    found = _MESSAGE_ID.search(header)
+    return found.group(1) if found else None
 
 
 def _history_row(session_id: str, item_id: str, created_at: int, text: str) -> dict[str, Any]:

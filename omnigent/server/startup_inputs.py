@@ -246,6 +246,8 @@ class ManagedStartupInputs:
         first: bool = True,
         address: str | None = None,
         role_id: str | None = None,
+        sender_id: str | None = None,
+        sender_thread: str | None = None,
     ) -> ConversationItem:
         from omnigent.server.background_session_titles import background_session_titles_enabled
         from omnigent.server.routes._sessions.helpers import (
@@ -283,6 +285,8 @@ class ManagedStartupInputs:
                     scheduled_run=current_scheduled_run(),
                     address=address,
                     role_id=role_id,
+                    sender_id=sender_id if role_id else None,
+                    sender_thread=sender_thread if role_id else None,
                 )
             }
         )
@@ -388,6 +392,15 @@ class ManagedStartupInputs:
             item.status in ("in_progress", "incomplete") and not is_parked(item, conv)
             for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         )
+
+    async def waiting_holder_count(self, session_id: str) -> int:
+        """How many role messages parked here wait for the role to have a live holder."""
+        from omnigent.server.role_mail import waiting_for_holder
+
+        waiting = await asyncio.to_thread(
+            waiting_for_holder, self.conversations, self.projects, session_id=session_id
+        )
+        return len(waiting)
 
     async def snapshot(self, session_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """

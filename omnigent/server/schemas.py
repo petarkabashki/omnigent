@@ -2533,6 +2533,8 @@ class SessionResponse(BaseModel):
         shape as ``pending_inputs``, in submission order; their file blocks
         keep ids that still resolve under this session. Empty when nothing
         failed.
+    :param waiting_holder_inputs: Messages sent to a role this session no
+        longer holds, waiting here because the role has no live holder.
     :param workspace: Absolute path on disk where the runner cd's,
         e.g. ``"/Users/corey/universe/src/foo"``. Set when the
         session was bound to a host workspace at create-time, or
@@ -2640,6 +2642,7 @@ class SessionResponse(BaseModel):
     pending_inputs: list[dict[str, Any]] = Field(default_factory=list)
     # Startup inputs that were never delivered, shown as undelivered messages.
     failed_inputs: list[dict[str, Any]] = Field(default_factory=list)
+    waiting_holder_inputs: int = 0
     workspace: str | None = None
     git_branch: str | None = None
     archived: bool = False

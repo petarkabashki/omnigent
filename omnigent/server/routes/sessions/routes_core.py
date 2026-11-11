@@ -2374,6 +2374,16 @@ def register_core_routes(
             raise _session_not_found()
         return await asyncio.to_thread(_waiting_payload, conv, liveness)
 
+    def _with_waiting(
+        rows: list[dict[str, Any]], sender_id: str, counterpart: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Thread rows plus the sender's messages still waiting for a holder, oldest first."""
+        from omnigent.server.role_mail import waiting_thread_rows
+
+        waiting = waiting_thread_rows(conversation_store, project_store, sender_id, counterpart)
+        merged = sorted([*rows, *waiting], key=lambda row: row["created_at"])
+        return merged[-limit:]
+
     @router.get("/sessions/threads")
     async def list_role_threads(request: Request) -> dict[str, Any]:
         """The calling role's thread index; ``sys_thread_list`` reads this."""
@@ -2382,10 +2392,16 @@ def register_core_routes(
         user_id = _require_user(request, auth_provider)
 
         def _list() -> dict[str, Any]:
+            from omnigent.server.role_mail import waiting_counts
+
             _, holder, _ = _thread_holder(request, user_id)
             fresh = conversation_store.get_conversation(holder.id) or holder
+            waiting = waiting_counts(conversation_store, project_store, holder.id)
             return {
-                "threads": thread_index(fresh.labels),
+                "threads": [
+                    {**row, "waiting_holder": waiting.get(row["counterpart"], 0)}
+                    for row in thread_index(fresh.labels)
+                ],
                 "promotion_threshold_messages": PROMOTION_MESSAGE_THRESHOLD,
             }
 
@@ -2409,7 +2425,7 @@ def register_core_routes(
             rows = thread_conversation(
                 conversation_store, fresh, key, user_id=user_id, limit=limit
             )
-            return {"counterpart": key, "messages": rows}
+            return {"counterpart": key, "messages": _with_waiting(rows, holder.id, key, limit)}
 
         return await asyncio.to_thread(_history)
 
@@ -2448,7 +2464,7 @@ def register_core_routes(
             rows = thread_conversation(
                 conversation_store, holder, key, user_id=user_id, limit=limit
             )
-            return {"counterpart": key, "messages": rows}
+            return {"counterpart": key, "messages": _with_waiting(rows, holder.id, key, limit)}
 
         return await asyncio.to_thread(_messages)
 
