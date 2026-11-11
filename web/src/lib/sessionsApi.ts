@@ -829,6 +829,8 @@ export async function createBundledSession(
     sandbox_profile_id?: string;
     sandbox_profile_revision?: string;
     project_id?: string;
+    /** Role the new session claims in its project. */
+    alias?: string;
     sibling_source_id?: string;
     labels?: Record<string, string>;
     initial_input?: SessionEventInput;

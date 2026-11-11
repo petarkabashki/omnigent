@@ -1961,6 +1961,8 @@ class SessionCreateMetadata(_SandboxProfileSelection):
     part carries only session-level metadata so request metadata
     cannot disagree with the agent bundle.
 
+    :param alias: Role (``Role``) the new session claims in its project;
+        top-level sessions only. ``None`` claims nothing.
     :param title: Optional human-readable title for the session,
         e.g. ``"debugging auth flow"``.
     :param labels: Initial guardrails labels to set on the
@@ -2038,6 +2040,7 @@ class SessionCreateMetadata(_SandboxProfileSelection):
     model_config = ConfigDict(extra="forbid")
 
     initial_input: SessionStartupInput | None = None
+    alias: str | None = None
 
     @model_validator(mode="after")
     def _fold_role_params_into_labels(self) -> Self:

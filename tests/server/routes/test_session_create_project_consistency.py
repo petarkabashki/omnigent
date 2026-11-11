@@ -506,6 +506,30 @@ async def test_multipart_create_defaults_workspace_and_files_atomically(
     assert session.json()["project_id"] == project_id
 
 
+async def test_multipart_create_claims_the_role_and_a_held_role_refuses(
+    project_create_client: httpx.AsyncClient,
+) -> None:
+    project_id = await _project(project_create_client, {"workspace": "/work/upload"})
+
+    async def create(name: str) -> httpx.Response:
+        return await project_create_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps({"project_id": project_id, "alias": "Architect"})},
+            files={"bundle": ("agent.tar.gz", build_agent_bundle(name=name), "application/gzip")},
+            headers=_headers(),
+        )
+
+    first = await create("role-upload")
+    assert first.status_code == 201, first.text
+    session = await project_create_client.get(
+        f"/v1/sessions/{first.json()['session_id']}", headers=_headers()
+    )
+    assert session.json()["labels"]["omnigent.alias"] == "Architect"
+    second = await create("role-upload-again")
+    assert second.status_code == 409, second.text
+    assert "already used" in second.text
+
+
 async def test_multipart_malformed_project_config_is_structured_400(
     project_create_client: httpx.AsyncClient,
 ) -> None:

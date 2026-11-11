@@ -1813,6 +1813,23 @@ def register_core_routes(
         for key in (PLACEMENT_REASON_LABEL_KEY, PLACEMENT_REQUEST_ID_LABEL_KEY):
             parsed_metadata.labels.pop(key, None)
 
+        if parsed_metadata.alias is not None:
+            if parsed_metadata.parent_session_id is not None:
+                raise OmnigentError(
+                    "Only top-level sessions can claim an alias",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            from omnigent.server.session_aliases import check_alias_for_new_session
+
+            await asyncio.to_thread(
+                check_alias_for_new_session,
+                conversation_store,
+                project_store,
+                alias=parsed_metadata.alias,
+                project_id=parsed_metadata.project_id,
+                user_id=user_id,
+            )
+
         inherited_runner_id: str | None = None
         parent_conv = None
         if parsed_metadata.parent_session_id is not None:
@@ -2041,6 +2058,24 @@ def register_core_routes(
                 await asyncio.to_thread(
                     permission_store.grant, user_id, result.session_id, LEVEL_OWNER
                 )
+        # Claimed before input or launch, so a lost claim starts nothing.
+        if parsed_metadata.alias is not None:
+            from omnigent.server.session_aliases import claim_alias_for_new_session
+
+            try:
+                await asyncio.to_thread(
+                    claim_alias_for_new_session,
+                    conversation_store,
+                    project_store,
+                    session_id=result.session_id,
+                    user_id=user_id,
+                    alias=parsed_metadata.alias,
+                    overlay_ref=None,
+                    actor="owner",
+                )
+            except Exception:
+                await _close_orphan_session(result.session_id)
+                raise
         await _accept_initial_input(
             request, result.session_id, parsed_metadata.initial_input, user_id
         )

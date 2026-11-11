@@ -1,4 +1,5 @@
 import type * as WorkspacePickerModule from "./WorkspacePicker";
+import type { NamespaceRole } from "@/lib/rolesApi";
 import type * as SandboxModelOptionsModule from "@/hooks/useSandboxModelOptions";
 
 vi.mock("@/hooks/useSandboxModelOptions", async (importOriginal) => ({
@@ -180,6 +181,11 @@ vi.mock("./CreateAgentDialog", () => ({
 }));
 // The projects list + config drive `project_id` resolution; the move helper is
 // mocked so the tests can assert it is (not) called without HTTP plumbing.
+let namespaceRoles: NamespaceRole[] = [];
+vi.mock("@/hooks/useRoles", () => ({
+  useNamespaceRoles: () => ({ data: namespaceRoles }),
+  useReleaseRole: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("@/hooks/useConversations", async (importOriginal) => ({
   ...(await importOriginal<typeof UseConversationsModule>()),
   useProjects: vi.fn(),
@@ -359,6 +365,7 @@ beforeEach(() => {
   setRepoIsGit();
   setProjects([{ id: "proj_alpha", name: "Alpha" }]);
   setProjectConfig({});
+  namespaceRoles = [];
 });
 
 afterEach(() => {
@@ -422,6 +429,46 @@ describe("NewChatLandingScreen project-aware create (first-class project_id)", (
     expect(body.project_id).toBe("proj_alpha");
     expect(body.agent_id).toBe("ag_hello");
     expect(body.workspace).toBe(RECENT_WORKSPACE);
+  });
+
+  it("sends the typed role as alias so the session starts holding it", async () => {
+    renderLanding();
+    fireEvent.change(screen.getByTestId("new-session-role-input"), {
+      target: { value: " Architect " },
+    });
+
+    const body = await submitAndReadBody();
+    expect(body.project_id).toBe("proj_alpha");
+    expect(body.alias).toBe("Architect");
+  });
+
+  it("names the holder and blocks send while the typed role is held", async () => {
+    namespaceRoles = [
+      {
+        roleId: "role_1",
+        name: "Architect",
+        handle: "Alpha/Architect",
+        path: "Alpha",
+        permanent: true,
+        state: "held",
+        holderSessionId: "conv_holder",
+      },
+    ];
+    renderLanding();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "hello" },
+    });
+    fireEvent.change(screen.getByTestId("new-session-role-input"), {
+      target: { value: "architect" },
+    });
+
+    expect(screen.getByTestId("new-session-role-held").textContent).toContain(
+      "Alpha/Architect is held by",
+    );
+    expect(screen.getByTestId("new-session-role-release")).toBeTruthy();
+    expect((screen.getByTestId("new-chat-landing-submit") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 
   it("keeps a non-project visit explicit and adds only the create token label", async () => {

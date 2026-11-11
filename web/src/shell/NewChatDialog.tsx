@@ -410,6 +410,8 @@ import { CreateAgentDialog } from "./CreateAgentDialog";
 import { buildAgentBundle, type AgentBundleInput } from "@/lib/agentBundle";
 import { installAgentBundle } from "@/lib/agentsApi";
 import { createBundledSession, getSessionSlim, launchRunner } from "@/lib/sessionsApi";
+import { NewSessionRoleField, heldRoleNamed } from "@/components/roles/NewSessionRoleField";
+import { useNamespaceRoles } from "@/hooks/useRoles";
 import { promoteSessionDraft, recoverFailedSessionDraft } from "@/lib/sessionDrafts";
 import {
   NEW_SESSION_HANDOFF_PARAM,
@@ -2819,6 +2821,12 @@ function NewChatLandingContent({
   useEffect(() => {
     setSelectedProject(projectParam);
   }, [projectParam]);
+  // Optional role the new session starts holding, in the selected project's
+  // namespace. Empty claims nothing; a held role blocks send until released.
+  const [roleName, setRoleName] = useState("");
+  const roleClaim = siblingSourceId ? "" : roleName.trim();
+  const { data: namespaceRoles = [] } = useNamespaceRoles(selectedProject, roleClaim !== "");
+  const heldRole = heldRoleNamed(namespaceRoles, roleClaim);
   // Claude Code permission mode, selected from the composer permissions menu.
   const [permissionMode, setPermissionMode] = useState<string>(
     () => restoredDraft?.permissionMode ?? CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE,
@@ -5498,6 +5506,9 @@ function NewChatLandingContent({
       };
     }
     if (pendingSkillCompletion) return { field: "other", message: "Loading skills…" };
+    if (heldRole) {
+      return { field: "other", message: `${heldRole.handle} is held by another session` };
+    }
     if (pickerLoading || workspaceStartLoading || worktreeRequestPending) {
       return { field: "other", message: "Loading session configuration…" };
     }
@@ -6248,6 +6259,7 @@ function NewChatLandingContent({
           // session groups under its project from its first sidebar appearance,
           // same as the JSON path (see `createLabels`).
         }
+        if (roleClaim) metadata.alias = roleClaim;
         const bundled = await createBundledSession(
           bundle,
           metadata,
@@ -6306,6 +6318,7 @@ function NewChatLandingContent({
           ...(agentFromProjectConfig ? {} : { agent_id: effectiveAgentId }),
           ...(mcpServicesForLaunch.length ? { mcp_registry_services: mcpServicesForLaunch } : {}),
           ...(createProjectId !== null ? { project_id: createProjectId } : {}),
+          ...(roleClaim ? { alias: roleClaim } : {}),
           ...(sandboxSelected
             ? {
                 host_type: "managed",
@@ -7180,6 +7193,13 @@ function NewChatLandingContent({
                   : selectedProject || heading}
             </h1>
           ) : null}
+          {!siblingSourceId && (
+            <NewSessionRoleField
+              namespacePath={selectedProject}
+              value={roleName}
+              onChange={setRoleName}
+            />
+          )}
           {siblingSourceId && (
             <p
               className="max-w-full break-words text-center text-sm text-muted-foreground line-clamp-2"
