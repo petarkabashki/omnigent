@@ -239,17 +239,19 @@ def parse_resolution(document: Mapping[str, object]) -> LibraryResolution | None
     )
 
 
-def _log_dropped(document: Mapping[str, object], project_root: Path) -> None:
-    """Exit 1 means some assets were left out; name each one."""
+def _log_diagnostics(document: Mapping[str, object], project_root: Path) -> None:
+    """Log each warning and error the resolve reported, e.g. a left-out skill or unknown role."""
     diagnostics = document.get("diagnostics")
     for item in diagnostics if isinstance(diagnostics, list) else []:
-        if isinstance(item, Mapping) and item.get("level") == "error":
+        if isinstance(item, Mapping) and item.get("level") in ("warning", "error"):
             _logger.warning(
-                "Agent library left out %s/%s for %s: %s",
+                "Agent library %s %s %s/%s for %s: %s",
+                item.get("level"),
+                item.get("code", "?"),
                 item.get("type", "?"),
                 item.get("name", "?"),
                 project_root,
-                item.get("message", item.get("code", "error")),
+                item.get("message", ""),
             )
 
 
@@ -288,10 +290,9 @@ def resolve_library(
     result = _run_resolve(argv, project_root, role)
     if result is None:
         return None
-    returncode, document = result
-    if returncode == 1:
-        _log_dropped(document, project_root)
-    resolution = parse_resolution(document)
+    # Only a fresh resolve logs, so each diagnostic appears once per cache entry.
+    _log_diagnostics(result[1], project_root)
+    resolution = parse_resolution(result[1])
     if resolution is None:
         return None
     with _cache_lock:

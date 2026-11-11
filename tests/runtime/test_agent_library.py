@@ -224,7 +224,34 @@ def test_exit_one_uses_the_partial_result_and_names_what_was_left_out(
     with caplog.at_level(logging.WARNING, logger=agent_library.__name__):
         names = [s.name for s in apply_session_role(_spec(), {}, str(library.project)).skills]
     assert names == ["coding-style"]
-    assert "left out skills/python-core" in caplog.text
+    assert "error bad-front-matter skills/python-core" in caplog.text
+    assert "unreadable" in caplog.text
+
+
+def test_an_unknown_role_warning_keeps_the_assets_and_logs_once_per_cache_entry(
+    library: Library, caplog: pytest.LogCaptureFixture
+) -> None:
+    library.document["scope"]["role"] = "Coordinator"  # type: ignore[index]
+    library.document["diagnostics"] = [
+        {
+            "level": "warning",
+            "code": "unknown-role",
+            "type": "roles",
+            "name": "Coordinator",
+            "message": "no role named Coordinator",
+        }
+    ]
+    library.write(library.document)
+    labels = {"omnigent.alias": "Coordinator"}
+    with caplog.at_level(logging.WARNING, logger=agent_library.__name__):
+        for _ in range(2):
+            spec = apply_session_role(_spec(), labels, str(library.project))
+            assert len(spec.skills) == 4
+    assert len(library.calls()) == 1
+    logged = [r.getMessage() for r in caplog.records if r.name == agent_library.__name__]
+    assert len(logged) == 1
+    assert "warning unknown-role roles/Coordinator" in logged[0]
+    assert "no role named Coordinator" in logged[0]
 
 
 @pytest.mark.parametrize(
