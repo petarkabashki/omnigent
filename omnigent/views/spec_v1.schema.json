@@ -25,26 +25,8 @@
         "when": {
           "anyOf": [
             {
-              "additionalProperties": true,
-              "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}.",
-              "maxProperties": 1,
-              "minProperties": 1,
-              "propertyNames": {
-                "enum": [
-                  "var",
-                  "==",
-                  "!=",
-                  "<",
-                  "<=",
-                  ">",
-                  ">=",
-                  "and",
-                  "or",
-                  "!",
-                  "in"
-                ]
-              },
-              "type": "object"
+              "$ref": "#/$defs/Rule",
+              "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}."
             },
             {
               "type": "null"
@@ -80,7 +62,7 @@
           "anyOf": [
             {
               "description": "Row field path, e.g. '$.title'.",
-              "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_]*)+$",
+              "pattern": "^\\$(\\.[A-Za-z][A-Za-z0-9_]*)+$",
               "type": "string"
             },
             {
@@ -119,7 +101,7 @@
           "anyOf": [
             {
               "description": "Row field path, e.g. '$.title'.",
-              "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_]*)+$",
+              "pattern": "^\\$(\\.[A-Za-z][A-Za-z0-9_]*)+$",
               "type": "string"
             },
             {
@@ -255,27 +237,8 @@
           "type": "string"
         },
         "when": {
-          "additionalProperties": true,
-          "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}.",
-          "maxProperties": 1,
-          "minProperties": 1,
-          "propertyNames": {
-            "enum": [
-              "var",
-              "==",
-              "!=",
-              "<",
-              "<=",
-              ">",
-              ">=",
-              "and",
-              "or",
-              "!",
-              "in"
-            ]
-          },
-          "title": "When",
-          "type": "object"
+          "$ref": "#/$defs/Rule",
+          "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}."
         }
       },
       "required": [
@@ -332,7 +295,16 @@
         },
         "order": {
           "default": "-last_event_ts",
-          "pattern": "^-?[a-z_]+$",
+          "enum": [
+            "id",
+            "-id",
+            "handle",
+            "-handle",
+            "permanent",
+            "-permanent",
+            "last_event_ts",
+            "-last_event_ts"
+          ],
           "title": "Order",
           "type": "string"
         },
@@ -349,6 +321,69 @@
       ],
       "title": "RolesSource",
       "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "maxProperties": 1,
+      "minProperties": 1,
+      "properties": {
+        "!": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "!=": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "<": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "<=": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "==": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        ">": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        ">=": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "and": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "in": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "or": {
+          "$ref": "#/$defs/RuleOperand"
+        },
+        "var": {
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RuleOperand": {
+      "anyOf": [
+        {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/RuleOperand"
+          },
+          "type": "array"
+        },
+        {
+          "$ref": "#/$defs/Rule"
+        }
+      ]
     },
     "SessionsParams": {
       "additionalProperties": false,
@@ -437,7 +472,28 @@
         },
         "order": {
           "default": "-last_event_ts",
-          "pattern": "^-?[a-z_]+$",
+          "enum": [
+            "id",
+            "-id",
+            "title",
+            "-title",
+            "kind",
+            "-kind",
+            "harness",
+            "-harness",
+            "spawn_kind",
+            "-spawn_kind",
+            "project",
+            "-project",
+            "host",
+            "-host",
+            "stopped",
+            "-stopped",
+            "stop_reason",
+            "-stop_reason",
+            "last_event_ts",
+            "-last_event_ts"
+          ],
           "title": "Order",
           "type": "string"
         },
@@ -471,6 +527,7 @@
         },
         "of": {
           "description": "Hub session id whose sub-agent tree to list.",
+          "minLength": 1,
           "title": "Of",
           "type": "string"
         }
@@ -497,8 +554,31 @@
           "type": "string"
         },
         "order": {
-          "default": "-last_event_ts",
-          "pattern": "^-?[a-z_]+$",
+          "default": "depth",
+          "enum": [
+            "id",
+            "-id",
+            "title",
+            "-title",
+            "kind",
+            "-kind",
+            "harness",
+            "-harness",
+            "spawn_kind",
+            "-spawn_kind",
+            "project",
+            "-project",
+            "host",
+            "-host",
+            "stopped",
+            "-stopped",
+            "stop_reason",
+            "-stop_reason",
+            "last_event_ts",
+            "-last_event_ts",
+            "depth",
+            "-depth"
+          ],
           "title": "Order",
           "type": "string"
         },
@@ -651,7 +731,20 @@
         },
         "order": {
           "default": "-last_event_ts",
-          "pattern": "^-?[a-z_]+$",
+          "enum": [
+            "id",
+            "-id",
+            "kind",
+            "-kind",
+            "title",
+            "-title",
+            "state",
+            "-state",
+            "messages",
+            "-messages",
+            "last_event_ts",
+            "-last_event_ts"
+          ],
           "title": "Order",
           "type": "string"
         },
@@ -707,22 +800,14 @@
         "source": {
           "discriminator": {
             "mapping": {
-              "roles": "#/$defs/RolesSource",
               "sessions": "#/$defs/SessionsSource",
-              "subagents": "#/$defs/SubagentsSource",
-              "threads": "#/$defs/ThreadsSource"
+              "subagents": "#/$defs/SubagentsSource"
             },
             "propertyName": "name"
           },
           "oneOf": [
             {
               "$ref": "#/$defs/SessionsSource"
-            },
-            {
-              "$ref": "#/$defs/ThreadsSource"
-            },
-            {
-              "$ref": "#/$defs/RolesSource"
             },
             {
               "$ref": "#/$defs/SubagentsSource"

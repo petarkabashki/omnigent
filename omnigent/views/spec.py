@@ -8,6 +8,7 @@ small JSONLogic subset. ``spec_v1.schema.json`` is generated from these models.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -19,7 +20,9 @@ MAX_ROWS = 500
 SCHEMA_PATH = Path(__file__).with_name("spec_v1.schema.json")
 
 # A row field path such as "$.title" or "$.hub_ref"; any other string is literal text.
-PATH_PATTERN = r"^\$(\.[A-Za-z_][A-Za-z0-9_]*)+$"
+# Field names start with a letter, so "__proto__" and the like can never be bound.
+PATH_PATTERN = r"^\$(\.[A-Za-z][A-Za-z0-9_]*)+$"
+PATH_FIELD_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$"
 RULE_OPERATORS = ("var", "==", "!=", "<", "<=", ">", ">=", "and", "or", "!", "in")
 Tone = Literal["neutral", "muted", "info", "success", "warning", "danger"]
 
@@ -38,8 +41,10 @@ def _check_rule(rule: Any, depth: int = 0) -> None:
     [(operator, argument)] = rule.items()
     if operator not in RULE_OPERATORS:
         raise ValueError(f"unknown rule operator {operator!r}; use one of {RULE_OPERATORS}")
-    if operator == "var" and not isinstance(argument, str):
-        raise ValueError("'var' takes a row field name, e.g. {'var': 'stopped'}")
+    if operator == "var":
+        if not isinstance(argument, str) or not re.fullmatch(PATH_FIELD_PATTERN, argument):
+            raise ValueError("'var' takes a row field name, e.g. {'var': 'stopped'}")
+        return
     _check_rule(argument, depth + 1)
 
 
@@ -64,7 +69,8 @@ Text = Annotated[
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # strict: a spec is stored and returned as given, so it must match the published schema.
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class SessionsParams(_Strict):
@@ -88,32 +94,49 @@ class RolesParams(_Strict):
 
 
 class SubagentsParams(_Strict):
-    of: str = Field(description="Hub session id whose sub-agent tree to list.")
+    of: str = Field(min_length=1, description="Hub session id whose sub-agent tree to list.")
     depth: int = Field(default=3, ge=1, le=5)
 
 
+def _order_field(*fields: str) -> Any:
+    """``order`` is a sortable row field, ``-`` prefixed for descending."""
+    choices = [f"{sign}{name}" for name in fields for sign in ("", "-")]
+    return Literal[tuple(choices)]  # type: ignore[valid-type]
+
+
+SESSION_ORDER_FIELDS = (
+    "id", "title", "kind", "harness", "spawn_kind", "project", "host", "stopped",
+    "stop_reason", "last_event_ts",
+)  # fmt: skip
+THREAD_ORDER_FIELDS = ("id", "kind", "title", "state", "messages", "last_event_ts")
+ROLE_ORDER_FIELDS = ("id", "handle", "permanent", "last_event_ts")
+
+
 class _Source(_Strict):
-    order: str = Field(default="-last_event_ts", pattern=r"^-?[a-z_]+$")
     limit: int = Field(default=100, ge=1, le=MAX_ROWS)
 
 
 class SessionsSource(_Source):
     name: Literal["sessions"]
+    order: _order_field(*SESSION_ORDER_FIELDS) = "-last_event_ts"  # type: ignore[valid-type]
     params: SessionsParams = SessionsParams()
 
 
 class ThreadsSource(_Source):
     name: Literal["threads"]
+    order: _order_field(*THREAD_ORDER_FIELDS) = "-last_event_ts"  # type: ignore[valid-type]
     params: ThreadsParams = ThreadsParams()
 
 
 class RolesSource(_Source):
     name: Literal["roles"]
+    order: _order_field(*ROLE_ORDER_FIELDS) = "-last_event_ts"  # type: ignore[valid-type]
     params: RolesParams = RolesParams()
 
 
 class SubagentsSource(_Source):
     name: Literal["subagents"]
+    order: _order_field(*SESSION_ORDER_FIELDS, "depth") = "depth"  # type: ignore[valid-type]
     params: SubagentsParams
 
 
@@ -175,6 +198,8 @@ class TableView(_View):
 
 class TreeView(_View):
     type: Literal["Tree"]
+    # spawned_by links sessions, so a tree reads only session rows.
+    source: Annotated[SessionsSource | SubagentsSource, Field(discriminator="name")]
     edge: Literal["spawned_by"] = "spawned_by"
     item: Item
 
@@ -190,6 +215,14 @@ class ViewSpec(_Strict):
     title: str | None = Field(default=None, max_length=120)
     view: View
 
+    @field_validator("spec", mode="before")
+    @classmethod
+    def _not_bool(cls, value: Any) -> Any:
+        # Literal[1] compares by equality, so True would otherwise pass.
+        if isinstance(value, bool):
+            raise ValueError("spec must be the integer 1")
+        return value
+
 
 SPEC_ADAPTER = TypeAdapter(ViewSpec)
 
@@ -200,14 +233,49 @@ def parse_spec(raw: Any) -> ViewSpec:
         if len(raw.encode()) > MAX_SPEC_BYTES:
             raise ValueError(f"spec is larger than {MAX_SPEC_BYTES} bytes")
         raw = json.loads(raw)
-    elif len(json.dumps(raw).encode()) > MAX_SPEC_BYTES:
+    elif len(json.dumps(raw, ensure_ascii=False).encode()) > MAX_SPEC_BYTES:
         raise ValueError(f"spec is larger than {MAX_SPEC_BYTES} bytes")
     return SPEC_ADAPTER.validate_python(raw)
 
 
+def _rule_defs() -> dict[str, Any]:
+    """Recursive rule grammar; nesting depth (16) is enforced only by ``parse_spec``."""
+    operand = {"$ref": "#/$defs/RuleOperand"}
+    operators: dict[str, Any] = dict.fromkeys(RULE_OPERATORS, operand)
+    operators["var"] = {"type": "string", "pattern": PATH_FIELD_PATTERN}
+    return {
+        "Rule": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "properties": operators,
+            "additionalProperties": False,
+        },
+        "RuleOperand": {
+            "anyOf": [
+                {"type": ["string", "number", "boolean", "null"]},
+                {"type": "array", "items": operand},
+                {"$ref": "#/$defs/Rule"},
+            ]
+        },
+    }
+
+
+def _link_rules(node: Any) -> Any:
+    """Point every inline rule field at the recursive ``Rule`` definition."""
+    if isinstance(node, dict):
+        if node.get("propertyNames") == {"enum": list(RULE_OPERATORS)}:
+            return {"$ref": "#/$defs/Rule", "description": node.get("description", "")}
+        return {key: _link_rules(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_link_rules(value) for value in node]
+    return node
+
+
 def json_schema() -> dict[str, Any]:
     """The published JSON Schema for spec v1."""
-    schema = SPEC_ADAPTER.json_schema()
+    schema = _link_rules(SPEC_ADAPTER.json_schema())
+    schema.setdefault("$defs", {}).update(_rule_defs())
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = "https://omnigent.invalid/views/spec_v1.schema.json"
     return schema

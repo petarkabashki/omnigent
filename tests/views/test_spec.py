@@ -64,12 +64,25 @@ def test_valid_specs_pass_both_the_models_and_the_schema(spec: dict[str, object]
         (_list_view(source={"name": "sessions", "params": {"sql": "1"}}), "sql"),
         (_list_view(source={"name": "subagents", "params": {}}), "of"),
         ({"spec": 2, "view": _list_view()["view"]}, "spec"),
+        ({"spec": True, "view": _list_view()["view"]}, "spec"),
+        (_list_view(source={"name": "sessions", "limit": "5"}), "limit"),
+        (_list_view(source={"name": "sessions", "params": {"archived": "true"}}), "archived"),
+        (_list_view(source={"name": "sessions", "order": "-hub_ref"}), "order"),
+        (_list_view(source={"name": "subagents", "params": {"of": ""}}), "of"),
+        (_list_view(marks=[{"when": {"and": [{"eval": 1}]}}]), "unknown rule operator"),
+        (_list_view(marks=[{"when": {"!": {"var": ["stopped"]}}}]), "var"),
+        (_list_view(marks=[{"when": {"var": "__proto__"}}]), "var"),
+        (_list_view(item={"title": "$.title", "link": "$.__proto__"}), "link"),
+        (_list_view(type="Tree", source={"name": "threads"}), "source"),
     ],
 )
-def test_invalid_specs_fail_with_a_reason(spec: dict[str, object], reason: str) -> None:
+def test_invalid_specs_fail_both_the_models_and_the_schema(
+    spec: dict[str, object], reason: str
+) -> None:
     with pytest.raises(ValidationError) as error:
         parse_spec(spec)
     assert reason in str(error.value)
+    assert not jsonschema.Draft202012Validator(json_schema()).is_valid(spec)
 
 
 def test_an_oversized_spec_is_refused_before_parsing() -> None:
