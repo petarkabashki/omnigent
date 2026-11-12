@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { countStaleItems, fetchAllWaiting, fetchSessionWaiting, formatWaitAge } from "./waitingApi";
+import {
+  countOwnerItems,
+  fetchAllWaiting,
+  fetchSessionWaiting,
+  formatWaitAge,
+  sessionContext,
+  type SessionWaiting,
+} from "./waitingApi";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: fetchMock }));
@@ -30,12 +37,33 @@ describe("fetchers", () => {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
-        sessions: [{ session_id: "a", items: [{ stale: true }, { stale: false }] }],
+        sessions: [
+          {
+            session_id: "a",
+            // A stale "waiting on them" thread never counts; only owner waits do.
+            items: [
+              { stale: true, needs_owner: false },
+              { stale: false, needs_owner: true },
+            ],
+          },
+        ],
       }),
     });
     const sessions = await fetchAllWaiting();
     expect(fetchMock).toHaveBeenCalledWith("/v1/sessions/waiting");
-    expect(countStaleItems(sessions)).toBe(1);
+    expect(countOwnerItems(sessions)).toBe(1);
+  });
+
+  it("sessionContext names the handle, a former handle, or the project", () => {
+    const base = { session_id: "a", items: [] } as unknown as SessionWaiting;
+    expect(sessionContext({ ...base, handle: "omnigent/Product", holds_role: true })).toBe(
+      "omnigent/Product",
+    );
+    expect(sessionContext({ ...base, handle: "omnigent/Product", holds_role: false })).toBe(
+      "formerly omnigent/Product",
+    );
+    expect(sessionContext({ ...base, project: "omnigent" })).toBe("omnigent");
+    expect(sessionContext(base)).toBeNull();
   });
 
   it("throws on an error response", async () => {

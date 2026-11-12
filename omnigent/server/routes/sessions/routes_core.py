@@ -2293,16 +2293,22 @@ def register_core_routes(
             )
         return source, holder, counterpart
 
-    def _waiting_payload(conv: Conversation, liveness: SessionLiveness | None) -> dict[str, Any]:
+    def _waiting_payload(
+        conv: Conversation, liveness: SessionLiveness | None, user_id: str | None
+    ) -> dict[str, Any]:
         """One session's waiting view from the live caches (blocking; run in a thread)."""
         from omnigent.server import session_live_state
+        from omnigent.server.role_threads import THREAD_ROLE_LABEL
         from omnigent.server.routes._sessions.common import (
             _session_background_tasks_cache,
         )
+        from omnigent.server.session_aliases import session_handle, session_project_name
         from omnigent.server.session_waiting import build_session_waiting
 
         raw = _session_status_cache.get(conv.id, conv.live_status) or "idle"
-        return build_session_waiting(
+        # Many sessions share a title (e.g. every "Product"); project and handle tell them apart.
+        handle = session_handle(conv, project_store, user_id)
+        payload = build_session_waiting(
             conversation_store,
             conv,
             status=raw,
@@ -2313,6 +2319,10 @@ def register_core_routes(
                 _session_status_cache.get(child.id, child.live_status) or "idle"
             ),
         )
+        payload["project"] = session_project_name(conv, project_store, user_id) or None
+        payload["handle"] = handle or conv.labels.get(THREAD_ROLE_LABEL) or None
+        payload["holds_role"] = handle is not None
+        return payload
 
     @router.get("/sessions/waiting")
     async def list_waiting_sessions(request: Request) -> dict[str, Any]:
@@ -2346,7 +2356,10 @@ def register_core_routes(
         convs = await asyncio.to_thread(_collect)
         liveness = liveness_lookup([conv.id for conv in convs]) if liveness_lookup else {}
         payloads = await asyncio.gather(
-            *(asyncio.to_thread(_waiting_payload, conv, liveness.get(conv.id)) for conv in convs)
+            *(
+                asyncio.to_thread(_waiting_payload, conv, liveness.get(conv.id), user_id)
+                for conv in convs
+            )
         )
         shown = [p for p in payloads if p["items"] or p["status"] in ("running", "waiting")]
 
@@ -2372,7 +2385,7 @@ def register_core_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
             raise _session_not_found()
-        return await asyncio.to_thread(_waiting_payload, conv, liveness)
+        return await asyncio.to_thread(_waiting_payload, conv, liveness, user_id)
 
     def _with_waiting(
         rows: list[dict[str, Any]], sender_id: str, counterpart: str, limit: int

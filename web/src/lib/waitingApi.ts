@@ -24,6 +24,8 @@ export interface WaitingItem {
   where?: string | null;
   ref?: string | null;
   stale: boolean;
+  /** Only owner waits (approvals, offline runners, owner/blocked threads) count toward the badge. */
+  needs_owner?: boolean;
   actions: WaitingAction[];
 }
 
@@ -36,6 +38,11 @@ export interface SessionWaiting {
   waiting_reason: string | null;
   host_id?: string | null;
   runner_online?: boolean | null;
+  /** Project path, or null when unfiled. */
+  project?: string | null;
+  /** Role handle held now, else the one the session last held. */
+  handle?: string | null;
+  holds_role?: boolean;
   items: WaitingItem[];
 }
 
@@ -64,7 +71,13 @@ export function formatWaitAge(since: number, now = Math.floor(Date.now() / 1000)
   return `${Math.floor(seconds / 86400)} d`;
 }
 
-/** Number of stale items across sessions. */
-export function countStaleItems(sessions: readonly SessionWaiting[]): number {
-  return sessions.reduce((sum, s) => sum + s.items.filter((i) => i.stale).length, 0);
+/** Number of items across sessions that need the owner. */
+export function countOwnerItems(sessions: readonly SessionWaiting[]): number {
+  return sessions.reduce((sum, s) => sum + s.items.filter((i) => i.needs_owner).length, 0);
+}
+
+/** What tells same-titled sessions apart: the role handle (even a released one), else the project. */
+export function sessionContext(session: SessionWaiting): string | null {
+  if (session.handle) return session.holds_role ? session.handle : `formerly ${session.handle}`;
+  return session.project || null;
 }

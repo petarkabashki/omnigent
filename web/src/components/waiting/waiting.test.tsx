@@ -135,7 +135,7 @@ describe("WaitingPage", () => {
     };
   }
 
-  it("orders sessions oldest first, counts stale items and nudges through", async () => {
+  it("orders sessions oldest first, counts owner items and nudges through", async () => {
     mocks.nudge.mockResolvedValue({});
     const thread = item({
       kind: "thread",
@@ -143,18 +143,24 @@ describe("WaitingPage", () => {
       ref: "proofloom/Architect",
       since: nowSec - 100,
       stale: true,
+      needs_owner: false,
       actions: ["nudge"],
     });
+    const approval = item({ kind: "approval", session_id: "old", needs_owner: true });
     mocks.fetchAll.mockResolvedValue([
       session("new", nowSec - 100, [thread]),
-      session("old", nowSec - 5000, []),
+      {
+        ...session("old", nowSec - 5000, [approval]),
+        handle: "omnigent/Product",
+        holds_role: true,
+      },
     ]);
     renderWithQuery(<WaitingPage />);
     await waitFor(() => expect(screen.getAllByTestId("waiting-session")).toHaveLength(2));
     const titles = screen.getAllByTestId("waiting-session").map((el) => el.textContent ?? "");
-    expect(titles[0]).toContain("Session old");
+    expect(titles[0]).toContain("omnigent/Product · Session old");
     expect(titles[1]).toContain("Session new");
-    expect(screen.getByTestId("waiting-stale-count").textContent).toBe("1 stale item.");
+    expect(screen.getByTestId("waiting-owner-count").textContent).toBe("1 item needs you.");
     fireEvent.click(screen.getByText("Nudge"));
     await waitFor(() => expect(mocks.nudge).toHaveBeenCalledTimes(1));
     expect(mocks.nudge.mock.calls[0][0]).toBe("new");

@@ -4,12 +4,12 @@ import { HourglassIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
-import { countStaleItems, fetchAllWaiting } from "@/lib/waitingApi";
+import { countOwnerItems, fetchAllWaiting } from "@/lib/waitingApi";
 
 /** Query key shared by the sidebar badge and the Waiting page. */
 export const ALL_WAITING_QUERY_KEY = ["waiting", "all"] as const;
 
-/** Sidebar entry for the Waiting page; the badge counts stale items and hides at zero. */
+/** Sidebar entry for the Waiting page; the badge counts items that need the owner and hides at zero. */
 export function WaitingNavButton({
   active,
   onNavClick,
@@ -23,7 +23,7 @@ export function WaitingNavButton({
     refetchInterval: 30_000,
     retry: false,
   });
-  const stale = data ? countStaleItems(data) : 0;
+  const needed = data ? countOwnerItems(data) : 0;
   return (
     <Button
       asChild
@@ -42,12 +42,12 @@ export function WaitingNavButton({
           )}
         />
         Waiting
-        {stale > 0 && (
+        {needed > 0 && (
           <span
-            aria-label={`${stale} stale waiting ${stale === 1 ? "item" : "items"}`}
+            aria-label={`${needed} waiting ${needed === 1 ? "item needs" : "items need"} you`}
             className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500/20 px-1 text-10 font-medium text-amber-700 tabular-nums dark:text-amber-300"
           >
-            {stale}
+            {needed}
           </span>
         )}
       </Link>
