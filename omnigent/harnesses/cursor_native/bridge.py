@@ -77,6 +77,7 @@ _CURSOR_AUTO_APPROVE_TOOLS = [
     "sys_terminal_list",
     "sys_terminal_read",
     "sys_terminal_send",
+    "ui_render",
     "update_comment",
 ]
 _TMUX_READY_TIMEOUT_S = 30.0

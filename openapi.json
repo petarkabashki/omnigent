@@ -25179,6 +25179,54 @@
           "usage"
         ]
       }
+    },
+    "/v1/views/resolve": {
+      "post": {
+        "description": "Rows of one named source, with the row fields of `agentic_base.query`.",
+        "operationId": "resolve_view_v1_views_resolve_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resolve View V1 Views Resolve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Resolve View",
+        "tags": [
+          "views"
+        ]
+      }
+    },
+    "/v1/views/validate": {
+      "post": {
+        "description": "Validate a spec (JSON object or string); returns the normalized spec.",
+        "operationId": "validate_view_v1_views_validate_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate View V1 Views Validate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Validate View",
+        "tags": [
+          "views"
+        ]
+      }
     }
   },
   "servers": [

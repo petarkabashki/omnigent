@@ -119,7 +119,7 @@ from omnigent.tools.builtins.timer import (
     # schema advertises.
     validate_timer_set_args,
 )
-from omnigent.tools.builtins.ui import OpenFileRequest, UiOpenFileTool
+from omnigent.tools.builtins.ui import OpenFileRequest, UiOpenFileTool, UiRenderTool
 from omnigent.tools.builtins.update_comment import UpdateCommentTool
 from omnigent.tools.builtins.upload_file import UploadFileTool, safe_resolve
 from omnigent.util.reasoning_effort import validate_effort_for_harness
@@ -337,7 +337,7 @@ _SESSION_QUERY_TOOLS = frozenset(
 )
 
 _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
-_UI_TOOLS = frozenset({UiOpenFileTool.name()})
+_UI_TOOLS = frozenset({UiOpenFileTool.name(), UiRenderTool.name()})
 
 # The title bound the rename tool advertises to the LLM — read once from the
 # tool schema so the dispatcher can never drift from the published contract.
@@ -635,6 +635,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionRenameTool,
             SysSessionMessageTool,
             UiOpenFileTool,
+            UiRenderTool,
             SysAgentGetTool,
             SysAgentListTool,
             SysAgentDownloadTool,
@@ -6639,6 +6640,40 @@ async def _open_file_via_rest(
         return json.dumps({"error": f"ui_open_file failed: {exc}"})
 
 
+async def _render_view_via_rest(
+    args: _JsonObject,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """Validate a view spec and count its rows now; the web resolves it again per reader."""
+    if server_client is None or not conversation_id:
+        return json.dumps({"error": "ui_render requires server access and a session id"})
+    headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    try:
+        checked = await server_client.post(
+            "/v1/views/validate", json={"spec": args.get("spec")}, headers=headers, timeout=30.0
+        )
+        if checked.status_code != 200:
+            return json.dumps({"error": "invalid view spec", "detail": checked.text[:1000]})
+        spec = checked.json()["spec"]
+        resolved = await server_client.post(
+            "/v1/views/resolve",
+            json={"source": spec["view"]["source"]},
+            headers=headers,
+            timeout=30.0,
+        )
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        return json.dumps({"error": f"ui_render failed: {exc}"})
+    if resolved.status_code != 200:
+        return json.dumps(
+            {"spec": spec, "error": "the view's source failed", "detail": resolved.text[:500]}
+        )
+    payload = resolved.json()
+    return json.dumps(
+        {"spec": spec, "rows": len(payload.get("rows", [])), "truncated": payload.get("truncated")}
+    )
+
+
 async def _rename_current_session_via_rest(
     args: _JsonObject,
     conversation_id: str | None,
@@ -7522,6 +7557,8 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
             )
+        elif tool_name == UiRenderTool.name():
+            output = await _render_view_via_rest(args, conversation_id, server_client)
         elif tool_name in _UI_TOOLS:
             output = await _open_file_via_rest(args, conversation_id, server_client)
         elif tool_name in _SESSION_SELF_WRITE_TOOLS:

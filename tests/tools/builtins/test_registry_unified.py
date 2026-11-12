@@ -160,6 +160,7 @@ def test_builtin_names_size_matches_registry() -> None:
                 "browser_type",
                 "browser_screenshot",
                 "ui_open_file",
+                "ui_render",
             }
         )
         == BUILTIN_NAMES

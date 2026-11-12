@@ -7,6 +7,7 @@ import { FILE_EDIT_TOOL_NAMES } from "@/lib/toolEditDiff";
 import { type LineCounts, type ToolCall, fileEditLineCounts } from "@/lib/toolResultSummary";
 import { type ToolTitle, splitToolName } from "@/lib/toolTitle";
 import { FileEditBody } from "./FileEditBody";
+import { ViewRenderBody } from "./ViewRenderBody";
 
 export interface ToolBodyProps {
   call: ToolCall;
@@ -40,9 +41,10 @@ const FILE_EDIT_VIEW: ToolView = {
  * `manage_todo_list`, or `mcp__linear__get_issue`. Register one view under
  * every harness's name for the same kind of tool.
  */
-const TOOL_VIEWS = new Map<string, ToolView>(
-  FILE_EDIT_TOOL_NAMES.map((name) => [name, FILE_EDIT_VIEW]),
-);
+const TOOL_VIEWS = new Map<string, ToolView>([
+  ...FILE_EDIT_TOOL_NAMES.map((name): [string, ToolView] => [name, FILE_EDIT_VIEW]),
+  ["ui_render", { Body: ViewRenderBody, bodyLabel: "View" }],
+]);
 
 /** The registered view for a tool; Omnigent's `mcp__omnigent__x` tools resolve to `x`. */
 export function toolViewFor(

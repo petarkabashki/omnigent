@@ -3872,6 +3872,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         search_query: str | None = None,
         search_scope: str = "all",
         accessible_by: str | None = None,
+        access_via_root: bool = False,
         owned_by: str | None = None,
         shared_only: bool = False,
         include_archived: bool = False,
@@ -3951,6 +3952,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to.
             ``None`` → the single-user ``local`` sentinel.
+        :param access_via_root: When ``True``, ``accessible_by`` matches a
+            grant on each session's root, the way session access is checked,
+            so ungranted sub-agents of a readable root are listed. Only
+            with ``accessible_by`` alone.
         :param owned_by: When set, restrict to sessions the user owns
             (an ``owner``-level grant) — stricter than ``accessible_by``,
             which also matches sessions merely shared with them. Powers
@@ -3991,6 +3996,11 @@ class SqlAlchemyConversationStore(ConversationStore):
             raise ValueError("shared_only=True requires accessible_by to be set")
         if search_scope not in _SEARCH_SCOPES:
             raise ValueError(f"invalid search_scope: {search_scope!r}")
+        if access_via_root and (accessible_by is None or owned_by is not None or shared_only):
+            raise ValueError("access_via_root=True needs accessible_by and no other scope")
+        acl_column = (
+            SqlConversation.root_conversation_id if access_via_root else SqlConversation.id
+        )
 
         # ACL strategy. Single-DB (the AP and Omnigent tables share one bind):
         # push the permission check into the conversations query as a
@@ -4051,7 +4061,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         if cursor_viewer is not None:
             for cursor_id in (after, before):
                 if cursor_id:
-                    self._require_cursor_grant(cursor_id, cursor_viewer)
+                    self._require_cursor_grant(cursor_id, cursor_viewer, via_root=access_via_root)
 
         with self._conv_session("list_conversations") as session:
             # Bound the content-search scan server-side (Postgres only). SET
@@ -4075,7 +4085,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
 
             if qualifying_ids is not None:
-                stmt = stmt.where(SqlConversation.id.in_(qualifying_ids))
+                stmt = stmt.where(acl_column.in_(qualifying_ids))
 
             if acl_pushdown:
                 # Correlated on both PK members so Postgres can drive the
@@ -4088,7 +4098,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                         select(SqlSessionPermission.conversation_id)
                         .where(
                             SqlSessionPermission.workspace_id == SqlConversation.workspace_id,
-                            SqlSessionPermission.conversation_id == SqlConversation.id,
+                            SqlSessionPermission.conversation_id == acl_column,
                             SqlSessionPermission.user_id == accessible_by,
                         )
                         .exists()
@@ -4385,7 +4395,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             has_more=has_more,
         )
 
-    def _require_cursor_grant(self, cursor_id: str, viewer: str) -> None:
+    def _require_cursor_grant(
+        self, cursor_id: str, viewer: str, *, via_root: bool = False
+    ) -> None:
         """
         Reject a list cursor naming a session the viewer has no grant on.
 
@@ -4394,13 +4406,20 @@ class SqlAlchemyConversationStore(ConversationStore):
 
         :param cursor_id: The ``after`` or ``before`` session ID.
         :param viewer: The user whose listing the cursor pages.
+        :param via_root: Check the grant on the cursor session's root instead.
         :raises StaleCursorError: If the viewer has no grant on the session.
         """
+        grant_id: str | None = cursor_id
+        if via_root:
+            cursor = self.get_conversation(cursor_id)
+            grant_id = cursor.root_conversation_id if cursor is not None else None
+        if grant_id is None:
+            raise StaleCursorError(cursor_id)
         with self._session("authorize_session_list_cursor") as meta_sess:
             granted = meta_sess.execute(
                 select(SqlSessionPermission.conversation_id).where(
                     SqlSessionPermission.workspace_id == current_workspace_id(),
-                    SqlSessionPermission.conversation_id == cursor_id,
+                    SqlSessionPermission.conversation_id == grant_id,
                     SqlSessionPermission.user_id == viewer,
                 )
             ).first()

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.auth import LEVEL_OWNER
 from omnigent.stores.conversation_store import (
     ARCHIVED_AT_LABEL_KEY,
     PROJECT_LABEL_KEY,
@@ -24,6 +25,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
+from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
 
@@ -161,6 +163,38 @@ def test_list_conversations_kind_filter_crosses_dbs(store: SqlAlchemyConversatio
     subs = store.list_conversations(kind="sub_agent")
     assert all(c.kind == "default" for c in defaults.data)
     assert all(c.kind == "sub_agent" for c in subs.data)
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_access_via_root_lists_ungranted_children_of_granted_roots(
+    omnigent_db: Path, conv_db: Path, split: bool
+) -> None:
+    store = SqlAlchemyConversationStore(
+        f"sqlite:///{omnigent_db}", f"sqlite:///{conv_db}" if split else None
+    )
+    permissions = SqlAlchemyPermissionStore(f"sqlite:///{omnigent_db}")
+    for user in ("alice", "bob"):
+        permissions.ensure_user(user)
+    mine = store.create_conversation(kind="default", title="mine")
+    theirs = store.create_conversation(kind="default", title="theirs")
+    permissions.grant("alice", mine.id, LEVEL_OWNER)
+    permissions.grant("bob", theirs.id, LEVEL_OWNER)
+    for parent in (mine, theirs, mine):
+        store.create_conversation(kind="sub_agent", parent_conversation_id=parent.id)
+
+    seen, after = [], None
+    while True:
+        page = store.list_conversations(
+            kind=None, accessible_by="alice", access_via_root=True, limit=1, after=after
+        )
+        seen += [conv.root_conversation_id for conv in page.data]
+        if not page.has_more:
+            break
+        after = page.last_id
+
+    assert seen == [mine.id] * 3
+    with pytest.raises(ValueError, match="access_via_root"):
+        store.list_conversations(access_via_root=True)
 
 
 def test_list_conversations_archived_filter(store: SqlAlchemyConversationStore) -> None:

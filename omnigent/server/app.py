@@ -149,6 +149,7 @@ from omnigent.server.routes.sessions import (
 from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.routes.usage import create_usage_router
+from omnigent.server.routes.views import create_views_router
 from omnigent.server.runner_session_init import (
     TRANSIENT_REJECTION_STATUSES,
     RunnerSessionInitializer,
@@ -4055,6 +4056,17 @@ def create_app(
             tags=["messaging_rules"],
             include_in_schema=False,
         )
+    app.include_router(
+        create_views_router(
+            conversation_store,
+            project_store=project_store,
+            host_store=host_store,
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+        tags=["views"],
+    )
     app.include_router(
         create_policy_registry_router(auth_provider=auth_provider),
         prefix="/v1",
