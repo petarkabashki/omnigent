@@ -23,6 +23,9 @@ from omnigent.db.db_models import (
 )
 from omnigent.stores.conversation_store import sqlalchemy_store
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.stores.write_hook_guard import write_hook_guard  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("write_hook_guard")
 
 
 @pytest.fixture(params=["conversation_store", "split_db_conversation_store"])

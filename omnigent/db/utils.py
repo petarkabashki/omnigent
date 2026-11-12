@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
 from sqlalchemy.orm import Session, sessionmaker
 
+from omnigent.db import write_hooks
 from omnigent.db.cockroachdb import (
     _crdb_server_version,
     _initialize_or_verify_crdb_schema,
@@ -975,6 +976,8 @@ def make_managed_session_maker(
             except Exception:
                 session.rollback()
                 raise
+            if write_hooks.observing():
+                write_hooks.committed(session)
 
     return managed_session
 

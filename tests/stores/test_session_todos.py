@@ -7,6 +7,9 @@ from sqlalchemy import update
 
 from omnigent.native.session_todos import validate_session_todos
 from omnigent.stores.conversation_store import sqlalchemy_store as store_module
+from tests.stores.write_hook_guard import write_hook_guard  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("write_hook_guard")
 
 TODOS = [{"content": "Verify the example", "status": "in_progress", "activeForm": "Verifying"}]
 

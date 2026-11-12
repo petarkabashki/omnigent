@@ -12,6 +12,9 @@ from omnigent.entities.conversation import MessageData, NewConversationItem, Sta
 from omnigent.errors import OmnigentError
 from omnigent.stores.conversation_store import MAX_PENDING_INPUTS, PENDING_INPUT_RESPONSE_ID
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from tests.stores.write_hook_guard import write_hook_guard  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("write_hook_guard")
 
 
 def _input(message="saved prompt", **kwargs):

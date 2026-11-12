@@ -35,6 +35,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.sql.selectable import Subquery
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
+from omnigent.db import write_hooks
 from omnigent.db.account_authority import AccountAuthority, require_active_account
 from omnigent.db.compression import encode as compress_text
 from omnigent.db.converters import sql_agent_to_entity
@@ -1117,6 +1118,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             # actually executes it (no statement-level
             # short-circuit on equal values), which is what we
             # want here.
+            write_hooks.note(session, SqlConversation, "update", [{"id": conversation_id}])
             session.execute(
                 text("UPDATE conversations SET updated_at = updated_at WHERE id = :id"),
                 # Raw SQL bypasses the Uuid16 decorator; bind the 16-byte form
