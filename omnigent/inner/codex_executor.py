@@ -72,6 +72,7 @@ from omnigent.models.codex_model_vocabulary import (
 )
 from omnigent.models.model_fallbacks import CODEX_CATALOG_CLONE_SOURCE_SLUG, CODEX_DEFAULT_MODEL
 from omnigent.native import _native_forwarder_health as native_forwarder_health
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
 from omnigent.spec.repo_scope import repo_scope_dirs
 from omnigent.spec.types import RetryPolicy
@@ -3114,7 +3115,9 @@ class _CodexAppServerSession:
         # The runner grants only this session's skills directory to its tools.
         # Keep its inode stable so cached sandbox mounts survive worker restarts.
         if self._skills_dir is None:
-            self._owned_skills_dir = tempfile.TemporaryDirectory(prefix=CODEX_SKILLS_PREFIX)
+            self._owned_skills_dir = tempfile.TemporaryDirectory(
+                prefix=CODEX_SKILLS_PREFIX, dir=ensure_runtime_parent().resolve()
+            )
             self._skills_dir = Path(self._owned_skills_dir.name)
         self._skills_dir = prepare_codex_skills_dir(self._skills_dir)
         try:

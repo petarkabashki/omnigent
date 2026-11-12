@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import stat
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,20 +18,22 @@ from omnigent.inner.codex_staging import (
     link_codex_skills_dir,
     prepare_codex_skills_dir,
 )
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 
 
 @pytest.fixture
 def isolated_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
-    return tmp_path
+    runtime_parent = tmp_path / "omnigent-runtime"
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(runtime_parent))
+    return runtime_parent
 
 
-def test_staging_root_is_private_and_under_tempdir(isolated_tempdir: Path) -> None:
+def test_staging_root_is_private_and_under_the_runtime_parent(isolated_tempdir: Path) -> None:
     root = codex_home_staging_root()
     assert root.parent == isolated_tempdir
     assert root.is_dir()
     if hasattr(os, "getuid"):
-        assert f"-{os.getuid()}" in root.name
+        assert stat.S_IMODE(isolated_tempdir.stat().st_mode) == 0o700
         assert stat.S_IMODE(root.stat().st_mode) == 0o700
 
 
@@ -46,18 +47,18 @@ def test_staging_root_tightens_a_loose_preexisting_mode(isolated_tempdir: Path) 
 def test_staging_root_resolves_symlinked_temp_ancestors(
     isolated_tempdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_temp = isolated_tempdir / "real-temp"
+    real_temp = isolated_tempdir.parent / "real-temp"
     real_temp.mkdir()
-    temp_alias = isolated_tempdir / "temp-alias"
+    temp_alias = isolated_tempdir.parent / "temp-alias"
     temp_alias.symlink_to(real_temp, target_is_directory=True)
-    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_alias))
-    assert codex_home_staging_root().parent == real_temp.resolve()
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(temp_alias / "runtime"))
+    assert codex_home_staging_root().parent == (real_temp / "runtime").resolve()
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership semantics")
 def test_staging_root_refuses_a_symlink_squatting_its_name(isolated_tempdir: Path) -> None:
     outside = isolated_tempdir / "outside"
-    outside.mkdir()
+    outside.mkdir(parents=True)
     _staging_root_path().symlink_to(outside)
     with pytest.raises(OSError):
         codex_home_staging_root()

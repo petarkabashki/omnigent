@@ -10,8 +10,9 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 from pathlib import Path
+
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent, resolve_harness_tmp_parent
 
 # Prefix of each per-conversation home created under the staging root. Also
 # what identifies an Omnigent-private codex home to nested launches (see
@@ -21,9 +22,7 @@ CODEX_SKILLS_PREFIX = "omnigent-codex-skills-"
 
 
 def _staging_root_path() -> Path:
-    # The shared temp root must not route private homes through another user.
-    suffix = f"-{os.getuid()}" if hasattr(os, "getuid") else ""
-    return Path(tempfile.gettempdir()).resolve() / f"omnigent-codex-homes{suffix}"
+    return resolve_harness_tmp_parent().resolve() / "codex-homes"
 
 
 def codex_home_staging_root() -> Path:
@@ -37,8 +36,12 @@ def codex_home_staging_root() -> Path:
         plain unpredictable temp-dir home. Skills use a separate directory,
         so this fallback does not change their sandbox visibility.
     """
+    try:
+        ensure_runtime_parent()
+    except RuntimeError as exc:
+        raise OSError(str(exc)) from exc
     root = _staging_root_path()
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root.mkdir(mode=0o700, exist_ok=True)
     if not hasattr(os, "getuid"):
         # Windows temp dirs are already per-user; POSIX ownership semantics
         # don't apply.

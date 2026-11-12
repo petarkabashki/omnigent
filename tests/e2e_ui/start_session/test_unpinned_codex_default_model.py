@@ -108,7 +108,7 @@ providers:
 
 def _codex_pane_text(tmp_dir: Path) -> str:
     """Capture the managed codex tmux pane's visible text, or ``""``."""
-    for socket in sorted(tmp_dir.glob("omnigent-terminal-*/tmux.sock")):
+    for socket in sorted(tmp_dir.glob("terminal-*/tmux.sock")):
         try:
             sessions = subprocess.run(
                 ["tmux", "-S", str(socket), "list-sessions", "-F", "#{session_name}"],
@@ -191,6 +191,7 @@ def unpinned_codex_astra_session(
             # Scope managed-terminal private dirs (tmux sockets) to this
             # fixture so the test can capture the codex pane's text.
             "TMPDIR": str(tmp_dir),
+            "OMNIGENT_HARNESS_TMP_PARENT": str(tmp_dir),
         }
     )
     server_env = {**shared_env, "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token}

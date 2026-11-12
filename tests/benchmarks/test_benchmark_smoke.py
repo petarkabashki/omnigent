@@ -1174,7 +1174,7 @@ def test_stop_process_group_kills_descendants_that_ignore_sigterm(tmp_path: Path
 def test_teardown_kills_terminals_under_the_bench_tmpdir() -> None:
     """A runner's leftover REPL tmux server under the bench TMPDIR is killed."""
     env = BenchEnvironment()
-    terminal_dir = env._child_tmp / "omnigent-terminal-test"
+    terminal_dir = env._child_tmp / "terminal-test"
     terminal_dir.mkdir(parents=True)
     socket_path = terminal_dir / "tmux.sock"
     subprocess.run(["tmux", "-S", str(socket_path), "new-session", "-d", "sleep 60"], check=True)

@@ -129,6 +129,7 @@ from omnigent.process_logging import (
     env_truthy,
     process_log_dir_reference,
 )
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
 from omnigent.util.server_url import org_id_from_url as _org_id_from_url
@@ -8353,7 +8354,7 @@ def _materialize_harness_launcher_file(
     # id (also colon-sanitized) as before.
     display_name = harness.replace(":", "-")
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="omnigent-harness-launcher-"))
+    tmpdir = runtime_mkdtemp("harness-launcher-")
     yaml_path = tmpdir / f"{effective_harness.replace(':', '-')}.yaml"
 
     executor: dict[str, object] = {"harness": effective_harness}

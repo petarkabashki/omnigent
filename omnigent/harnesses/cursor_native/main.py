@@ -63,6 +63,7 @@ from omnigent.native.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
 from omnigent.native.native_terminal import url_component
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 
 _logger = logging.getLogger(__name__)
 
@@ -351,7 +352,7 @@ def run_cursor_native(
             "_ensure_backend before run_cursor_native."
         )
     effective_cursor_args = _inject_mode_arg(cursor_args, mode)
-    with TemporaryDirectory(prefix="omnigent-cursor-native-") as tmpdir:
+    with TemporaryDirectory(prefix="cursor-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_cursor_agent_spec(Path(tmpdir))
         _run_with_remote_server(
             server.rstrip("/"),

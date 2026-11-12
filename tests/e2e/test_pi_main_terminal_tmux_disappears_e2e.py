@@ -57,7 +57,6 @@ import shutil
 import signal
 import subprocess
 import tarfile
-import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -68,6 +67,7 @@ import pytest
 import yaml
 
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
+from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests._helpers.compat import apply_runner_env, compat_runner_cwd, runner_executable
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.e2e.helpers import POLL_INTERVAL_S
@@ -150,7 +150,7 @@ def _capture_terminal_panes() -> str:
     :returns: One labelled block per terminal socket, or a no-socket note.
     """
     blocks: list[str] = []
-    for entry in sorted(Path(tempfile.gettempdir()).glob("omnigent-terminal-*")):
+    for entry in sorted(resolve_harness_tmp_parent().glob("terminal-*")):
         socket_path = entry / "tmux.sock"
         if not socket_path.exists():
             continue

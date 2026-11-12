@@ -114,6 +114,7 @@ from omnigent.native.native_terminal import post_initial_prompt, request_with_42
 from omnigent.native.native_terminal import (
     terminal_attach_url as _attach_url,
 )
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.runtime.tool_result_replay import sanitize_replayed_image_blocks
 from omnigent.util.http_retry import jittered_retry_delay
 from omnigent.util.json_types import JsonObject as _JsonObject
@@ -477,7 +478,7 @@ def run_codex_native(
             "Codex requires a resolved Omnigent server URL. The CLI should call "
             "_ensure_backend before run_codex_native."
         )
-    with TemporaryDirectory(prefix="omnigent-codex-native-") as tmpdir:
+    with TemporaryDirectory(prefix="codex-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_codex_agent_spec(Path(tmpdir), model=model)
         _run_with_remote_server(
             server.rstrip("/"),

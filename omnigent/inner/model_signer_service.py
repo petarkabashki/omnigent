@@ -15,7 +15,6 @@ import socket
 import ssl
 import stat
 import sys
-import tempfile
 import threading
 import weakref
 from collections.abc import Awaitable
@@ -29,6 +28,7 @@ from omnigent.databricks_ai_gateway import (
     gateway_attribution_headers,
     is_databricks_ai_gateway_url,
 )
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 from omnigent.telemetry.surface import harness_client_surface
 
 from .egress.ca import ensure_ca, ensure_ca_bundle
@@ -957,7 +957,7 @@ async def _run(config_fd: int) -> int:
     else:
         fake_bearer_token = f"fake-provider-bearer-{secrets.token_urlsafe(32)}"
     try:
-        private_dir = Path(tempfile.mkdtemp(prefix="omnigent-model-signer-private-")).resolve()
+        private_dir = runtime_mkdtemp("model-signer-private-").resolve()
     except BaseException:
         if credential_lifecycle is not None:
             await credential_lifecycle.close()
@@ -971,7 +971,7 @@ async def _run(config_fd: int) -> int:
         private_stat = private_dir.lstat()
         private_identity = (private_stat.st_dev, private_stat.st_ino)
         os.chmod(private_dir, 0o700)
-        public_dir = Path(tempfile.mkdtemp(prefix="omnigent-model-signer-public-")).resolve()
+        public_dir = runtime_mkdtemp("model-signer-public-").resolve()
         public_stat = public_dir.lstat()
         public_identity = (public_stat.st_dev, public_stat.st_ino)
         os.chmod(public_dir, 0o700)

@@ -1646,9 +1646,9 @@ def create_app(
     # which deleted the dir on return, leaving downstream tools
     # (terminal dispatch, skill resolution) holding broken Path
     # references.
-    import tempfile
+    from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 
-    _spec_cache = _AgentSpecCache(Path(tempfile.mkdtemp(prefix=f"runner-specs-{_runner_id}-")))
+    _spec_cache = _AgentSpecCache(runtime_mkdtemp(f"runner-specs-{_runner_id}-"))
 
     async def spec_resolver(agent_id: str, session_id: str | None = None) -> ResolvedSpec | None:
         """

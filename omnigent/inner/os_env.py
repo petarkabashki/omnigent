@@ -30,6 +30,7 @@ from omnigent.runner.identity import (
     OMNIGENT_SESSION_ENV_VAR,
     strip_runner_auth_secrets,
 )
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 from omnigent.sandbox.copy_on_write import SHARED_ENVIRONMENT_VAR, CopyOnWriteEnvironment
 from omnigent.util.json_types import JsonValue
 
@@ -1127,7 +1128,7 @@ def create_os_environment(
     cwd = Path(spec.cwd or os.getcwd()).resolve(strict=False)
     fork_dir: Path | None = None
     if spec.fork:
-        fork_dir = Path(tempfile.mkdtemp(prefix="omnigent-fork-"))
+        fork_dir = runtime_mkdtemp("fork-")
         effective_cwd = fork_dir / "root"
         _copy_tree(cwd, effective_cwd)
         cwd = effective_cwd

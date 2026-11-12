@@ -14,6 +14,7 @@ from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import TextChunk, TurnComplete
 from omnigent.inner.model_egress import FrozenModelRoute
 from omnigent.inner.model_signer import SignerLaunchConfig
+from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 
 _CODEX = Path("/opt/homebrew/bin/codex")
 _MARKER = "BROKERED_E2E_OK upstream_saw_signer_only_fake_bearer=true"
@@ -53,7 +54,7 @@ async def test_real_codex_seatbelt_signer_turn_and_cleanup(
     )
     events: list[object] = []
     public_dir: Path | None = None
-    private_dirs_before = set(Path("/tmp").glob("omnigent-model-signer-private-*"))
+    private_dirs_before = set(resolve_harness_tmp_parent().glob("model-signer-private-*"))
 
     async def _collect_turn() -> None:
         async for event in executor.run_turn(
@@ -102,7 +103,7 @@ async def test_real_codex_seatbelt_signer_turn_and_cleanup(
     assert _MARKER in response, repr(events)
     assert public_dir is not None
     assert not public_dir.exists()
-    assert set(Path("/tmp").glob("omnigent-model-signer-private-*")) == private_dirs_before
+    assert set(resolve_harness_tmp_parent().glob("model-signer-private-*")) == private_dirs_before
     assert not list(tmp_path.glob("omnigent-codex-tmp/omnigent-codex-home-*"))
     assert shutil.which("sandbox-exec") is not None
 

@@ -61,6 +61,7 @@ from omnigent.native.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
 from omnigent.native.native_terminal import url_component
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _DEFAULT_HERMES_COMMAND = "hermes"
@@ -185,7 +186,7 @@ def run_hermes_native(
             "Hermes requires a resolved Omnigent server URL. The CLI should call "
             "_ensure_backend before run_hermes_native."
         )
-    with TemporaryDirectory(prefix="omnigent-hermes-native-") as tmpdir:
+    with TemporaryDirectory(prefix="hermes-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_hermes_agent_spec(Path(tmpdir))
         _run_with_remote_server(
             server.rstrip("/"),

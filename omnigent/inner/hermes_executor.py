@@ -45,7 +45,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -61,6 +60,7 @@ from omnigent.inner.executor import (
     ToolSpec,
     TurnComplete,
 )
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 
 _logger = logging.getLogger(__name__)
 
@@ -303,7 +303,7 @@ class HermesExecutor(Executor):
             write_policy_hook_config,
         )
 
-        self._hermes_home = Path(tempfile.mkdtemp(prefix="hermes_home_"))
+        self._hermes_home = runtime_mkdtemp("hermes-home-")
         write_policy_hook_config(
             bridge_dir_for_session_id(conv_id),
             server_url,

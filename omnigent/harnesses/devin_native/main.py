@@ -47,6 +47,7 @@ from omnigent.native.native_terminal import (
 from omnigent.native.native_terminal import bind_session_runner as _bind_session_runner
 from omnigent.native.native_terminal import normalize_extra_args as _normalize_extra_args
 from omnigent.native.native_terminal import url_component
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _DEFAULT_DEVIN_COMMAND = "devin"
@@ -566,7 +567,7 @@ def run_devin_native(
             "_ensure_backend before run_devin_native."
         )
     resolved_model = resolve_devin_launch_model(model, effort)
-    with TemporaryDirectory(prefix="omnigent-devin-native-") as tmpdir:
+    with TemporaryDirectory(prefix="devin-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_devin_agent_spec(Path(tmpdir), model=resolved_model)
         _run_with_remote_server(
             server.rstrip("/"),

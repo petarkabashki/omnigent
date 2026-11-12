@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import time
@@ -41,7 +42,11 @@ import pytest
 
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
-from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+from omnigent.runtime.harnesses.paths import (
+    ensure_runtime_parent,
+    resolve_harness_tmp_parent,
+    runtime_mkdtemp,
+)
 from omnigent.runtime.harnesses.process_manager import (
     _AP_PID_FILE,
     _TMP_PARENT_ENV_VAR,
@@ -318,6 +323,45 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     resolved = resolve_harness_tmp_parent()
 
     assert resolved == tmp_path / "harness-sockets"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes.")
+def test_runtime_mkdtemp_creates_a_private_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = tmp_path / "nested" / "omnigent-runtime"
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
+
+    created = runtime_mkdtemp("terminal-")
+
+    assert created.parent == parent
+    assert created.name.startswith("terminal-")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+    parent.chmod(0o755)
+    assert ensure_runtime_parent() == parent
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and symlinks.")
+@pytest.mark.parametrize("squatter", ["symlink", "file", "foreign_uid"])
+def test_ensure_runtime_parent_refuses_an_unsafe_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, squatter: str
+) -> None:
+    parent = tmp_path / "omnigent-runtime"
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
+    if squatter == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        parent.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    elif squatter == "file":
+        parent.write_text("")
+    else:
+        parent.mkdir(mode=0o700)
+        foreign_uid = os.getuid() + 1
+        monkeypatch.setattr(os, "getuid", lambda: foreign_uid)
+
+    with pytest.raises(RuntimeError, match="refusing to use"):
+        runtime_mkdtemp("terminal-")
 
 
 async def test_shutdown_without_start_is_noop(

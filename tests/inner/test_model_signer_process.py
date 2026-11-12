@@ -512,7 +512,7 @@ async def test_real_signer_relays_only_placeholder_authorized_responses(
     public_ca = readiness.ca_bundle_path.read_bytes()
     private_dirs: set[Path] = set()
     temp_root = readiness.ca_bundle_path.parent.parent
-    for candidate in temp_root.glob("omnigent-model-signer-private-*"):
+    for candidate in temp_root.glob("model-signer-private-*"):
         try:
             if (candidate / "ca.pem").read_bytes() in public_ca:
                 private_dirs.add(candidate)

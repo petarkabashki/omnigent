@@ -3351,7 +3351,9 @@ def test_reap_orphaned_terminals_reaps_only_dead_owner_dirs(
         """Fail the test if kill-server runs with no socket present."""
         raise AssertionError(f"kill-server must not run without a socket: {args} {kwargs}")
 
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(
         terminal_mod,
@@ -3395,7 +3397,9 @@ def test_reap_orphaned_terminals_kills_server_for_dead_owner_socket(
         kill_calls.append(list(argv))
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(
         terminal_mod,
@@ -3431,7 +3435,9 @@ def test_reap_orphaned_terminals_logs_what_it_killed(
     :param caplog: Captures emitted log records.
     :returns: None.
     """
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(
         terminal_mod,
@@ -3473,7 +3479,9 @@ def test_reap_orphaned_terminals_logs_reap_when_socket_is_already_gone(
     :param caplog: Captures emitted log records.
     :returns: None.
     """
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     kill_calls: list[list[str]] = []
     monkeypatch.setattr(

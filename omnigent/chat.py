@@ -16,7 +16,6 @@ import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 from collections.abc import Awaitable, Callable, Generator
@@ -80,6 +79,7 @@ from omnigent.process_logging import (
     process_log_dir_reference,
 )
 from omnigent.remote_launch import REMOTE_LAUNCH_MESSAGE
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 from omnigent.session_host import get_session_host, route_session_request, set_session_host
 from omnigent.spec import load as load_spec
 from omnigent.spec._omnigent_compat import OMNIGENT_EXECUTOR_TYPE
@@ -3352,7 +3352,7 @@ def _materialize_override_bundle(source: Path, overrides: ChatOverrides) -> Path
     # ``_cleanup_materialized_override_bundle`` removes this tempdir
     # once validation, bundling, or the attached REPL/server path no
     # longer needs the rewritten spec.
-    tmpdir = Path(tempfile.mkdtemp(prefix="omnigent-override-"))
+    tmpdir = runtime_mkdtemp("override-")
     try:
         if source.is_file():
             target = tmpdir / source.name
@@ -3955,7 +3955,7 @@ def _start_local_server(
     """
     log_path, log_fh = open_process_log_file("server", root=_omnigent_log_dir())
     if ephemeral:
-        data_tmpdir = tempfile.mkdtemp(prefix="ap-chat-data-")
+        data_tmpdir = str(runtime_mkdtemp("chat-data-"))
         db_path = Path(data_tmpdir) / "chat.db"
         artifact_path = Path(data_tmpdir) / "artifacts"
     else:

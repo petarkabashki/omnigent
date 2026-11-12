@@ -151,6 +151,7 @@ from omnigent.native.native_terminal import (
 from omnigent.native.native_terminal import (
     terminal_attach_url as _attach_url,
 )
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 
 _logger = logging.getLogger(__name__)
 
@@ -268,7 +269,7 @@ def run_antigravity_native(
     # interactive client will attach to drive agy's request-review prompt; a
     # non-TTY launch must auto-bypass or the unattended turn hangs forever).
     headless = _launch_is_headless()
-    with TemporaryDirectory(prefix="omnigent-antigravity-native-") as tmpdir:
+    with TemporaryDirectory(prefix="antigravity-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_antigravity_agent_spec(Path(tmpdir))
         if server is None:
             _run_with_local_server(

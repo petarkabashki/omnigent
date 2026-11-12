@@ -50,6 +50,8 @@ from types import FrameType
 from typing import TYPE_CHECKING, Any, Protocol, TextIO, TypeAlias, cast
 from urllib.parse import urlparse
 
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
+
 if TYPE_CHECKING:
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
@@ -1838,7 +1840,7 @@ def run_claude_native(
         detail="native config" if claude_config is not None else "claude cli config",
     )
 
-    with TemporaryDirectory(prefix="omnigent-claude-native-") as tmpdir:
+    with TemporaryDirectory(prefix="claude-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_claude_agent_spec(Path(tmpdir))
         startup_profiler.mark("agent spec materialized")
         if server is None:

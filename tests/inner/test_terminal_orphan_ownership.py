@@ -24,7 +24,9 @@ def test_failed_reap_preserves_control_socket_for_retry(
     socket = directory / "tmux.sock"
     socket.touch()
     owner_claim.write_owner_claim(directory)
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(terminal_mod, "_process_alive", lambda pid: False)
 
@@ -53,7 +55,9 @@ def test_reap_removes_stale_socket_when_tmux_reports_server_gone(
     socket = directory / "tmux.sock"
     socket.touch()
     owner_claim.write_owner_claim(directory)
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(terminal_mod, "_process_alive", lambda pid: False)
 
@@ -84,7 +88,9 @@ def test_sweep_preserves_unresolvable_owner(
     directory = tmp_path / "omnigent-terminal-owned"
     directory.mkdir()
     (directory / "owner.pid").write_bytes(record)
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_tmux_available", lambda: True)
     monkeypatch.setattr(terminal_mod, "_process_alive", lambda pid: False)
     monkeypatch.setattr(owner_claim, "current_pid_namespace", lambda: "local-ns")
@@ -114,7 +120,9 @@ def test_sweep_only_kills_real_tmux_with_proven_dead_owner(
         capture_output=True,
         timeout=10,
     )
-    monkeypatch.setattr(terminal_mod, "_terminals_tmp_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        terminal_mod, "_terminals_tmp_roots", lambda: [(tmp_path, "omnigent-terminal-")]
+    )
     monkeypatch.setattr(terminal_mod, "_process_alive", lambda pid: False)
     monkeypatch.setattr(owner_claim, "current_pid_namespace", lambda: "local-ns")
     monkeypatch.setattr(owner_claim, "current_boot_id", lambda: "local-boot")

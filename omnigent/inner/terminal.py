@@ -37,6 +37,12 @@ from omnigent.host.runner_scope import pane_scope_join_command
 from omnigent.native import owner_claim
 from omnigent.process_logging import redact_log_text
 from omnigent.runner.identity import strip_runner_auth_secrets
+from omnigent.runtime.harnesses.paths import (
+    HARNESS_TMP_PARENT_ENV_VAR,
+    UNIX_SOCKET_PATH_MAX,
+    resolve_harness_tmp_parent,
+    runtime_mkdtemp,
+)
 from omnigent.util.tmux_compat import tmux_unavailable_reason
 
 if TYPE_CHECKING:
@@ -90,7 +96,10 @@ _TMUX_START_ON_ATTACH_CHANNEL = "omnigent-start-on-attach"
 # records the process that launched the instance so a later startup
 # can reap tmux servers whose owner died without graceful shutdown
 # (``reap_orphaned_terminals``).
-_TERMINAL_DIR_PREFIX = "omnigent-terminal-"
+_TERMINAL_DIR_PREFIX = "terminal-"
+# Name used directly under the system temp dir before the per-user parent;
+# the sweep still reaps those until their terminals restart.
+_LEGACY_TERMINAL_DIR_PREFIX = "omnigent-terminal-"
 # Bound for each ``tmux kill-server`` in the orphan sweep; a wedged
 # tmux must not stall runner startup.
 _REAP_KILL_TIMEOUT_S = 10.0
@@ -880,17 +889,21 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def _terminals_tmp_root() -> Path:
+def _terminals_tmp_roots() -> list[tuple[Path, str]]:
     """
-    Return the directory scanned for terminal instance dirs.
+    Return each directory scanned for terminal instance dirs, with its name prefix.
 
     Indirection point so tests can retarget the orphan sweep at a
     scratch directory without monkeypatching the process-wide
     ``tempfile`` module (see omnigent-testing rule 14).
 
-    :returns: The system temp directory, e.g. ``Path("/tmp")``.
+    :returns: The per-user runtime parent and the legacy system temp dir, e.g.
+        ``[(Path("/tmp/omnigent-1000"), "terminal-"), (Path("/tmp"), "omnigent-terminal-")]``.
     """
-    return Path(tempfile.gettempdir())
+    return [
+        (resolve_harness_tmp_parent(), _TERMINAL_DIR_PREFIX),
+        (Path(tempfile.gettempdir()), _LEGACY_TERMINAL_DIR_PREFIX),
+    ]
 
 
 def reap_orphaned_terminals() -> int:
@@ -913,7 +926,10 @@ def reap_orphaned_terminals() -> int:
     if not _tmux_available():
         return 0
     reaped = 0
-    for entry in _terminals_tmp_root().glob(f"{_TERMINAL_DIR_PREFIX}*"):
+    entries = [
+        entry for root, prefix in _terminals_tmp_roots() for entry in root.glob(f"{prefix}*")
+    ]
+    for entry in entries:
         claim = owner_claim.read_owner_claim(entry)
         if claim is None or not owner_claim.owner_is_gone(claim, process_alive=_process_alive):
             continue
@@ -2844,8 +2860,14 @@ def create_terminal_instance(
     _require_supported_tmux()
 
     # Create the instance's private directory.
-    private_dir = Path(tempfile.mkdtemp(prefix=_TERMINAL_DIR_PREFIX))
+    private_dir = runtime_mkdtemp(_TERMINAL_DIR_PREFIX)
     socket_path = private_dir / "tmux.sock"
+    if len(os.fsencode(socket_path)) > UNIX_SOCKET_PATH_MAX:
+        private_dir.rmdir()
+        raise RuntimeError(
+            f"tmux socket path {socket_path} exceeds the {UNIX_SOCKET_PATH_MAX}-byte "
+            f"Unix socket limit; shorten {HARNESS_TMP_PARENT_ENV_VAR}"
+        )
     # Record the owning process so a later startup can reap this tmux
     # server if we die without graceful shutdown (SIGKILL, harness
     # teardown) — see ``reap_orphaned_terminals``.

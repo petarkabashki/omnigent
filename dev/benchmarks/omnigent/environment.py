@@ -128,7 +128,7 @@ _CALLER_SESSION_ENV_VARS = frozenset(
 )
 _CALLER_SESSION_ENV_PREFIXES = ("OMNIGENT_TERMINAL_",)
 # Instance-dir prefix of runner terminals (see omnigent/inner/terminal.py).
-_TERMINAL_DIR_GLOB = "omnigent-terminal-*"
+_TERMINAL_DIR_GLOB = "terminal-*"
 
 # Terminal SSE events — if one arrives before any delta, the turn produced no
 # streamed text (a failure for the TTFT journey).
@@ -485,10 +485,15 @@ class BenchEnvironment:
         """Base environment for anything the bench spawns, journeys included.
 
         Drops the caller's Omnigent session vars (:func:`bench_child_environ`)
-        and points ``TMPDIR`` at the bench's temp dir, so terminals the bench's
-        runners create are swept at teardown.
+        and points ``TMPDIR`` and the runtime parent at the bench's temp dir, so
+        terminals the bench's runners create are swept at teardown.
         """
-        return {**bench_child_environ(), "TMPDIR": str(self._child_tmp)}
+        child_tmp = str(self._child_tmp)
+        return {
+            **bench_child_environ(),
+            "TMPDIR": child_tmp,
+            "OMNIGENT_HARNESS_TMP_PARENT": child_tmp,
+        }
 
     def _stop(self) -> None:
         """Terminate host, runner, server, and mock; remove the temp dir."""

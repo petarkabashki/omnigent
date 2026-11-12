@@ -48,6 +48,7 @@ from omnigent.native.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
 from omnigent.native.native_terminal import url_component
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _DEFAULT_KIRO_COMMAND = "kiro-cli"
@@ -228,7 +229,7 @@ def run_kiro_native(
             "Kiro requires a resolved Omnigent server URL. The CLI should call "
             "_ensure_backend before run_kiro_native."
         )
-    with TemporaryDirectory(prefix="omnigent-kiro-native-") as tmpdir:
+    with TemporaryDirectory(prefix="kiro-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_kiro_agent_spec(Path(tmpdir), model=model)
         _run_with_remote_server(
             server.rstrip("/"),

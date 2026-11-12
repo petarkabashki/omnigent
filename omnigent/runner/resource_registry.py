@@ -1174,11 +1174,12 @@ class SessionResourceRegistry:
     def _codex_skills_dir_locked(self, session_id: str) -> Path:
         """Allocate the session's skills directory while holding ``_lock``."""
         from omnigent.inner.codex_staging import CODEX_SKILLS_PREFIX
+        from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 
         directory = self._codex_skills_dirs.get(session_id)
         if directory is None:
             directory = tempfile.TemporaryDirectory(
-                prefix=CODEX_SKILLS_PREFIX, dir=Path(tempfile.gettempdir()).resolve()
+                prefix=CODEX_SKILLS_PREFIX, dir=ensure_runtime_parent().resolve()
             )
             self._codex_skills_dirs[session_id] = directory
         return Path(directory.name)

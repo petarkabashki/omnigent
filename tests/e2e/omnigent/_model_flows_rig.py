@@ -25,7 +25,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -37,6 +36,7 @@ import httpx
 import pytest
 import yaml
 
+from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 from tests.e2e.routing._helpers import wait_for
 
 #: Opt-in gate: this suite launches real claude/codex TUIs and does real
@@ -406,8 +406,8 @@ def booted_rig(tmp_root: Path) -> Iterator[ModelFlowsRig]:
 
 def _terminal_socket_dirs() -> set[Path]:
     """Return the omnigent terminal tmux socket dirs currently on disk."""
-    tmp = Path(tempfile.gettempdir())
-    return {p for p in tmp.glob("omnigent-terminal-*") if (p / "tmux.sock").exists()}
+    tmp = resolve_harness_tmp_parent()
+    return {p for p in tmp.glob("terminal-*") if (p / "tmux.sock").exists()}
 
 
 @dataclass

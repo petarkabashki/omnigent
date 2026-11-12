@@ -61,6 +61,7 @@ from omnigent.native.native_terminal import (
     normalize_extra_args as _normalize_extra_args,
 )
 from omnigent.native.native_terminal import url_component
+from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 _logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ def run_opencode_native(  # pragma: no cover
             "OpenCode requires a resolved Omnigent server URL. The CLI should resolve "
             "a backend before run_opencode_native."
         )
-    with TemporaryDirectory(prefix="omnigent-opencode-native-") as tmpdir:
+    with TemporaryDirectory(prefix="opencode-native-", dir=ensure_runtime_parent()) as tmpdir:
         spec_path = _materialize_opencode_agent_spec(Path(tmpdir), model=model)
         _run_with_remote_server(
             server.rstrip("/"),

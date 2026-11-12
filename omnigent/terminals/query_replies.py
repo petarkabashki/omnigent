@@ -28,9 +28,9 @@ import os
 import re
 import shlex
 import shutil
-import tempfile
 from collections.abc import Mapping
-from pathlib import Path
+
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 
 _logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ async def _tmux(tmux: str, socket: str, *args: str, capture: bool = False) -> tu
 
 async def _probe(tmux: str, client_env: Mapping[str, str]) -> frozenset[str] | None:
     # Unix socket paths are capped near 104 bytes, so keep the directory short.
-    workdir = Path(tempfile.mkdtemp(prefix="omnigent-tmux-replies-"))
+    workdir = runtime_mkdtemp("tmux-replies-")
     socket = str(workdir / "s")
     queries_path = workdir / "queries"
     replies_path = workdir / "replies"
