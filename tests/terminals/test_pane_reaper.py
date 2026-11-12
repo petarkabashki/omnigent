@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,15 +20,19 @@ from omnigent.native import native_cost_popup
 from omnigent.runner.app import create_runner_app
 from omnigent.runner.native import orchestration as native_runtime
 from omnigent.runner.resource_registry import SessionResourceRegistry
+from omnigent.server.role_threads import THREAD_OF_LABEL, THREAD_ROLE_LABEL, is_thread_session
+from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
 from omnigent.terminals.pane_reaper import (
     _DEFAULT_IDLE_TIMEOUT_S,
     _IDLE_TIMEOUT_ENV,
+    _THREAD_IDLE_TIMEOUT_ENV,
     NATIVE_PANE_TERMINAL_NAMES,
     PANE_OUTPUT_BUSY_WINDOW_S,
     NativePaneReaper,
     PaneRef,
     resolve_native_pane_idle_timeout_s,
     resolve_sub_agent_pane_idle_timeout_s,
+    resolve_thread_pane_idle_timeout_s,
 )
 from omnigent.terminals.registry import TerminalRegistry
 from tests.runner.helpers import NullServerClient, make_test_terminal_instance
@@ -61,13 +65,20 @@ class _Fakes:
         self.panes = [p for p in self.panes if p.conversation_id != pane.conversation_id]
 
 
-def _make(fakes: _Fakes, *, timeout: float = 100.0, interval: float = 0.01) -> NativePaneReaper:
+def _make(
+    fakes: _Fakes,
+    *,
+    timeout: float = 100.0,
+    interval: float = 0.01,
+    still_thread_session: Callable[[PaneRef], Awaitable[bool]] | None = None,
+) -> NativePaneReaper:
     return NativePaneReaper(
         list_native_panes=lambda: list(fakes.panes),
         is_busy=fakes.is_busy,
         reap=fakes.reap,
         idle_timeout_s=timeout,
         reaper_interval_s=interval,
+        still_thread_session=still_thread_session,
     )
 
 
@@ -109,6 +120,55 @@ def test_classify_forgets_gone_panes() -> None:
     assert "conv_a" in r._last_busy_at
     r._classify(1.0, [], busy_convs=set())  # pane gone
     assert "conv_a" not in r._last_busy_at
+
+
+def test_classify_reaps_a_thread_pane_on_the_thread_window_and_spares_a_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_THREAD_IDLE_TIMEOUT_ENV, "30")
+    holder = _pane("conv_holder")
+    thread = _pane("conv_thread")._replace(thread_session=True)
+    r = _make(_Fakes(), timeout=100.0)
+    r._classify(0.0, [holder, thread], busy_convs=set())
+    assert r._classify(30.0, [holder, thread], busy_convs=set()) == [thread]
+    assert r._classify(100.0, [holder, thread], busy_convs=set()) == [holder, thread]
+
+
+@pytest.mark.parametrize(
+    ("session_role", "expected"),
+    [(False, ["conv_thread"]), (True, [])],
+)
+async def test_scan_rereads_a_thread_pane_before_an_early_reap(
+    monkeypatch: pytest.MonkeyPatch, session_role: bool, expected: list[str]
+) -> None:
+    monkeypatch.setenv(_THREAD_IDLE_TIMEOUT_ENV, "10")
+    f = _Fakes()
+    f.panes = [_pane("conv_thread")._replace(thread_session=True)]
+
+    async def still_thread_session(pane: PaneRef) -> bool:
+        return not session_role
+
+    r = _make(f, timeout=1000.0, still_thread_session=still_thread_session)
+    r._last_busy_at["conv_thread"] = time.monotonic() - 100
+    await r._scan_once()
+    assert f.reaped == expected
+    # A session that took a role keeps its idle clock for the session window.
+    assert ("conv_thread" in r._last_busy_at) is session_role
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        ({THREAD_OF_LABEL: "proj/Architect"}, True),
+        ({THREAD_ROLE_LABEL: "proj/Product"}, True),
+        ({THREAD_ROLE_LABEL: "proj/Product", ALIAS_LABEL_KEY: "Product"}, False),
+        ({}, False),
+    ],
+)
+def test_thread_session_is_a_thread_without_a_held_role(
+    labels: dict[str, str], expected: bool
+) -> None:
+    assert is_thread_session(labels) is expected
 
 
 # ── Scan behaviour (_scan_once): reap, skip-busy, TOCTOU re-check ────────────
@@ -202,6 +262,27 @@ def test_resolve_sub_agent_window_caps_session_window_at_native_default(
     else:
         monkeypatch.setenv(_IDLE_TIMEOUT_ENV, env)
     assert resolve_sub_agent_pane_idle_timeout_s(session_timeout_s) == expected
+
+
+@pytest.mark.parametrize(
+    ("env", "session_timeout_s", "expected"),
+    [
+        (None, 3600.0, 1800.0),
+        (None, 600.0, 600.0),
+        (None, 0.0, 0.0),
+        ("120", 3600.0, 120.0),
+        ("0", 3600.0, 3600.0),
+        ("bad", 3600.0, 1800.0),
+    ],
+)
+def test_resolve_thread_window_caps_the_session_window(
+    monkeypatch: pytest.MonkeyPatch, env: str | None, session_timeout_s: float, expected: float
+) -> None:
+    if env is None:
+        monkeypatch.delenv(_THREAD_IDLE_TIMEOUT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_THREAD_IDLE_TIMEOUT_ENV, env)
+    assert resolve_thread_pane_idle_timeout_s(session_timeout_s) == expected
 
 
 # ── Loop smoke (start/shutdown + disable) ───────────────────────────────────

@@ -8961,6 +8961,7 @@ def create_runner_app(
             _tmux_window_activity_at,
         )
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
+        from omnigent.server.role_threads import is_thread_session
         from omnigent.terminals.pane_reaper import (
             PANE_OUTPUT_BUSY_WINDOW_S,
             NativePaneReaper,
@@ -8983,9 +8984,25 @@ def create_runner_app(
                             socket_path,
                             instance,
                             sub_agent=_is_sub_agent_session(conv_id),
+                            thread_session=_is_thread_session(
+                                _session_snapshot_cache.get(conv_id)
+                            ),
                         )
                     )
             return panes
+
+        def _is_thread_session(snapshot: _SessionSnapshot | None) -> bool:
+            return (
+                snapshot is not None
+                and snapshot.parent_session_id is None
+                and is_thread_session(snapshot.labels or {})
+            )
+
+        async def _still_thread_session(pane: PaneRef) -> bool:
+            """Re-read the session's labels: a role taken since the pane started counts."""
+            _session_snapshot_cache.pop(pane.conversation_id, None)
+            snapshot = await _session_snapshot(pane.conversation_id)
+            return snapshot.ok and _is_thread_session(snapshot)
 
         async def _server_confirms_turn_in_flight(conv_id: str) -> bool:
             """Whether the server still records the session's turn as in flight.
@@ -9127,6 +9144,7 @@ def create_runner_app(
             is_busy=_native_pane_is_busy,
             reap=_reap_native_pane,
             idle_timeout_s=native_pane_idle_timeout_s,
+            still_thread_session=_still_thread_session,
         )
     else:
         app.state.native_pane_reaper = None
