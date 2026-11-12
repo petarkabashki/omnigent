@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from omnigent.runner.identity import RUNNER_AUTH_SECRET_ENV_VARS
+from omnigent.runtime.harnesses.paths import runtime_mkdtemp
 from omnigent.util.json_types import JsonValue
 
 from .agent_env import DESKTOP_SESSION_ENV_VARS
@@ -1090,7 +1091,10 @@ def _prune_environ_to_spawn_allowlist(sandbox: SandboxPolicy) -> None:
 
 
 def create_private_tmpdir() -> Path:
-    return Path(tempfile.mkdtemp(prefix="omnigent-osenv-"))
+    # macOS temp dirs are already per-user, and seatbelt finds scratch under them.
+    if sys.platform == "darwin":
+        return Path(tempfile.mkdtemp(prefix="omnigent-osenv-"))
+    return runtime_mkdtemp("osenv-")
 
 
 def set_sandbox_env(env: MutableMapping[str, str], tmpdir: Path) -> None:

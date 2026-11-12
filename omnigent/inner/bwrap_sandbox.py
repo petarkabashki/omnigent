@@ -1368,10 +1368,10 @@ def _path_exists_lstat(path: Path) -> bool:
 
 def _scratch_tmpdir(write_roots: list[Path]) -> Path | None:
     """
-    Return the first ``write_root`` that lives under the system tempdir.
+    Return the first ``write_root`` under the runtime parent or the system tempdir.
 
     :func:`omnigent.inner.sandbox.create_private_tmpdir` returns a
-    path under ``tempfile.gettempdir()`` (typically ``/tmp/...``).
+    path under the per-user runtime parent (typically ``/tmp/omnigent-<uid>/...``).
     The helper-spawn site adds it to ``write_roots`` via
     :func:`omnigent.inner.sandbox.with_additional_write_roots`, so
     we identify it here by checking which ``write_root`` is under
@@ -1385,10 +1385,15 @@ def _scratch_tmpdir(write_roots: list[Path]) -> Path | None:
     """
     import tempfile
 
-    sys_tmp = Path(tempfile.gettempdir()).resolve(strict=False)
+    from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
+
+    temp_roots = (
+        resolve_harness_tmp_parent().resolve(strict=False),
+        Path(tempfile.gettempdir()).resolve(strict=False),
+    )
     for root in write_roots:
         try:
-            if _is_within(root, sys_tmp):
+            if any(_is_within(root, temp_root) for temp_root in temp_roots):
                 return root
         except OSError:
             continue
