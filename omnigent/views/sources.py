@@ -74,12 +74,17 @@ class HubSources:
     conversations: ConversationStore
     projects: ProjectStore | None
     user_id: str | None
+    # The hub's session read check, applied to the session a ``subagents`` view starts at.
+    can_read: Callable[[Conversation], bool]
     host_name: Callable[[str], str | None] = lambda _host_id: None
     origin: str = DEFAULT_ORIGIN
     deadline: float = field(default_factory=lambda: time.monotonic() + DEFAULT_DEADLINE_SECONDS)
     _project_paths: dict[str, str | None] = field(default_factory=dict)
     _hosts: dict[str, str | None] = field(default_factory=dict)
+    _readable_roots: dict[str, bool] = field(default_factory=dict)
     scanned_all: bool = True
+    # Rows read across every scan of one resolve; MAX_SCANNED bounds the total.
+    scanned: int = 0
 
     def resolve(
         self, source: SessionsSource | ThreadsSource | RolesSource | SubagentsSource
@@ -139,24 +144,28 @@ class HubSources:
                 held.setdefault(role.holder_session_id, []).append(self._role_handle(role))
         return {session_id: sorted(handles) for session_id, handles in held.items()}
 
-    def _scan(self, **filters: Any) -> list[Conversation]:
+    def _scan(self, *, scoped: bool = True, **filters: Any) -> list[Conversation]:
+        """Newest first; ``scoped`` needs the caller's grant on each row, which sub-agents lack."""
         found: list[Conversation] = []
         after: str | None = None
-        while len(found) < MAX_SCANNED and self._check_deadline():
+        while True:
+            budget = MAX_SCANNED - self.scanned
+            if budget <= 0 or not self._check_deadline():
+                self.scanned_all = False
+                return found
             page = self.conversations.list_conversations(
-                limit=_PAGE_SIZE,
+                limit=min(_PAGE_SIZE, budget),
                 after=after,
-                accessible_by=self.user_id,
+                accessible_by=self.user_id if scoped else None,
                 order="desc",
                 sort_by="updated_at",
                 **filters,
             )
             found.extend(page.data)
+            self.scanned += len(page.data)
             if not page.has_more or not page.data:
                 return found
             after = page.last_id
-        self.scanned_all = False
-        return found[:MAX_SCANNED]
 
     # ---- session rows ---------------------------------------------------
     def session_rows(self, conversations: list[Conversation]) -> list[dict[str, Any]]:
@@ -204,14 +213,19 @@ class HubSources:
         host: str | None = None,
         role: str | None = None,
     ) -> list[dict[str, Any]]:
-        hub_kind = {"session": "default", "subagent": "sub_agent"}.get(kind or "")
-        scanned = self._scan(
-            kind=hub_kind,
-            has_agent_id=True,
-            # No hub-side title search: the row title falls back to the sub-agent name and
-            # description label, which only the filter below sees; truncated covers the cap.
-            include_archived=archived is not False,
-        )
+        # No hub-side title search: the row title falls back to the sub-agent name and
+        # description label, which only the filter below sees; truncated covers the cap.
+        common = {"has_agent_id": True, "include_archived": archived is not False}
+        scanned: list[Conversation] = []
+        if kind != "subagent":
+            scanned += self._scan(kind="default", **common)
+        if kind != "session":
+            # Sub-agents carry no grant of their own; the hub authorizes them by their root.
+            scanned += [
+                conv
+                for conv in self._scan(kind="sub_agent", scoped=False, **common)
+                if self._root_readable(conv)
+            ]
         rows = []
         for row in self.session_rows(scanned):
             if project is not None and project not in (row["project"], row["project_id"]):
@@ -231,7 +245,7 @@ class HubSources:
 
     def subagents(self, of: str, depth: int = 1) -> list[dict[str, Any]]:
         root = self.conversations.get_conversation(of)
-        if root is None or not self._accessible(root):
+        if root is None or not self.can_read(root):
             raise SourceError(f"no session {of!r}")
         rows: list[dict[str, Any]] = []
         frontier, seen, level = [root.id], {root.id}, 0
@@ -239,7 +253,9 @@ class HubSources:
             level += 1
             children: list[Conversation] = []
             for parent_id in frontier:
-                for child in self._scan(kind=None, parent_conversation_id=parent_id):
+                # A child is readable when its parent is (check_session_access delegates up).
+                children_of = self._scan(kind=None, scoped=False, parent_conversation_id=parent_id)
+                for child in children_of:
                     if child.id not in seen:
                         seen.add(child.id)
                         children.append(child)
@@ -247,15 +263,12 @@ class HubSources:
             frontier = [child.id for child in children]
         return rows
 
-    def _accessible(self, conv: Conversation) -> bool:
-        page = self.conversations.list_conversations(
-            limit=1,
-            kind=None,
-            accessible_by=self.user_id,
-            root_conversation_id=conv.root_conversation_id,
-            include_archived=True,
-        )
-        return bool(page.data)
+    def _root_readable(self, conv: Conversation) -> bool:
+        root_id = conv.root_conversation_id or conv.id
+        if root_id not in self._readable_roots:
+            root = conv if root_id == conv.id else self.conversations.get_conversation(root_id)
+            self._readable_roots[root_id] = root is not None and self.can_read(root)
+        return self._readable_roots[root_id]
 
     def roles(self, handle: str | None = None, held: bool | None = None) -> list[dict[str, Any]]:
         rows = []

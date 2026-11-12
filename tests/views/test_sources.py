@@ -12,13 +12,15 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from omnigent.errors import OmnigentError
-from omnigent.server.auth import LEVEL_OWNER
+from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ
+from omnigent.server.permissions import check_session_access
 from omnigent.server.routes.views import create_views_router
 from omnigent.server.session_aliases import set_session_alias
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
+from omnigent.views import sources as sources_module
 from omnigent.views.sources import HubSources, SourceError, order_rows
 from omnigent.views.spec import SPEC_ADAPTER
 
@@ -48,16 +50,25 @@ def stores(db_uri: str) -> SimpleNamespace:
     )
 
 
-def _session(stores: SimpleNamespace, title: str, *, owner: str = OWNER, **create: object) -> str:
+def _session(
+    stores: SimpleNamespace, title: str, *, owner: str | None = OWNER, **create: object
+) -> str:
+    """A session; ``owner=None`` leaves it without a grant, like hub-spawned sub-agents."""
     conversation = stores.conversations.create_conversation(
         title=title, agent_id=AGENT_ID, **create
     )
-    stores.permissions.grant(owner, conversation.id, LEVEL_OWNER)
+    if owner is not None:
+        stores.permissions.grant(owner, conversation.id, LEVEL_OWNER)
     return conversation.id
 
 
 def _sources(stores: SimpleNamespace, **kwargs: object) -> HubSources:
-    return HubSources(stores.conversations, stores.projects, OWNER, **kwargs)
+    def can_read(conversation) -> bool:
+        return check_session_access(
+            OWNER, conversation.id, LEVEL_READ, stores.permissions, stores.conversations
+        )
+
+    return HubSources(stores.conversations, stores.projects, OWNER, can_read, **kwargs)
 
 
 def _resolve(stores: SimpleNamespace, source: dict[str, object]) -> list[dict[str, object]]:
@@ -142,10 +153,57 @@ def test_subagents_walk_the_tree_to_the_requested_depth(stores: SimpleNamespace)
     assert set(two[1]) == SESSION_FIELDS | {"depth"}
 
 
+def test_sub_agents_without_their_own_grant_are_read_through_their_root(
+    stores: SimpleNamespace,
+) -> None:
+    root = _session(stores, "root")
+    child = _session(stores, "child", owner=None, kind="sub_agent", parent_conversation_id=root)
+    _session(stores, "grand", owner=None, kind="sub_agent", parent_conversation_id=child)
+    theirs = _session(stores, "theirs", owner=STRANGER)
+    _session(stores, "hidden", owner=None, kind="sub_agent", parent_conversation_id=theirs)
+
+    tree = _resolve(stores, {"name": "subagents", "params": {"of": root, "depth": 2}})
+    listed = _resolve(stores, {"name": "sessions", "params": {"kind": "subagent"}})
+    every = _resolve(stores, {"name": "sessions"})
+
+    assert [row["title"] for row in tree] == ["child", "grand"]
+    assert sorted(row["title"] for row in listed) == ["child", "grand"]
+    assert sorted(row["title"] for row in every) == ["child", "grand", "root"]
+
+
 def test_subagents_of_another_users_session_is_not_found(stores: SimpleNamespace) -> None:
     theirs = _session(stores, "theirs", owner=STRANGER)
+    # A share on a child of their session must not make the root readable.
+    child = _session(stores, "child", owner=STRANGER, parent_conversation_id=theirs)
+    stores.permissions.grant(OWNER, child, LEVEL_READ)
     with pytest.raises(SourceError):
         _sources(stores).subagents(of=theirs)
+
+
+def test_scan_cap_bounds_the_whole_resolve(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _session(stores, "root")
+    for index in range(4):
+        child = _session(stores, f"c{index}", parent_conversation_id=root)
+        for grand in range(4):
+            _session(stores, f"g{index}{grand}", parent_conversation_id=child)
+    monkeypatch.setattr(sources_module, "MAX_SCANNED", 5)
+    monkeypatch.setattr(sources_module, "_PAGE_SIZE", 2)
+    spec = SPEC_ADAPTER.validate_python(
+        {
+            "spec": 1,
+            "view": {
+                "type": "Tree",
+                "source": {"name": "subagents", "params": {"of": root, "depth": 2}},
+                "item": {"title": "$.title"},
+            },
+        }
+    )
+    sources = _sources(stores)
+    resolved = sources.resolve(spec.view.source)
+    assert sources.scanned <= 5
+    assert (len(resolved.rows) <= 5, resolved.truncated) == (True, True)
 
 
 def test_roles_and_group_threads_have_their_agentic_base_fields(stores: SimpleNamespace) -> None:
@@ -206,7 +264,12 @@ def client(stores: SimpleNamespace) -> TestClient:
     async def _error(_request: Request, error: OmnigentError) -> JSONResponse:
         return JSONResponse({"error": str(error)}, status_code=error.http_status)
 
-    app.include_router(create_views_router(stores.conversations, stores.projects), prefix="/v1")
+    app.include_router(
+        create_views_router(
+            stores.conversations, stores.projects, permission_store=stores.permissions
+        ),
+        prefix="/v1",
+    )
     return TestClient(app)
 
 
@@ -236,3 +299,25 @@ def test_validate_route_normalizes_a_string_spec_and_explains_a_bad_one(
     assert ok.json()["spec"]["view"]["source"]["order"] == "-last_event_ts"
     assert bad.status_code == 400
     assert "view" in bad.json()["error"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"{not json", b"[" * 60000, b'{"spec": NaN}', b"[1]", b"{" + b" " * 200_000 + b"}"],
+    ids=["malformed", "deep", "nan", "not-object", "oversized"],
+)
+@pytest.mark.parametrize("route", ["validate", "resolve"])
+def test_routes_refuse_bad_bodies_with_400(client: TestClient, route: str, body: bytes) -> None:
+    response = client.post(
+        f"/v1/views/{route}", content=body, headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 400
+
+
+def test_routes_require_a_json_content_type(client: TestClient) -> None:
+    response = client.post(
+        "/v1/views/resolve",
+        content=b'{"source": {"name": "roles"}}',
+        headers={"Content-Type": "text/plain"},
+    )
+    assert response.status_code == 415

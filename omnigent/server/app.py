@@ -4055,6 +4055,7 @@ def create_app(
             project_store=project_store,
             host_store=host_store,
             auth_provider=auth_provider,
+            permission_store=permission_store,
         ),
         prefix="/v1",
         tags=["views"],
