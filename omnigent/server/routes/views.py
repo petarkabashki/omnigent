@@ -57,6 +57,52 @@ def _invalid(error: ValueError) -> OmnigentError:
     return OmnigentError(f"invalid view spec: {error}", code=ErrorCode.INVALID_INPUT)
 
 
+async def resolve_source(
+    source: Source,
+    user_id: str | None,
+    conversation_store: ConversationStore,
+    project_store: ProjectStore | None,
+    host_store: HostStore | None,
+    auth_provider: AuthProvider | None,
+    permission_store: PermissionStore | None,
+) -> dict[str, Any]:
+    """Rows of ``source`` as ``user_id`` may read them, as ``POST /views/resolve`` returns."""
+
+    def _host_name(host_id: str) -> str | None:
+        # Only the caller's own hosts are named; a shared session's host stays null.
+        host = host_store.get_host(host_id) if host_store is not None else None
+        if host is None or (user_id is not None and host.user_id != user_id):
+            return None
+        return host.name
+
+    def _can_read(conversation: Conversation) -> bool:
+        # With auth or permissions off, every caller owns every session.
+        if auth_provider is None or permission_store is None:
+            return True
+        return check_session_access(
+            user_id,
+            conversation.id,
+            LEVEL_READ,
+            permission_store,
+            conversation_store,
+            conversation=conversation,
+        )
+
+    sources = HubSources(
+        conversation_store, project_store, user_id, _can_read, host_name=_host_name
+    )
+    try:
+        resolved = await asyncio.to_thread(sources.resolve, source)
+    except SourceError as error:
+        raise OmnigentError(str(error), code=ErrorCode.NOT_FOUND) from error
+    return {
+        "origin": sources.origin,
+        "source": source.name,
+        "rows": resolved.rows,
+        "truncated": resolved.truncated,
+    }
+
+
 def create_views_router(
     conversation_store: ConversationStore,
     project_store: ProjectStore | None = None,
@@ -90,38 +136,14 @@ def create_views_router(
         except ValueError as error:
             raise _invalid(error) from error
 
-        def _host_name(host_id: str) -> str | None:
-            # Only the caller's own hosts are named; a shared session's host stays null.
-            host = host_store.get_host(host_id) if host_store is not None else None
-            if host is None or (user_id is not None and host.user_id != user_id):
-                return None
-            return host.name
-
-        def _can_read(conversation: Conversation) -> bool:
-            # With auth or permissions off, every caller owns every session.
-            if auth_provider is None or permission_store is None:
-                return True
-            return check_session_access(
-                user_id,
-                conversation.id,
-                LEVEL_READ,
-                permission_store,
-                conversation_store,
-                conversation=conversation,
-            )
-
-        sources = HubSources(
-            conversation_store, project_store, user_id, _can_read, host_name=_host_name
+        return await resolve_source(
+            source,
+            user_id,
+            conversation_store,
+            project_store,
+            host_store,
+            auth_provider,
+            permission_store,
         )
-        try:
-            resolved = await asyncio.to_thread(sources.resolve, source)
-        except SourceError as error:
-            raise OmnigentError(str(error), code=ErrorCode.NOT_FOUND) from error
-        return {
-            "origin": sources.origin,
-            "source": source.name,
-            "rows": resolved.rows,
-            "truncated": resolved.truncated,
-        }
 
     return router

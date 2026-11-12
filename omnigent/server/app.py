@@ -134,6 +134,7 @@ from omnigent.server.routes.preferences import create_preferences_router
 from omnigent.server.routes.project_shells import create_project_shells_router
 from omnigent.server.routes.projects import create_projects_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
+from omnigent.server.routes.saved_views import create_saved_views_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
 from omnigent.server.routes.session_policies import create_session_policies_router
@@ -4058,6 +4059,17 @@ def create_app(
         )
     app.include_router(
         create_views_router(
+            conversation_store,
+            project_store=project_store,
+            host_store=host_store,
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+        tags=["views"],
+    )
+    app.include_router(
+        create_saved_views_router(
             conversation_store,
             project_store=project_store,
             host_store=host_store,
