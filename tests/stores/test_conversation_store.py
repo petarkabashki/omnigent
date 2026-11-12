@@ -2018,6 +2018,39 @@ def test_list_conversations_search_query_matches_role_handle(
     assert matched("harbor/") == set()
 
 
+@pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
+def test_list_conversations_title_search_matches_every_title_field(
+    store_fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """
+    ``title_search`` matches title, sub-agent name and the given label, on one or two DBs.
+
+    :param store_fixture: Name of the store fixture to use.
+    :param request: Pytest request, to resolve the fixture.
+    """
+    store: SqlAlchemyConversationStore = request.getfixturevalue(store_fixture)
+    by_title = store.create_conversation(title="Deploy notes")
+    root = store.create_conversation(title="root")
+    by_name = store.create_conversation(
+        title="", kind="sub_agent", parent_conversation_id=root.id, sub_agent_name="deployer"
+    )
+    by_label = store.create_conversation(title="")
+    store.set_labels(by_label.id, {"desc": "Fix DEPLOY"})
+    other_label = store.create_conversation(title="")
+    store.set_labels(other_label.id, {"other": "deploy"})
+    store.create_conversation(title="unrelated")
+
+    def matched(query: str, label: str | None = "desc") -> set[str]:
+        page = store.list_conversations(
+            kind=None, title_search=query, title_search_label=label, limit=50
+        )
+        return {c.id for c in page.data}
+
+    assert matched("deploy") == {by_title.id, by_name.id, by_label.id}
+    assert matched("deploy", label=None) == {by_title.id, by_name.id}
+    assert matched("%") == set()
+
+
 def test_list_conversations_search_scope_splits_title_and_content_matches(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

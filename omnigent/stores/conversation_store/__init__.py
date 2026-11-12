@@ -1163,6 +1163,8 @@ class ConversationStore(ABC):
         title: str | None = None,
         has_label: str | None = None,
         project_id: str | None = None,
+        title_search: str | None = None,
+        title_search_label: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1281,6 +1283,12 @@ class ConversationStore(ABC):
         :param pinned: When ``True``, only return sessions ``pinned_owner`` has
             pinned (their per-user ``omnigent.pinned.<user>`` label — the
             sidebar's Pinned section). ``False`` (default) disables the filter.
+        :param title_search: Case-insensitive substring that may match the
+            title, ``sub_agent_name`` or the ``title_search_label`` value, the
+            fields a display title falls back through, e.g. ``"deploy"``. A
+            superset: callers needing the exact fallback re-check the rows.
+        :param title_search_label: Label key whose value ``title_search`` also
+            matches, e.g. ``"omnigent.claude_native.description"``.
         :param has_label: When set, restrict to sessions carrying this label
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to

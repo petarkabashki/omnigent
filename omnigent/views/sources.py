@@ -256,8 +256,9 @@ class HubSources:
         scanned = self._scan(
             kind=hub_kind,
             has_agent_id=True,
-            # No hub-side title search: the row title falls back to the sub-agent name and
-            # description label, which only the filter below sees; truncated covers the cap.
+            # The hub narrows to rows whose title fields match; ``keep`` checks the exact fallback.
+            title_search=search or None,
+            title_search_label=_DESCRIPTION_LABEL if search else None,
             include_archived=archived is not False,
             keep=keep,
             enough=None if row_filtered else enough,

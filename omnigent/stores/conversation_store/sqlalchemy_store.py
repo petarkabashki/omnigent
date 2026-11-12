@@ -3883,6 +3883,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         title: str | None = None,
         has_label: str | None = None,
         project_id: str | None = None,
+        title_search: str | None = None,
+        title_search_label: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3948,6 +3950,12 @@ class SqlAlchemyConversationStore(ConversationStore):
             sidebar's Pinned section). ``False`` (default) disables the filter.
             Lets the client enumerate its pinned sessions independent of the
             loaded pagination window.
+        :param title_search: Case-insensitive substring that may match the
+            title, ``sub_agent_name`` or the ``title_search_label`` value, the
+            fields a display title falls back through, e.g. ``"deploy"``. A
+            superset: callers needing the exact fallback re-check the rows.
+        :param title_search_label: Label key whose value ``title_search`` also
+            matches, e.g. ``"omnigent.claude_native.description"``.
         :param has_label: When set, restrict to sessions carrying this label
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to.
@@ -4310,6 +4318,8 @@ class SqlAlchemyConversationStore(ConversationStore):
                         )
                     )
                 )
+            if title_search:
+                stmt = stmt.where(self._title_search_match(title_search, title_search_label))
             if has_label:
                 stmt = stmt.where(
                     SqlConversation.id.in_(
@@ -6003,6 +6013,43 @@ class SqlAlchemyConversationStore(ConversationStore):
             return True
 
         return run_write_transaction(self._session_immediate, "rollback_profiled_runner", write)
+
+    def _title_search_match(self, query: str, label_key: str | None) -> ColumnElement[bool]:
+        """
+        Match ``query`` against the title, ``sub_agent_name`` or one label's value.
+
+        :param query: The search string, e.g. ``"deploy"``.
+        :param label_key: Label whose value also counts, or ``None``.
+        :returns: A clause for ``list_conversations``; a superset of the display-title match.
+        """
+        pattern = _like_contains_pattern(query)
+        matches: list[ColumnElement[bool]] = [
+            SqlConversation.title.ilike(pattern, escape=_LIKE_ESCAPE)
+        ]
+        if label_key:
+            matches.append(
+                select(SqlConversationLabel.conversation_id)
+                .where(
+                    SqlConversationLabel.workspace_id == current_workspace_id(),
+                    SqlConversationLabel.conversation_id == SqlConversation.id,
+                    SqlConversationLabel.key == label_key,
+                    SqlConversationLabel.value.ilike(pattern, escape=_LIKE_ESCAPE),
+                )
+                .exists()
+            )
+        named = select(SqlConversationMetadata.id).where(
+            SqlConversationMetadata.workspace_id == current_workspace_id(),
+            SqlConversationMetadata.sub_agent_name.ilike(pattern, escape=_LIKE_ESCAPE),
+        )
+        if self._conv_engine is self._engine:
+            matches.append(SqlConversation.id.in_(named))
+        else:
+            # Split-DB: sub-agent names live with the metadata, so prefetch their ids.
+            with self._session("list_conversations") as meta_sess:
+                named_ids = list(meta_sess.execute(named).scalars())
+            if named_ids:
+                matches.append(SqlConversation.id.in_(named_ids))
+        return or_(*matches)
 
     def _role_handle_match(self, session: Session, search_query: str) -> ColumnElement[bool]:
         """

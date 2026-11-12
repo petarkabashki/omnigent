@@ -135,6 +135,35 @@ def test_session_filters_match_agentic_base(stores: SimpleNamespace) -> None:
     assert rows["done"]["hub_ref"]["id"] == closed
 
 
+def test_search_is_narrowed_by_the_hub_and_matches_the_display_title(
+    stores: SimpleNamespace,
+) -> None:
+    root = _session(stores, "")
+    stores.conversations.set_labels(root, {sources_module._DESCRIPTION_LABEL: "Fix deploy"})
+    # A sub-agent's display title is its name, so a matching title alone does not count.
+    _session(
+        stores, "deploy notes", kind="sub_agent", parent_conversation_id=root, sub_agent_name="ci"
+    )
+    for index in range(30):
+        _session(stores, f"other {index}")
+
+    sources = _sources(stores)
+    spec = SPEC_ADAPTER.validate_python(
+        {
+            "spec": 1,
+            "view": {
+                "type": "List",
+                "source": {"name": "sessions", "params": {"search": "DEPLOY"}},
+                "item": {"title": "$.title"},
+            },
+        }
+    )
+    rows = sources.resolve(spec.view.source).rows
+    assert [row["title"] for row in rows] == ["Fix deploy"]
+    # Only the two candidates are read, not the 30 others.
+    assert sources.scanned == 2
+
+
 def test_subagents_walk_the_tree_to_the_requested_depth(stores: SimpleNamespace) -> None:
     root = _session(stores, "root")
     child = _session(
