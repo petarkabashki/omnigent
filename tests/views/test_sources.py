@@ -164,6 +164,15 @@ def test_search_is_narrowed_by_the_hub_and_matches_the_display_title(
     assert sources.scanned == 2
 
 
+def test_non_ascii_search_folds_case_like_python(stores: SimpleNamespace) -> None:
+    _session(stores, "ÉTÉ plans")
+    _session(stores, "winter")
+
+    rows = _resolve(stores, {"name": "sessions", "params": {"search": "été"}})
+
+    assert [row["title"] for row in rows] == ["ÉTÉ plans"]
+
+
 def test_subagents_walk_the_tree_to_the_requested_depth(stores: SimpleNamespace) -> None:
     root = _session(stores, "root")
     child = _session(

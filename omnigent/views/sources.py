@@ -257,8 +257,9 @@ class HubSources:
             kind=hub_kind,
             has_agent_id=True,
             # The hub narrows to rows whose title fields match; ``keep`` checks the exact fallback.
-            title_search=search or None,
-            title_search_label=_DESCRIPTION_LABEL if search else None,
+            # SQLite's lower() folds only ASCII, so non-ASCII searches stay in Python.
+            title_search=search if search and search.isascii() else None,
+            title_search_label=_DESCRIPTION_LABEL if search and search.isascii() else None,
             include_archived=archived is not False,
             keep=keep,
             enough=None if row_filtered else enough,
