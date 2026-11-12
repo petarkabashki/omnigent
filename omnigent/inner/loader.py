@@ -973,9 +973,10 @@ def load_agent_def_from_path(path_str: str) -> AgentDef:
         resolved_dir = path
         cleanup: tempfile.TemporaryDirectory[str] | None = None
     else:
+        from omnigent.runtime.harnesses.paths import ensure_runtime_parent
         from omnigent.spec.tar_utils import extract_safe
 
-        cleanup = tempfile.TemporaryDirectory(prefix="omnigent-bundle-")
+        cleanup = tempfile.TemporaryDirectory(prefix="bundle-", dir=ensure_runtime_parent())
         resolved_dir = Path(cleanup.name)
         extract_safe(path.read_bytes(), resolved_dir)
 

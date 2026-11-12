@@ -9087,7 +9087,7 @@ def _write_bang_overflow(cmd: str, stdout: str, stderr: str) -> str | None:
     The overflow is measured on the ANSI-stripped text — the same form the
     context builder caps — so heavily-styled output doesn't trip the spill when
     the text the model sees would fit. The file is intentionally left in place
-    for the agent to read on a later turn; the OS temp dir reclaims it.
+    for the agent to read on a later turn; the per-user runtime dir holds it.
     """
     from rich.text import Text as _RText
 
@@ -9095,7 +9095,9 @@ def _write_bang_overflow(cmd: str, stdout: str, stderr: str) -> str | None:
     plain_err = _RText.from_ansi(stderr).plain if stderr else ""
     if len(plain_out) + len(plain_err) <= _BANG_CONTEXT_MAX:
         return None
-    fd, path = tempfile.mkstemp(prefix="omnigent-bang-", suffix=".log")
+    from omnigent.runtime.harnesses.paths import ensure_runtime_parent
+
+    fd, path = tempfile.mkstemp(prefix="bang-", suffix=".log", dir=ensure_runtime_parent())
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(f"$ {cmd}\n\n")
         if plain_out:

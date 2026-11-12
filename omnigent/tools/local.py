@@ -516,7 +516,7 @@ def _write_srt_settings_file(state_root: str) -> str:
 
     Temp files are intentionally not cleaned up: the payload is
     trivial (~100 bytes), each invocation writes a fresh one, and
-    the OS tmpwatch handles eventual garbage collection. Cleaning
+    the per-user runtime dir bounds eventual garbage collection. Cleaning
     up per-invocation would require another try/finally around
     the subprocess call, which isn't worth it.
 
@@ -535,7 +535,9 @@ def _write_srt_settings_file(state_root: str) -> str:
             "denyWrite": [],
         },
     }
-    fd, path = _tempfile.mkstemp(suffix=".srt.json")
+    from omnigent.runtime.harnesses.paths import ensure_runtime_parent
+
+    fd, path = _tempfile.mkstemp(suffix=".srt.json", dir=ensure_runtime_parent())
     with os.fdopen(fd, "w") as f:
         json.dump(settings, f)
     return path
