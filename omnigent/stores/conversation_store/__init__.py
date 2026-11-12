@@ -1131,6 +1131,7 @@ class ConversationStore(ABC):
         search_query: str | None = None,
         search_scope: str = "all",
         accessible_by: str | None = None,
+        access_via_root: bool = False,
         owned_by: str | None = None,
         shared_only: bool = False,
         include_archived: bool = False,
@@ -1229,6 +1230,10 @@ class ConversationStore(ABC):
             included — a public-only session does not appear in the
             user's own list. ``None`` disables the filter (returns
             all sessions).
+        :param access_via_root: When ``True``, ``accessible_by`` matches a
+            grant on each session's root, the way session access is checked,
+            so ungranted sub-agents of a readable root are listed. Only
+            with ``accessible_by`` alone.
         :param owned_by: When set, filter to sessions the user
             *owns* (an ``owner``-level grant), a stricter form of
             ``accessible_by`` that excludes sessions merely shared

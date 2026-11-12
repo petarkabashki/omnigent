@@ -180,6 +180,25 @@ def test_subagents_of_another_users_session_is_not_found(stores: SimpleNamespace
         _sources(stores).subagents(of=theirs)
 
 
+def test_scan_cap_spends_only_on_readable_rows_newest_first(
+    stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    older = [_session(stores, f"older-{index}") for index in range(4)]
+    mine = _session(stores, "mine", owner=None, kind="sub_agent", parent_conversation_id=older[0])
+    theirs = _session(stores, "theirs", owner=STRANGER)
+    for index in range(6):
+        _session(stores, f"t{index}", owner=None, kind="sub_agent", parent_conversation_id=theirs)
+    newest = _session(stores, "newest", owner=None, kind="sub_agent", parent_conversation_id=mine)
+    monkeypatch.setattr(sources_module, "MAX_SCANNED", 4)
+    monkeypatch.setattr(sources_module, "_PAGE_SIZE", 2)
+
+    listed = _sources(stores).sessions(kind="subagent")
+    every = _sources(stores).sessions()
+
+    assert [row["id"] for row in listed] == [newest, mine]
+    assert [row["title"] for row in every] == ["newest", "mine", "older-3", "older-2"]
+
+
 def test_scan_cap_bounds_the_whole_resolve(
     stores: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

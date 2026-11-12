@@ -41,6 +41,10 @@ _DESCRIPTION_LABEL = "omnigent.claude_native.description"
 _HUB_KIND = {"default": "session", "sub_agent": "subagent"}
 
 
+def _title(conv: Conversation) -> str | None:
+    return conv.sub_agent_name or conv.title or (conv.labels or {}).get(_DESCRIPTION_LABEL)
+
+
 class SourceError(ValueError):
     """A source request the hub cannot answer, e.g. an unknown session for ``subagents``."""
 
@@ -81,7 +85,6 @@ class HubSources:
     deadline: float = field(default_factory=lambda: time.monotonic() + DEFAULT_DEADLINE_SECONDS)
     _project_paths: dict[str, str | None] = field(default_factory=dict)
     _hosts: dict[str, str | None] = field(default_factory=dict)
-    _readable_roots: dict[str, bool] = field(default_factory=dict)
     scanned_all: bool = True
     # Rows read across every scan of one resolve; MAX_SCANNED bounds the total.
     scanned: int = 0
@@ -145,7 +148,7 @@ class HubSources:
         return {session_id: sorted(handles) for session_id, handles in held.items()}
 
     def _scan(self, *, scoped: bool = True, **filters: Any) -> list[Conversation]:
-        """Newest first; ``scoped`` needs the caller's grant on each row, which sub-agents lack."""
+        """Newest first; ``scoped`` keeps rows whose root the caller has a grant on."""
         found: list[Conversation] = []
         after: str | None = None
         while True:
@@ -157,6 +160,8 @@ class HubSources:
                 limit=min(_PAGE_SIZE, budget),
                 after=after,
                 accessible_by=self.user_id if scoped else None,
+                # Sub-agents carry no grant of their own; the hub authorizes them by their root.
+                access_via_root=scoped and self.user_id is not None,
                 order="desc",
                 sort_by="updated_at",
                 **filters,
@@ -188,7 +193,7 @@ class HubSources:
         return {
             "id": conv.id,
             "hub_ref": self._hub_ref("session", conv.id),
-            "title": conv.sub_agent_name or conv.title or labels.get(_DESCRIPTION_LABEL),
+            "title": _title(conv),
             "kind": _HUB_KIND.get(conv.kind, conv.kind),
             "harness": labels.get(WRAPPER_LABEL_KEY) or None,
             "spawn_kind": spawn_kind if parent else None,
@@ -213,26 +218,20 @@ class HubSources:
         host: str | None = None,
         role: str | None = None,
     ) -> list[dict[str, Any]]:
-        # No hub-side title search: the row title falls back to the sub-agent name and
-        # description label, which only the filter below sees; truncated covers the cap.
-        common = {"has_agent_id": True, "include_archived": archived is not False}
-        scanned: list[Conversation] = []
-        if kind != "subagent":
-            scanned += self._scan(kind="default", **common)
-        if kind != "session":
-            # Sub-agents carry no grant of their own; the hub authorizes them by their root.
-            scanned += [
-                conv
-                for conv in self._scan(kind="sub_agent", scoped=False, **common)
-                if self._root_readable(conv)
-            ]
+        hub_kind = {"session": "default", "subagent": "sub_agent"}.get(kind or "")
+        scanned = self._scan(
+            kind=hub_kind,
+            has_agent_id=True,
+            # No hub-side title search: the row title falls back to the sub-agent name and
+            # description label, which only the filter below sees; truncated covers the cap.
+            include_archived=archived is not False,
+        )
+        if search is not None:
+            needle = search.lower()
+            scanned = [conv for conv in scanned if needle in (_title(conv) or "").lower()]
         rows = []
         for row in self.session_rows(scanned):
             if project is not None and project not in (row["project"], row["project_id"]):
-                continue
-            if kind is not None and row["kind"] != kind:
-                continue
-            if search is not None and search.lower() not in (row["title"] or "").lower():
                 continue
             if archived is not None and row["stopped"] != archived:
                 continue
@@ -262,13 +261,6 @@ class HubSources:
             rows.extend({**row, "depth": level} for row in self.session_rows(children))
             frontier = [child.id for child in children]
         return rows
-
-    def _root_readable(self, conv: Conversation) -> bool:
-        root_id = conv.root_conversation_id or conv.id
-        if root_id not in self._readable_roots:
-            root = conv if root_id == conv.id else self.conversations.get_conversation(root_id)
-            self._readable_roots[root_id] = root is not None and self.can_read(root)
-        return self._readable_roots[root_id]
 
     def roles(self, handle: str | None = None, held: bool | None = None) -> list[dict[str, Any]]:
         rows = []
