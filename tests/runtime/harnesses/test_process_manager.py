@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import stat
 import sys
 import tempfile
@@ -43,6 +44,7 @@ import pytest
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.paths import (
+    RUNTIME_PARENT_MAX,
     UNIX_SOCKET_PATH_MAX,
     ensure_runtime_parent,
     resolve_harness_tmp_parent,
@@ -329,7 +331,11 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
 @pytest.fixture
 def short_tmp() -> Iterator[Path]:
     # pytest's tmp_path can exceed the runtime parent's socket length budget.
-    path = Path(tempfile.mkdtemp(prefix="rp-", dir="/tmp"))
+    try:
+        path = Path(tempfile.mkdtemp(prefix="rp-", dir="/tmp"))
+    except OSError:
+        # Sandboxes where the host's /tmp is not writable.
+        path = Path(tempfile.mkdtemp(prefix="rp-"))
     yield path
     shutil.rmtree(path, ignore_errors=True)
 
@@ -380,9 +386,33 @@ def test_ensure_runtime_parent_refuses_a_parent_too_long_for_sockets(
     parent = short_tmp / ("x" * UNIX_SOCKET_PATH_MAX)
     monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
 
-    with pytest.raises(RuntimeError, match=_TMP_PARENT_ENV_VAR):
+    with pytest.raises(RuntimeError, match=f"limit is {RUNTIME_PARENT_MAX} bytes"):
         ensure_runtime_parent()
     assert not parent.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX path limits are POSIX.")
+def test_a_parent_at_the_limit_binds_the_longest_runtime_sockets(
+    monkeypatch: pytest.MonkeyPatch, short_tmp: Path
+) -> None:
+    padding = RUNTIME_PARENT_MAX - len(os.fsencode(short_tmp)) - 1
+    if padding < 1:
+        pytest.skip(f"temp root {short_tmp} leaves no room to build a parent at the limit")
+    parent = short_tmp / ("p" * padding)
+    assert len(os.fsencode(parent)) == RUNTIME_PARENT_MAX
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
+    ensure_runtime_parent()
+
+    manager = HarnessProcessManager(tmp_parent=parent)
+    manager.instance_dir.mkdir(mode=0o700)
+    signer_dir = runtime_mkdtemp("model-signer-private-")
+    long_conversation_id = "conv_" + "f" * 64
+    for socket_path in (
+        manager.socket_path(long_conversation_id),
+        signer_dir / "relay.sock",
+    ):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(socket_path))
 
 
 async def test_shutdown_without_start_is_noop(
@@ -539,7 +569,7 @@ async def test_release_terminates_subprocess(
         # Capture the subprocess PID via the introspection endpoint;
         # if release worked, the PID won't be alive after.
         pid = (await client.get("/pid")).json()["pid"]
-        socket_path = manager.instance_dir / "conv-conv_a.sock"
+        socket_path = manager.socket_path("conv_a")
         assert socket_path.exists()
         await manager.release("conv_a")
         # Socket cleanup is part of release's contract — leaving
@@ -1161,7 +1191,7 @@ async def test_idle_reaper_releases_stale_entries(
         # No HTTP ping: with idle_timeout_s=0.0 the reaper can fire during an
         # inline HTTP call and yank the client mid-request. Socket-existence
         # loop below is the real "entry was reaped" assertion.
-        socket_path = fast.instance_dir / "conv-conv_a.sock"
+        socket_path = fast.socket_path("conv_a")
         assert socket_path.exists()
         # Wait long enough for the 2s idle window plus multiple
         # reaper passes. A 0s timeout races with subprocess startup
@@ -1208,7 +1238,7 @@ async def test_idle_reaper_survives_release_error(
     await fast.start()
     try:
         await fast.get_client("conv_a", _TEST_HARNESS_NAME)
-        socket_path = fast.instance_dir / "conv-conv_a.sock"
+        socket_path = fast.socket_path("conv_a")
         assert socket_path.exists()
 
         # Make the first reaper-triggered release raise, then defer to the
@@ -1266,7 +1296,7 @@ async def test_idle_reaper_skips_in_flight_turn(
     await fast.start()
     try:
         await fast.get_client("conv_a", _TEST_HARNESS_NAME)
-        socket_path = fast.instance_dir / "conv-conv_a.sock"
+        socket_path = fast.socket_path("conv_a")
         assert socket_path.exists()
         # Mark the turn live, as the runner does on ``response.created``.
         fast.mark_in_flight("conv_a", "resp_x")
@@ -1446,7 +1476,7 @@ async def test_idle_reaper_disabled_when_timeout_zero(
     await fast.start()
     try:
         await fast.get_client("conv_a", _TEST_HARNESS_NAME)
-        socket_path = fast.instance_dir / "conv-conv_a.sock"
+        socket_path = fast.socket_path("conv_a")
         assert socket_path.exists()
         # ~20 reaper passes at 0.05 s. With the bug the socket is gone almost
         # immediately; with the guard it survives because reaping is disabled.

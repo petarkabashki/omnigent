@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
@@ -111,6 +112,13 @@ _HARNESS_AUTH_TOKEN_ENV = "OMNIGENT_HARNESS_AUTH_TOKEN"
 # to tell a still-running sibling from a crashed one (kill children, remove dir).
 # Holds an owner claim; older builds wrote a bare PID.
 _AP_PID_FILE = "AP_PID"
+# Conversation sockets are ``c-<16 hex>.sock``; builds before this used
+# ``conv-<id>.sock``, which the orphan sweep still matches.
+_SOCKET_PREFIX = "c-"
+_SOCKET_DIGEST_LEN = 16
+_LEGACY_SOCKET_GLOB = "conv-*.sock"
+# Hex digits of the per-instance dir name, ``ap-<12 hex>``.
+_INSTANCE_ID_LEN = 12
 
 # Mode bits applied to the per-AP subdir and the per-conversation
 # socket. Filesystem permissions + the per-AP-uuid scope are the v1
@@ -242,12 +250,16 @@ def _socket_path(instance_dir: Path, conversation_id: str) -> Path:
 
     :param instance_dir: This Omnigent instance's directory, e.g.
         ``/tmp/omnigent/ap-abc123``.
+    The name is a digest of the id so the path length does not depend on it:
+    Unix sockets must fit in ~104 bytes even under a long runtime parent.
+
     :param conversation_id: AP-allocated conversation id, e.g.
         ``"conv_xyz789"``.
     :returns: Absolute Unix socket path the runner binds and AP's
-        httpx client connects to.
+        httpx client connects to, e.g. ``<instance_dir>/c-0123456789abcdef.sock``.
     """
-    return instance_dir / f"conv-{conversation_id}.sock"
+    digest = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:_SOCKET_DIGEST_LEN]
+    return instance_dir / f"{_SOCKET_PREFIX}{digest}.sock"
 
 
 def _resolve_module_path(harness: str) -> str:
@@ -471,7 +483,7 @@ class _SubprocessEntry:
         to this subprocess over its Unix socket.
     :param socket_path: Absolute Unix socket path the runner
         bound, e.g.
-        ``Path("/tmp/omnigent/ap-abc/conv-xyz.sock")``.
+        ``Path("/tmp/omnigent/ap-0123456789ab/c-0123456789abcdef.sock")``.
     :param harness: The harness name this subprocess serves
         (e.g. ``"claude-sdk"``). Recorded so the reaper can
         include it in log lines.
@@ -601,7 +613,7 @@ class HarnessProcessManager:
         self._tmp_parent = tmp_parent if tmp_parent is not None else _default_tmp_parent()
         # Pre-allocate the instance dir path so it stays stable
         # across re-entrant ``start()`` calls (idempotent boot).
-        self._instance_dir = self._tmp_parent / f"ap-{uuid.uuid4().hex}"
+        self._instance_dir = self._tmp_parent / f"ap-{uuid.uuid4().hex[:_INSTANCE_ID_LEN]}"
         # Monotonic clock at ``start()``; the harness_started event reports each
         # spawn's readiness latency relative to it (harness boot vs manager boot).
         self._started_at: float | None = None
@@ -670,7 +682,7 @@ class HarnessProcessManager:
         """
         This Omnigent instance's per-instance directory.
 
-        :returns: Path like ``/tmp/omnigent/ap-<uuid>``.
+        :returns: Path like ``/tmp/omnigent/ap-<12 hex>``.
         """
         return self._instance_dir
 
@@ -1705,7 +1717,11 @@ async def sweep_orphaned_harness_processes(*, tmp_parent: Path | None = None) ->
 async def _kill_orphan_runners(instance_dir: Path) -> None:
     """Terminate runner processes whose sockets live under *instance_dir*."""
     all_pids: set[int] = set()
-    for socket_file in instance_dir.glob("conv-*.sock"):
+    socket_files = [
+        *instance_dir.glob(f"{_SOCKET_PREFIX}*.sock"),
+        *instance_dir.glob(_LEGACY_SOCKET_GLOB),
+    ]
+    for socket_file in socket_files:
         for pid in await _pids_holding_socket(socket_file):
             try:
                 os.kill(pid, signal.SIGTERM)

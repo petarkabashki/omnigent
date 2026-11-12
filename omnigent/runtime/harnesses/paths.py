@@ -38,8 +38,11 @@ def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
 
 # AF_UNIX ``sun_path`` holds 108 bytes on Linux and 104 on macOS, NUL included.
 UNIX_SOCKET_PATH_MAX = 103
-# Room for the deepest socket under the parent, e.g. "/model-signer-private-xxxxxxxx/relay.sock".
+# Room for the deepest sockets under the parent: "/model-signer-private-xxxxxxxx/relay.sock"
+# (41 bytes) and the harness "/ap-<12 hex>/c-<16 hex>.sock" (40 bytes).
 RUNTIME_SOCKET_HEADROOM = 48
+# Longest runtime parent, in bytes, that still fits every socket under it.
+RUNTIME_PARENT_MAX = UNIX_SOCKET_PATH_MAX - RUNTIME_SOCKET_HEADROOM
 
 
 def ensure_private_dir(path: Path, my_uid: int | None) -> None:
@@ -81,11 +84,11 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
         is a symlink, a non-directory, or owned by another uid.
     """
     parent = resolve_harness_tmp_parent(env)
-    limit = UNIX_SOCKET_PATH_MAX - RUNTIME_SOCKET_HEADROOM
-    if not IS_WINDOWS and len(os.fsencode(parent)) > limit:
+    length = len(os.fsencode(parent))
+    if not IS_WINDOWS and length > RUNTIME_PARENT_MAX:
         raise RuntimeError(
-            f"runtime parent {parent} is longer than {limit} bytes, leaving no room "
-            f"for Unix sockets under it; shorten {HARNESS_TMP_PARENT_ENV_VAR}"
+            f"runtime parent {parent} is {length} bytes; the limit is {RUNTIME_PARENT_MAX} "
+            f"bytes, so Unix sockets under it fit. Shorten {HARNESS_TMP_PARENT_ENV_VAR}"
         )
     parent.parent.mkdir(parents=True, exist_ok=True)
     getuid = getattr(os, "getuid", None)
