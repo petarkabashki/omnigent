@@ -74,6 +74,13 @@ def holds_role(session: Conversation) -> bool:
     return bool(session.labels.get(ALIAS_LABEL_KEY))
 
 
+def is_thread_session(labels: Mapping[str, str]) -> bool:
+    """A session working a role thread without holding a role: a side chat or former holder."""
+    if labels.get(ALIAS_LABEL_KEY):
+        return False
+    return bool(labels.get(THREAD_OF_LABEL) or labels.get(THREAD_ROLE_LABEL))
+
+
 def inbound_thread_key(source: Conversation, sender_handle: str | None) -> str:
     """The sender's handle, or the owner-thread it speaks for, else ``session:<id>``."""
     return source.labels.get(THREAD_OF_LABEL) or sender_handle or f"session:{source.id}"

@@ -85,6 +85,9 @@ NATIVE_PANE_TERMINAL_NAMES: frozenset[str] = frozenset(
 _DEFAULT_IDLE_TIMEOUT_S = 60 * 60
 _DEFAULT_REAPER_INTERVAL_S = 60.0
 _IDLE_TIMEOUT_ENV = "OMNIGENT_NATIVE_PANE_IDLE_TIMEOUT_S"
+# Thread sessions (side chats and former role holders) release their pane sooner.
+_DEFAULT_THREAD_IDLE_TIMEOUT_S = 30 * 60
+_THREAD_IDLE_TIMEOUT_ENV = "OMNIGENT_THREAD_PANE_IDLE_TIMEOUT_S"
 
 
 class PaneRef(NamedTuple):
@@ -99,6 +102,8 @@ class PaneRef(NamedTuple):
         replaced it in the meantime alone. ``None`` when the caller has none.
     :param sub_agent: ``True`` when another session spawned this one, e.g. an
         orchestrator's child. Its idle window is capped at the native default.
+    :param thread_session: ``True`` for a top-level session working a role thread
+        without holding a role. Its idle window is capped at the thread default.
     """
 
     conversation_id: str
@@ -107,6 +112,7 @@ class PaneRef(NamedTuple):
     socket_path: Path
     instance: TerminalInstance | None = None
     sub_agent: bool = False
+    thread_session: bool = False
 
 
 def resolve_native_pane_idle_timeout_s(
@@ -119,27 +125,22 @@ def resolve_native_pane_idle_timeout_s(
     idle timeout. An unparseable or negative value logs a warning and falls
     back to that default rather than failing the runner at boot.
     """
-    raw = os.environ.get(_IDLE_TIMEOUT_ENV)
+    return _env_seconds(_IDLE_TIMEOUT_ENV, default_timeout_s)
+
+
+def _env_seconds(env_name: str, default_s: float) -> float:
+    """Seconds from *env_name*; unset, unparseable or negative falls back to *default_s*."""
+    raw = os.environ.get(env_name)
     if not raw:
-        return float(default_timeout_s)
+        return float(default_s)
     try:
         value = float(raw)
     except ValueError:
-        _logger.warning(
-            "%s=%r is not a number; using default %ss",
-            _IDLE_TIMEOUT_ENV,
-            raw,
-            default_timeout_s,
-        )
-        return float(default_timeout_s)
+        _logger.warning("%s=%r is not a number; using default %ss", env_name, raw, default_s)
+        return float(default_s)
     if value < 0:
-        _logger.warning(
-            "%s=%r is negative; using default %ss",
-            _IDLE_TIMEOUT_ENV,
-            raw,
-            default_timeout_s,
-        )
-        return float(default_timeout_s)
+        _logger.warning("%s=%r is negative; using default %ss", env_name, raw, default_s)
+        return float(default_s)
     return value
 
 
@@ -157,6 +158,21 @@ def resolve_sub_agent_pane_idle_timeout_s(session_timeout_s: float) -> float:
     return min(session_timeout_s, native_default_s)
 
 
+def resolve_thread_pane_idle_timeout_s(session_timeout_s: float) -> float:
+    """Resolve a thread session's native-pane idle window in seconds.
+
+    :envvar:`OMNIGENT_THREAD_PANE_IDLE_TIMEOUT_S` (default 30 min) caps a positive
+    ``session_timeout_s``; ``0`` there leaves thread panes on the session window,
+    and ``session_timeout_s <= 0`` still disables reaping.
+    """
+    if session_timeout_s <= 0:
+        return 0.0
+    thread_s = _env_seconds(_THREAD_IDLE_TIMEOUT_ENV, _DEFAULT_THREAD_IDLE_TIMEOUT_S)
+    if thread_s <= 0:
+        return session_timeout_s
+    return min(session_timeout_s, thread_s)
+
+
 class NativePaneReaper:
     """Background task that reaps idle, unattended native terminal panes.
 
@@ -169,8 +185,12 @@ class NativePaneReaper:
         terminal, leaving the session resumable.
     :param idle_timeout_s: Idle window before reaping. ``None`` resolves the env
         knob; ``<= 0`` disables reaping. Sub-agent panes use
-        :func:`resolve_sub_agent_pane_idle_timeout_s` of this value.
+        :func:`resolve_sub_agent_pane_idle_timeout_s` of this value, and thread
+        sessions :func:`resolve_thread_pane_idle_timeout_s`.
     :param reaper_interval_s: Seconds between scans.
+    :param still_thread_session: Re-reads a thread pane's session just before an
+        early reap, so a session that took a role since the scan keeps the session
+        window. ``None`` trusts the scan.
     """
 
     def __init__(
@@ -181,6 +201,7 @@ class NativePaneReaper:
         reap: Callable[[PaneRef], Awaitable[None]],
         idle_timeout_s: float | None = None,
         reaper_interval_s: float = _DEFAULT_REAPER_INTERVAL_S,
+        still_thread_session: Callable[[PaneRef], Awaitable[bool]] | None = None,
     ) -> None:
         self._list_native_panes = list_native_panes
         self._is_busy = is_busy
@@ -191,6 +212,8 @@ class NativePaneReaper:
         self._sub_agent_idle_timeout_s = resolve_sub_agent_pane_idle_timeout_s(
             self._idle_timeout_s
         )
+        self._thread_idle_timeout_s = resolve_thread_pane_idle_timeout_s(self._idle_timeout_s)
+        self._still_thread_session = still_thread_session
         self._reaper_interval_s = reaper_interval_s
         # conversation_id -> monotonic time it was last observed busy.
         self._last_busy_at: dict[str, float] = {}
@@ -205,15 +228,20 @@ class NativePaneReaper:
         self._task = asyncio.create_task(self._reap_loop(), name="native-pane-idle-reaper")
         _logger.info(
             "native pane reaper started (idle_timeout=%ss, sub_agent_idle_timeout=%ss, "
-            "interval=%ss%s)",
+            "thread_idle_timeout=%ss, interval=%ss%s)",
             self._idle_timeout_s,
             self._sub_agent_idle_timeout_s,
+            self._thread_idle_timeout_s,
             self._reaper_interval_s,
             "; DISABLED" if self._idle_timeout_s <= 0 else "",
         )
 
     def _pane_idle_timeout_s(self, pane: PaneRef) -> float:
-        return self._sub_agent_idle_timeout_s if pane.sub_agent else self._idle_timeout_s
+        if pane.sub_agent:
+            return self._sub_agent_idle_timeout_s
+        if pane.thread_session:
+            return self._thread_idle_timeout_s
+        return self._idle_timeout_s
 
     async def shutdown(self) -> None:
         """Cancel the reaper loop."""
@@ -276,6 +304,15 @@ class NativePaneReaper:
             # have started since (the select→reap race). Re-arm and skip if so.
             if await self._is_busy(pane):
                 self._last_busy_at[pane.conversation_id] = time.monotonic()
+                continue
+            # The clock keeps running; the next scan lists the pane on the session window.
+            if (
+                pane.thread_session
+                and not pane.sub_agent
+                and self._still_thread_session is not None
+                and self._thread_idle_timeout_s < self._idle_timeout_s
+                and not await self._still_thread_session(pane)
+            ):
                 continue
             _logger.info(
                 "reaping idle native pane for conversation %s (%s; idle > %.0fs)",

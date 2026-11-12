@@ -2349,14 +2349,15 @@ def create_runner_app(
         _search_fs_registries.move_to_end(key)
         return registry
 
-    async def _session_snapshot(session_id: str) -> _SessionSnapshot:
-        cached = _session_snapshot_cache.get(session_id)
+    async def _session_snapshot(session_id: str, *, fresh: bool = False) -> _SessionSnapshot:
+        """``fresh`` reads the server and leaves the cache untouched."""
+        cached = None if fresh else _session_snapshot_cache.get(session_id)
         if cached is not None:
             return cached
         lock = _session_snapshot_locks.setdefault(session_id, asyncio.Lock())
         generation = _session_cache_generation(session_id)
         async with lock:
-            cached = _session_snapshot_cache.get(session_id)
+            cached = None if fresh else _session_snapshot_cache.get(session_id)
             if cached is not None:
                 return cached
             status_code: int | None = None
@@ -2409,7 +2410,7 @@ def create_runner_app(
                 wrapper_label=wrapper_label,
                 labels=labels,
             )
-            if snapshot.ok and snapshot.agent_id is not None:
+            if snapshot.ok and snapshot.agent_id is not None and not fresh:
                 if _session_cache_generation_is_current(session_id, generation):
                     _session_snapshot_cache[session_id] = snapshot
             return snapshot
@@ -8961,6 +8962,7 @@ def create_runner_app(
             _tmux_window_activity_at,
         )
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
+        from omnigent.server.role_threads import is_thread_session
         from omnigent.terminals.pane_reaper import (
             PANE_OUTPUT_BUSY_WINDOW_S,
             NativePaneReaper,
@@ -8983,9 +8985,32 @@ def create_runner_app(
                             socket_path,
                             instance,
                             sub_agent=_is_sub_agent_session(conv_id),
+                            thread_session=_is_thread_session(
+                                _session_snapshot_cache.get(conv_id)
+                            ),
                         )
                     )
             return panes
+
+        def _is_thread_session(snapshot: _SessionSnapshot | None) -> bool:
+            # Labels cached before a role release still show the alias: the safe, longer window.
+            return (
+                snapshot is not None
+                and snapshot.parent_session_id is None
+                and is_thread_session(snapshot.labels or {})
+            )
+
+        async def _still_thread_session(pane: PaneRef) -> bool:
+            """Re-read the session's labels: a role taken since the pane started counts."""
+            snapshot = await _session_snapshot(pane.conversation_id, fresh=True)
+            if not snapshot.ok:
+                return False
+            cached = _session_snapshot_cache.get(pane.conversation_id)
+            if cached is not None:
+                _session_snapshot_cache[pane.conversation_id] = dataclasses.replace(
+                    cached, labels=snapshot.labels
+                )
+            return _is_thread_session(snapshot)
 
         async def _server_confirms_turn_in_flight(conv_id: str) -> bool:
             """Whether the server still records the session's turn as in flight.
@@ -9127,6 +9152,7 @@ def create_runner_app(
             is_busy=_native_pane_is_busy,
             reap=_reap_native_pane,
             idle_timeout_s=native_pane_idle_timeout_s,
+            still_thread_session=_still_thread_session,
         )
     else:
         app.state.native_pane_reaper = None
