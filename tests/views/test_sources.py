@@ -287,6 +287,20 @@ def test_resolve_route_returns_rows_and_refuses_a_bad_source(
     assert "sql" in bad.json()["error"]
 
 
+def test_resolve_route_reads_sub_agents_with_auth_off(
+    stores: SimpleNamespace, client: TestClient
+) -> None:
+    root = _session(stores, "root")
+    _session(stores, "child", owner=None, kind="sub_agent", parent_conversation_id=root)
+    tree = client.post(
+        "/v1/views/resolve", json={"source": {"name": "subagents", "params": {"of": root}}}
+    )
+    listed = client.post("/v1/views/resolve", json={"source": {"name": "sessions"}})
+
+    assert [row["title"] for row in tree.json()["rows"]] == ["child"]
+    assert sorted(row["title"] for row in listed.json()["rows"]) == ["child", "root"]
+
+
 def test_validate_route_normalizes_a_string_spec_and_explains_a_bad_one(
     client: TestClient,
 ) -> None:

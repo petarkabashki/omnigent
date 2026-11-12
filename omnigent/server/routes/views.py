@@ -98,8 +98,9 @@ def create_views_router(
             return host.name
 
         def _can_read(conversation: Conversation) -> bool:
-            if permission_store is None:
-                return False
+            # With auth or permissions off, every caller owns every session.
+            if auth_provider is None or permission_store is None:
+                return True
             return check_session_access(
                 user_id,
                 conversation.id,
