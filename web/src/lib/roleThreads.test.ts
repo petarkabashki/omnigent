@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as identity from "@/lib/identity";
 import {
+  fetchRoleThreadMessages,
   roleHandlePath,
   roleThreadIsUrgent,
   roleThreadNudgeText,
@@ -100,6 +101,35 @@ describe("held thread message", () => {
     expect(row.held).toEqual({ text: "Please reply", to: "sess_x", at: 123 });
     const [plain] = roleThreadsFromLabels({ ...ALIAS, "thread.aaaaaaaaaaaa.cp": "/Architect" });
     expect(plain.held).toBeUndefined();
+  });
+
+  it("reads a waiting-for-holder message and a dropped count", async () => {
+    vi.spyOn(identity, "authenticatedFetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          messages: [
+            { direction: "out", session_id: "s", item_id: "i", created_at: 1, text: "x" },
+            {
+              direction: "out",
+              session_id: "s",
+              item_id: "j",
+              created_at: 2,
+              text: "y",
+              waiting_holder: true,
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const messages = await fetchRoleThreadMessages("s", "/Architect");
+    expect(messages.map((m) => m.waitingHolder)).toEqual([undefined, true]);
+    const [row] = roleThreadsFromLabels({
+      ...ALIAS,
+      "thread.aaaaaaaaaaaa.cp": "/Architect",
+      "thread.aaaaaaaaaaaa.dropped": "3",
+    });
+    expect(row.dropped).toBe(3);
   });
 
   it("posts the action for the counterpart", async () => {

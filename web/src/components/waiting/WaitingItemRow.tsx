@@ -8,6 +8,7 @@ import {
   ShieldQuestionIcon,
   SquareIcon,
   TerminalIcon,
+  UserXIcon,
   WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -25,6 +26,7 @@ const KIND_ICON: Record<WaitingKind, LucideIcon> = {
   queued_message: MessageSquareIcon,
   thread: BellRingIcon,
   runner_offline: ServerOffIcon,
+  waiting_holder: UserXIcon,
 };
 
 /** The thread a thread item stands for, enough for the nudge text. */

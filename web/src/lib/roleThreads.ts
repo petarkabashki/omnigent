@@ -13,6 +13,8 @@ export interface RoleThread {
   messages: number;
   summary: string;
   updatedAt: number;
+  /** Messages dropped because the role had no holder when their session was deleted. */
+  dropped?: number;
   /** A message the loop guard is holding back from delivery, if any. */
   held?: HeldThreadMessage;
 }
@@ -75,6 +77,7 @@ export function roleThreadsFromLabels(
       messages: toInt(fields.n),
       summary: fields.sum ?? "",
       updatedAt: toInt(fields.at),
+      dropped: toInt(fields.dropped),
       ...(held ? { held } : {}),
     });
   }
@@ -160,6 +163,8 @@ export interface RoleThreadMessage {
   text: string;
   /** Whom an owner post reached; absent on other messages. */
   to?: RoleThreadPostTarget;
+  /** Sent to a role nobody holds; delivered when someone takes the role. */
+  waitingHolder?: boolean;
 }
 
 interface WireThreadMessage {
@@ -169,6 +174,7 @@ interface WireThreadMessage {
   created_at: number;
   text: string;
   to?: RoleThreadPostTarget;
+  waiting_holder?: boolean;
 }
 
 /** `GET /v1/sessions/{id}/threads/messages`: both sides of one thread, oldest first. */
@@ -189,6 +195,7 @@ export async function fetchRoleThreadMessages(
     createdAt: m.created_at,
     text: m.text,
     ...(m.to ? { to: m.to } : {}),
+    ...(m.waiting_holder ? { waitingHolder: true } : {}),
   }));
 }
 

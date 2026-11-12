@@ -9,7 +9,8 @@ export type WaitingKind =
   | "approval"
   | "queued_message"
   | "thread"
-  | "runner_offline";
+  | "runner_offline"
+  | "waiting_holder";
 
 export type WaitingAction = "open" | "nudge" | "stop";
 
@@ -24,7 +25,7 @@ export interface WaitingItem {
   where?: string | null;
   ref?: string | null;
   stale: boolean;
-  /** Only owner waits (approvals, offline runners, owner/blocked threads) count toward the badge. */
+  /** Only owner waits (approvals, offline runners, role mail with no holder, owner/blocked threads) count toward the badge. */
   needs_owner?: boolean;
   actions: WaitingAction[];
 }

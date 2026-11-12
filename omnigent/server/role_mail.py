@@ -256,19 +256,30 @@ def rescue_role_mail(
     return woken
 
 
-def waiting_counts(
-    conversations: ConversationStore, projects: ProjectStore | None, sender_id: str
-) -> dict[str, int]:
-    """How many of ``sender_id``'s messages wait for a holder, per sender thread key.
+def waiting_by_sender(
+    conversations: ConversationStore, projects: ProjectStore | None
+) -> dict[str, dict[str, tuple[int, int]]]:
+    """Messages waiting for a holder, as sender id -> thread key -> (count, oldest send time).
 
     Scans every session with pending rows; fine while rows are capped, not for a hot path.
     """
-    counts: dict[str, int] = {}
-    for _, item in waiting_for_holder(conversations, projects, sender_id=sender_id):
+    found: dict[str, dict[str, tuple[int, int]]] = {}
+    for _, item in waiting_for_holder(conversations, projects):
         options = _options(item)
-        if options is not None and options.sender_thread:
-            counts[options.sender_thread] = counts.get(options.sender_thread, 0) + 1
-    return counts
+        if options is None or not options.sender_id or not options.sender_thread:
+            continue
+        threads = found.setdefault(options.sender_id, {})
+        count, oldest = threads.get(options.sender_thread, (0, item.created_at))
+        threads[options.sender_thread] = (count + 1, min(oldest, item.created_at))
+    return found
+
+
+def waiting_counts(
+    conversations: ConversationStore, projects: ProjectStore | None, sender_id: str
+) -> dict[str, int]:
+    """How many of ``sender_id``'s messages wait for a holder, per sender thread key."""
+    waiting = waiting_by_sender(conversations, projects).get(sender_id, {})
+    return {thread: count for thread, (count, _) in waiting.items()}
 
 
 def waiting_thread_rows(

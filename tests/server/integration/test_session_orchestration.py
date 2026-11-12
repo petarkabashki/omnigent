@@ -3329,6 +3329,21 @@ async def test_role_mail_without_a_holder_shows_as_waiting_until_one_takes_the_r
     snapshot = (await auth_client.get(f"/v1/sessions/{product['id']}")).json()
     assert snapshot["waiting_holder_inputs"] == 1
 
+    async def holder_waits():
+        listed = (await auth_client.get("/v1/sessions/waiting")).json()["sessions"]
+        one = (await auth_client.get(f"/v1/sessions/{architect['id']}/waiting")).json()
+        from_list = [
+            item
+            for session in listed
+            if session["session_id"] == architect["id"]
+            for item in session["items"]
+            if item["kind"] == "waiting_holder"
+        ]
+        assert from_list == [i for i in one["items"] if i["kind"] == "waiting_holder"]
+        return [(i["ref"], i["needs_owner"]) for i in from_list]
+
+    assert await holder_waits() == [(thread, True)]
+
     # A new holder clears it with no notice: the message moved and is queued normally.
     assert (
         await auth_client.put(f"/v1/sessions/{successor['id']}/alias", json={"alias": "Product"})
@@ -3339,6 +3354,7 @@ async def test_role_mail_without_a_holder_shows_as_waiting_until_one_takes_the_r
     assert (await auth_client.get(f"/v1/sessions/{product['id']}")).json()[
         "waiting_holder_inputs"
     ] == 0
+    assert await holder_waits() == []
 
 
 @pytest.mark.parametrize("case", ["vacant", "successor", "parent_deleted"])

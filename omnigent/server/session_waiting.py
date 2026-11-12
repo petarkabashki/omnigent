@@ -30,6 +30,7 @@ WaitingKind = Literal[
     "queued_message",
     "thread",
     "runner_offline",
+    "waiting_holder",
 ]
 _BUSY = ("running", "waiting")
 _TOOL_CALL_SCAN = 60
@@ -45,10 +46,11 @@ STALE_MINUTES: dict[str, int] = {
     "queued_message": 5,
     "thread": 20,
     "runner_offline": 0,
+    "waiting_holder": 10,
 }
 _THREAD_WAITING_STATES = ("waiting_on_us", "waiting_on_owner", "blocked")
 # Only these need the owner and count toward the Waiting badge.
-_OWNER_KINDS = ("approval", "runner_offline")
+_OWNER_KINDS = ("approval", "runner_offline", "waiting_holder")
 _OWNER_THREAD_STATES = ("waiting_on_owner", "blocked")
 
 
@@ -276,6 +278,24 @@ def thread_items(conv: Conversation, *, now: int) -> list[WaitingItem]:
     return items
 
 
+def holder_items(
+    conv: Conversation, waiting: Mapping[str, tuple[int, int]], *, now: int
+) -> list[WaitingItem]:
+    """Role mail this session sent that waits for someone to take the role."""
+    return [
+        make_item(
+            "waiting_holder",
+            conv.id,
+            f"No holder: {_short(counterpart, 60)}",
+            now=now,
+            since=oldest,
+            detail=f"{count} {'message waits' if count == 1 else 'messages wait'} for a holder",
+            ref=counterpart,
+        )
+        for counterpart, (count, oldest) in sorted(waiting.items())
+    ]
+
+
 def async_task_items(
     store: ConversationStore, conv: Conversation, *, now: int
 ) -> list[WaitingItem]:
@@ -348,9 +368,14 @@ def build_session_waiting(
     runner_online: bool | None,
     shells: Iterable[Any] = (),
     child_status_of: Callable[[Conversation], str] = lambda child: child.live_status or "idle",
+    waiting_holder: Mapping[str, tuple[int, int]] | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Assemble the ``SessionWaiting`` payload for one session."""
+    """Assemble the ``SessionWaiting`` payload for one session.
+
+    ``waiting_holder`` maps this session's thread keys to (count, oldest) role mail
+    still waiting for a holder.
+    """
     stamp = int(time.time()) if now is None else now
     shell_list = list(shells)
     busy = status in _BUSY
@@ -367,6 +392,7 @@ def build_session_waiting(
         ("approvals", lambda: approval_items(conv, since=status_since, now=stamp)),
         ("queued", lambda: queued_message_items(conv, now=stamp)),
         ("threads", lambda: thread_items(conv, now=stamp)),
+        ("holder", lambda: holder_items(conv, waiting_holder or {}, now=stamp)),
         ("async", lambda: async_task_items(store, conv, now=stamp)),
         (
             "runner",

@@ -2294,7 +2294,10 @@ def register_core_routes(
         return source, holder, counterpart
 
     def _waiting_payload(
-        conv: Conversation, liveness: SessionLiveness | None, user_id: str | None
+        conv: Conversation,
+        liveness: SessionLiveness | None,
+        user_id: str | None,
+        waiting_holder: dict[str, tuple[int, int]] | None = None,
     ) -> dict[str, Any]:
         """One session's waiting view from the live caches (blocking; run in a thread)."""
         from omnigent.server import session_live_state
@@ -2318,6 +2321,7 @@ def register_core_routes(
             child_status_of=lambda child: (
                 _session_status_cache.get(child.id, child.live_status) or "idle"
             ),
+            waiting_holder=waiting_holder,
         )
         payload["project"] = session_project_name(conv, project_store, user_id) or None
         payload["handle"] = handle or conv.labels.get(THREAD_ROLE_LABEL) or None
@@ -2328,9 +2332,12 @@ def register_core_routes(
     async def list_waiting_sessions(request: Request) -> dict[str, Any]:
         """What each of the caller's busy or blocked sessions is waiting on."""
         from omnigent.runtime import pending_elicitations
+        from omnigent.server.role_mail import waiting_by_sender
         from omnigent.server.role_threads import THREAD_ROLE_LABEL
 
         user_id = _get_user_id(request, auth_provider)
+        # One scan for every sender; only the caller's own sessions below read from it.
+        held = await asyncio.to_thread(waiting_by_sender, conversation_store, project_store)
 
         def _collect() -> list[Conversation]:
             candidates: list[Conversation] = []
@@ -2351,13 +2358,16 @@ def register_core_routes(
                 in ("running", "waiting")
                 or conv.id in pending
                 or THREAD_ROLE_LABEL in conv.labels
+                or conv.id in held
             ]
 
         convs = await asyncio.to_thread(_collect)
         liveness = liveness_lookup([conv.id for conv in convs]) if liveness_lookup else {}
         payloads = await asyncio.gather(
             *(
-                asyncio.to_thread(_waiting_payload, conv, liveness.get(conv.id), user_id)
+                asyncio.to_thread(
+                    _waiting_payload, conv, liveness.get(conv.id), user_id, held.get(conv.id)
+                )
                 for conv in convs
             )
         )
@@ -2385,7 +2395,12 @@ def register_core_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
             raise _session_not_found()
-        return await asyncio.to_thread(_waiting_payload, conv, liveness, user_id)
+        from omnigent.server.role_mail import waiting_by_sender
+
+        held = await asyncio.to_thread(waiting_by_sender, conversation_store, project_store)
+        return await asyncio.to_thread(
+            _waiting_payload, conv, liveness, user_id, held.get(conv.id)
+        )
 
     def _with_waiting(
         rows: list[dict[str, Any]], sender_id: str, counterpart: str, limit: int

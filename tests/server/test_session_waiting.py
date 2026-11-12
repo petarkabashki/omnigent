@@ -167,6 +167,18 @@ def test_only_owner_and_blocked_threads_need_the_owner(store) -> None:
     ]
 
 
+def test_role_mail_without_a_holder_needs_the_owner(store) -> None:
+    conv = store.create_conversation(kind="default")
+    waiting = {"/Product": (2, NOW - 3600), "/Bench": (1, NOW - 60)}
+    items = _build(store, conv, status="idle", waiting_holder=waiting)["items"]
+    assert [(i["kind"], i["ref"], i["stale"], i["needs_owner"]) for i in items] == [
+        ("waiting_holder", "/Product", True, True),
+        ("waiting_holder", "/Bench", False, True),
+    ]
+    assert items[0]["detail"] == "2 messages wait for a holder"
+    assert items[1]["detail"] == "1 message waits for a holder"
+
+
 def test_runner_offline_is_always_stale_and_needs_host_and_busy_status(store) -> None:
     conv = store.create_conversation(kind="default", host_id=HOST_ID, workspace="/w")
     payload = _build(store, conv, runner_online=False)

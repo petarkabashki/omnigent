@@ -78,6 +78,40 @@ describe("RoleThreadHistory", () => {
     ]);
   });
 
+  it("marks messages waiting for a holder and notes dropped ones", async () => {
+    useSession.mockReturnValue({
+      session: {
+        id: "sess_product",
+        title: "x",
+        labels: {
+          "omnigent.alias": "Product",
+          "thread.aaaaaaaaaaaa.cp": "/Architect",
+          "thread.aaaaaaaaaaaa.dropped": "2",
+        },
+      },
+    });
+    vi.spyOn(roleThreadsApi, "fetchRoleThreadMessages").mockResolvedValue([
+      { direction: "out", sessionId: "s", itemId: "i1", createdAt: 1, text: "Sent" },
+      {
+        direction: "out",
+        sessionId: "s",
+        itemId: "i2",
+        createdAt: 2,
+        text: "Parked",
+        waitingHolder: true,
+      },
+    ]);
+    renderHistory();
+
+    await screen.findByText("Parked");
+    const badges = screen.getAllByTestId("role-thread-waiting-holder");
+    expect(badges).toHaveLength(1);
+    expect(badges[0].closest("[data-testid=role-thread-message]")?.textContent).toContain("Parked");
+    expect(screen.getByTestId("role-thread-dropped").textContent).toContain(
+      "2 messages were dropped",
+    );
+  });
+
   it("shows the loop-guard notice when the thread has a held message", async () => {
     useSession.mockReturnValue({
       session: {

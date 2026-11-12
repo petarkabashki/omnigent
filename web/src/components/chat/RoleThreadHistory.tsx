@@ -62,6 +62,13 @@ export function RoleThreadHistory({
       {thread?.held && (
         <HeldThreadMessage holderId={holderId} counterpart={counterpart} held={thread.held} />
       )}
+      {thread?.dropped !== undefined && thread.dropped > 0 && (
+        <p data-testid="role-thread-dropped" className="text-xs text-muted-foreground">
+          {thread.dropped === 1 ? "1 message was" : `${thread.dropped} messages were`} dropped:
+          nobody held {counterpart} when the session keeping {thread.dropped === 1 ? "it" : "them"}{" "}
+          was deleted.
+        </p>
+      )}
       {messages.isPending && (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2Icon aria-hidden className="size-3.5 animate-spin" /> Loading messages…
@@ -83,6 +90,7 @@ export function RoleThreadHistory({
           className={cn(
             "max-w-[85%] rounded-lg border border-border px-3 py-2 text-sm",
             MESSAGE_STYLE[message.direction],
+            message.waitingHolder && "border-dashed",
           )}
         >
           <p className="mb-1 text-xs text-muted-foreground">
@@ -100,6 +108,15 @@ export function RoleThreadHistory({
                 : []),
               relativeTime(message.createdAt * 1000),
             ].join(" · ")}
+            {message.waitingHolder && (
+              <span
+                data-testid="role-thread-waiting-holder"
+                title={`Delivered when someone takes ${counterpart}`}
+                className="ml-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-700 dark:text-amber-300"
+              >
+                Waiting for a holder
+              </span>
+            )}
           </p>
           <p className="break-words whitespace-pre-wrap">{message.text}</p>
         </div>
