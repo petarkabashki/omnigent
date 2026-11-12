@@ -40,6 +40,7 @@ from omnigent.stores.project_store import (
     validate_project_segment,
 )
 from omnigent.stores.role_store.sqlalchemy_store import SqlAlchemyRoleStore
+from omnigent.stores.saved_view_store import SqlAlchemySavedViewStore
 from omnigent.util.uuid import uuid_to_bytes
 
 if TYPE_CHECKING:
@@ -197,6 +198,7 @@ class SqlAlchemyProjectStore(ProjectStore):
         )
         self.roles = SqlAlchemyRoleStore(storage_location)
         self.group_threads = SqlAlchemyGroupThreadStore(storage_location)
+        self.saved_views = SqlAlchemySavedViewStore(storage_location)
         # Test seam: called inside a write after its checks pass, before commit,
         # so a test can hold one writer there and start a competing one.
         self.after_checks_hook: Callable[[str], None] | None = None

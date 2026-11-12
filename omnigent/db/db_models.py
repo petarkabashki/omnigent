@@ -1048,6 +1048,35 @@ class SqlGroupThreadPost(OmnigentBase):
     )
 
 
+class SqlSavedView(OmnigentBase):
+    """
+    SQLAlchemy model for ``saved_views``: one owner's named view spec with its params.
+
+    :param owner_key: ``user_id``, or ``""`` in single-user mode, so names stay unique.
+    :param spec: Spec v1 as JSON; source params may hold ``"$name"`` placeholders.
+    :param params: Declared params as JSON, ``{name: {type, default?, enum?}}``.
+    :param project_id: Project the view is filed under, or NULL.
+    """
+
+    __tablename__ = "saved_views"
+
+    workspace_id: Mapped[int] = _workspace_column()
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    owner_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    spec: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    project_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("uq_saved_views_owner_name", "workspace_id", "owner_key", "name", unique=True),
+    )
+
+
 class SqlConversation(ConversationBase):
     """
     SQLAlchemy model for the ``conversations`` table.
