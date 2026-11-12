@@ -14,7 +14,7 @@ import re
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, TypeAdapter, field_validator, model_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from omnigent.views.spec import ViewSpec, _Strict, parse_spec
 
@@ -23,6 +23,7 @@ MAX_NAME_CHARS = 120
 MAX_DESCRIPTION_CHARS = 2000
 MAX_PARAMS = 12
 MAX_ENUM_VALUES = 50
+MAX_PARAM_VALUE_CHARS = 500
 PARAM_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]{0,39}$"
 _PLACEHOLDER = re.compile(r"^\$([A-Za-z][A-Za-z0-9_]{0,39})$")
 
@@ -31,6 +32,7 @@ ParamType = Literal["string", "bool", "int"]
 _PYTHON_TYPES: dict[str, type] = {"string": str, "bool": bool, "int": int}
 # Values used to check a spec when a param has neither a default nor an enum.
 _SAMPLES: dict[str, ParamValue] = {"string": "x", "bool": False, "int": 1}
+_INT_QUERY = re.compile(r"-?[0-9]{1,18}")
 
 
 class ParamDecl(_Strict):
@@ -46,6 +48,8 @@ class ParamDecl(_Strict):
         for value in [self.default, *(self.enum or [])]:
             if value is not None and not _is_type(value, self.type):
                 raise ValueError(f"{value!r} is not a {self.type}")
+            if isinstance(value, str) and len(value) > MAX_PARAM_VALUE_CHARS:
+                raise ValueError(f"param values are at most {MAX_PARAM_VALUE_CHARS} characters")
         if self.enum is not None and self.default is not None and self.default not in self.enum:
             raise ValueError(f"default {self.default!r} is not one of the enum values")
         return self
@@ -127,6 +131,7 @@ def check(spec: Any, params: dict[str, ParamDecl]) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise ValueError("spec must be a JSON object")
     samples: dict[str, ParamValue] = {}
+    sampled: list[str] = []
     for name, decl in params.items():
         if decl.default is not None:
             samples[name] = decl.default
@@ -134,8 +139,29 @@ def check(spec: Any, params: dict[str, ParamDecl]) -> dict[str, Any]:
             samples[name] = decl.enum[0]
         else:
             samples[name] = _SAMPLES[decl.type]
-    bind(spec, params, samples)
+            sampled.append(name)
+    try:
+        bind(spec, params, samples)
+    except RecursionError as error:
+        raise ValueError("spec is nested too deeply") from error
+    except ValueError as error:
+        if not sampled:
+            raise
+        names = ", ".join(sampled)
+        raise ValueError(
+            f"{_reasons(error)} (checked with sample values for {names}; "
+            "give those params a default)"
+        ) from error
     return spec
+
+
+def _reasons(error: ValueError) -> str:
+    if isinstance(error, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors()[:5]
+        )
+    return str(error)
 
 
 def parse_spec_object(raw: str) -> Any:
@@ -154,10 +180,10 @@ def coerce(decl: ParamDecl, raw: str, name: str) -> ParamValue:
             raise ValueError(f"param {name!r} must be true or false")
         value = raw == "true"
     elif decl.type == "int":
-        try:
-            value = int(raw)
-        except ValueError as error:
-            raise ValueError(f"param {name!r} must be an integer") from error
+        # int() alone accepts " 7", "+7", "0_7" and non-ASCII digits.
+        if not _INT_QUERY.fullmatch(raw):
+            raise ValueError(f"param {name!r} must be an integer")
+        value = int(raw)
     else:
         value = raw
     if decl.enum is not None and value not in decl.enum:
@@ -203,6 +229,11 @@ def from_yaml(text: str) -> SavedViewDocument:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as error:
         raise ValueError(f"not valid YAML: {error}") from error
+    except RecursionError as error:
+        raise ValueError("YAML is nested too deeply") from error
     if not isinstance(raw, dict):
         raise ValueError("a saved view document must be a mapping")
-    return SavedViewDocument.model_validate(raw)
+    try:
+        return SavedViewDocument.model_validate(raw)
+    except RecursionError as error:
+        raise ValueError("YAML is nested too deeply") from error

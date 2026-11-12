@@ -65,9 +65,11 @@ def test_parse_params_refuses_bad_declarations(params: dict) -> None:
 def test_coerce_types_query_values_and_checks_the_enum() -> None:
     assert saved.coerce(saved.ParamDecl(type="bool"), "true", "b") is True
     assert saved.coerce(saved.ParamDecl(type="int"), "7", "n") == 7
+    assert saved.coerce(saved.ParamDecl(type="int"), "-7", "n") == -7
     for decl, raw in [
         (saved.ParamDecl(type="bool"), "1"),
         (saved.ParamDecl(type="int"), "x"),
+        *((saved.ParamDecl(type="int"), raw) for raw in (" 7", "+7", "0_7", "\u0667", "1.0", "")),
         (saved.ParamDecl(type="string", enum=["a"]), "b"),
     ]:
         with pytest.raises(ValueError):

@@ -205,3 +205,36 @@ def test_single_user_mode_keeps_names_unique(db_uri: str) -> None:
     with pytest.raises(OmnigentError, match="already exists"):
         store.create(name="A", spec=SPEC, user_id=None)
     assert [view.id for view in store.list_owned(user_id=None)] == [first.id]
+
+
+def test_deeply_nested_specs_and_imports_are_a_400(client: TestClient) -> None:
+    deep: object = 1
+    for _ in range(900):
+        deep = [deep]
+    nested_yaml = "version: 1\nname: deep\nspec: {view: " + "[" * 5000 + "]" * 5000 + "}\n"
+
+    created = client.post(
+        "/v1/views", json={**VIEW, "spec": {**SPEC, "x": deep}}, headers=_as(OWNER)
+    )
+    imported = client.post("/v1/views/import", json={"yaml": nested_yaml}, headers=_as(OWNER))
+
+    assert (created.status_code, imported.status_code) == (400, 400)
+    assert "nested too deeply" in created.json()["error"]
+    assert "nested too deeply" in imported.json()["error"]
+
+
+def test_param_strings_are_capped_and_a_refused_sample_says_to_give_a_default(
+    client: TestClient,
+) -> None:
+    source = {"name": "sessions", "params": {"kind": "$kind"}}
+    spec = {**SPEC, "view": {**SPEC["view"], "source": source}}
+    no_default = {"name": "Kinds", "params": {"kind": {"type": "string"}}, "spec": spec}
+    with_default = {**no_default, "params": {"kind": {"type": "string", "default": "session"}}}
+    long_enum = {**VIEW, "params": {"text": {"type": "string", "enum": ["x" * 501]}}}
+
+    refused = client.post("/v1/views", json=no_default, headers=_as(OWNER))
+
+    assert refused.status_code == 400
+    assert "give those params a default" in refused.json()["error"]
+    assert client.post("/v1/views", json=with_default, headers=_as(OWNER)).status_code == 200
+    assert client.post("/v1/views", json=long_enum, headers=_as(OWNER)).status_code == 400
