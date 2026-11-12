@@ -43,6 +43,7 @@ import pytest
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.paths import (
+    UNIX_SOCKET_PATH_MAX,
     ensure_runtime_parent,
     resolve_harness_tmp_parent,
     runtime_mkdtemp,
@@ -325,11 +326,19 @@ def test_resolve_harness_tmp_parent_makes_relative_path_absolute(
     assert resolved == tmp_path / "harness-sockets"
 
 
+@pytest.fixture
+def short_tmp() -> Iterator[Path]:
+    # pytest's tmp_path can exceed the runtime parent's socket length budget.
+    path = Path(tempfile.mkdtemp(prefix="rp-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes.")
 def test_runtime_mkdtemp_creates_a_private_parent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, short_tmp: Path
 ) -> None:
-    parent = tmp_path / "nested" / "omnigent-runtime"
+    parent = short_tmp / "nested" / "omnigent-runtime"
     monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
 
     created = runtime_mkdtemp("terminal-")
@@ -346,13 +355,13 @@ def test_runtime_mkdtemp_creates_a_private_parent(
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and symlinks.")
 @pytest.mark.parametrize("squatter", ["symlink", "file", "foreign_uid"])
 def test_ensure_runtime_parent_refuses_an_unsafe_parent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, squatter: str
+    monkeypatch: pytest.MonkeyPatch, short_tmp: Path, squatter: str
 ) -> None:
-    parent = tmp_path / "omnigent-runtime"
+    parent = short_tmp / "omnigent-runtime"
     monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
     if squatter == "symlink":
-        (tmp_path / "elsewhere").mkdir()
-        parent.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        (short_tmp / "elsewhere").mkdir()
+        parent.symlink_to(short_tmp / "elsewhere", target_is_directory=True)
     elif squatter == "file":
         parent.write_text("")
     else:
@@ -362,6 +371,18 @@ def test_ensure_runtime_parent_refuses_an_unsafe_parent(
 
     with pytest.raises(RuntimeError, match="refusing to use"):
         runtime_mkdtemp("terminal-")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix socket path limit.")
+def test_ensure_runtime_parent_refuses_a_parent_too_long_for_sockets(
+    monkeypatch: pytest.MonkeyPatch, short_tmp: Path
+) -> None:
+    parent = short_tmp / ("x" * UNIX_SOCKET_PATH_MAX)
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
+
+    with pytest.raises(RuntimeError, match=_TMP_PARENT_ENV_VAR):
+        ensure_runtime_parent()
+    assert not parent.exists()
 
 
 async def test_shutdown_without_start_is_noop(

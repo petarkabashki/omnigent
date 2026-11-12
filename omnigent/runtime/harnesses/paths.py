@@ -10,6 +10,8 @@ from pathlib import Path
 
 from omnigent._platform import IS_WINDOWS
 
+# Relocates the per-user runtime parent. A parent outside /tmp escapes tmpfiles
+# aging, so files left there (bang logs, srt settings) persist until removed.
 HARNESS_TMP_PARENT_ENV_VAR = "OMNIGENT_HARNESS_TMP_PARENT"
 
 
@@ -36,6 +38,8 @@ def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
 
 # AF_UNIX ``sun_path`` holds 108 bytes on Linux and 104 on macOS, NUL included.
 UNIX_SOCKET_PATH_MAX = 103
+# Room for the deepest socket under the parent, e.g. "/model-signer-private-xxxxxxxx/relay.sock".
+RUNTIME_SOCKET_HEADROOM = 48
 
 
 def ensure_private_dir(path: Path, my_uid: int | None) -> None:
@@ -73,10 +77,16 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
 
     :param env: Environment to read the override from; defaults to ``os.environ``.
     :returns: The absolute parent, e.g. ``Path("/tmp/omnigent-1000")``.
-    :raises RuntimeError: If the parent is a symlink, a non-directory, or
-        owned by another uid.
+    :raises RuntimeError: If the parent is too long to hold Unix sockets, or
+        is a symlink, a non-directory, or owned by another uid.
     """
     parent = resolve_harness_tmp_parent(env)
+    limit = UNIX_SOCKET_PATH_MAX - RUNTIME_SOCKET_HEADROOM
+    if not IS_WINDOWS and len(os.fsencode(parent)) > limit:
+        raise RuntimeError(
+            f"runtime parent {parent} is longer than {limit} bytes, leaving no room "
+            f"for Unix sockets under it; shorten {HARNESS_TMP_PARENT_ENV_VAR}"
+        )
     parent.parent.mkdir(parents=True, exist_ok=True)
     getuid = getattr(os, "getuid", None)
     ensure_private_dir(parent, getuid() if getuid is not None else None)

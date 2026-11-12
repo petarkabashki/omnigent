@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,10 +25,13 @@ from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
 
 
 @pytest.fixture
-def isolated_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    runtime_parent = tmp_path / "omnigent-runtime"
+def isolated_tempdir(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    # pytest's tmp_path can exceed the runtime parent's socket length budget.
+    base = Path(tempfile.mkdtemp(prefix="cs-", dir=None if sys.platform == "win32" else "/tmp"))
+    runtime_parent = base / "omnigent-runtime"
     monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(runtime_parent))
-    return runtime_parent
+    yield runtime_parent
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def test_staging_root_is_private_and_under_the_runtime_parent(isolated_tempdir: Path) -> None:
