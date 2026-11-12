@@ -149,6 +149,22 @@ def test_threads_waiting_on_us_listed_and_waiting_on_them_only_when_old(store) -
     assert ours["actions"] == ["open", "nudge"]
     assert ours["detail"] == "2 unhandled · waiting on us · nudged 1×"
     assert [i["stale"] for i in payload["items"]] == [True, False]
+    assert [i["needs_owner"] for i in payload["items"]] == [False, False]
+
+
+def test_only_owner_and_blocked_threads_need_the_owner(store) -> None:
+    labels = {
+        **_thread_labels("proj/Owner", "waiting_on_owner", NOW - 60),
+        **_thread_labels("proj/Blocked", "blocked", NOW - 120),
+        **_thread_labels("proj/Them", "waiting_on_them", NOW - 3600),
+    }
+    conv = store.create_conversation(kind="default", labels=labels)
+    items = _build(store, conv, status="idle")["items"]
+    assert [(i["ref"], i["needs_owner"]) for i in items] == [
+        ("proj/Them", False),
+        ("proj/Blocked", True),
+        ("proj/Owner", True),
+    ]
 
 
 def test_runner_offline_is_always_stale_and_needs_host_and_busy_status(store) -> None:
@@ -157,6 +173,7 @@ def test_runner_offline_is_always_stale_and_needs_host_and_busy_status(store) ->
     assert _kinds(payload) == ["runner_offline"]
     assert payload["items"][0]["where"] == HOST_ID
     assert payload["items"][0]["stale"] is True
+    assert payload["items"][0]["needs_owner"] is True
     assert _build(store, conv, runner_online=False, status="idle")["items"] == []
     assert _build(store, conv, runner_online=True)["items"] == []
     assert _build(store, conv, runner_online=None)["items"] == []

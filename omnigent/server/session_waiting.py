@@ -47,6 +47,9 @@ STALE_MINUTES: dict[str, int] = {
     "runner_offline": 0,
 }
 _THREAD_WAITING_STATES = ("waiting_on_us", "waiting_on_owner", "blocked")
+# Only these need the owner and count toward the Waiting badge.
+_OWNER_KINDS = ("approval", "runner_offline")
+_OWNER_THREAD_STATES = ("waiting_on_owner", "blocked")
 
 
 class WaitingItem(TypedDict):
@@ -60,6 +63,7 @@ class WaitingItem(TypedDict):
     where: str | None
     ref: str | None
     stale: bool
+    needs_owner: bool
     actions: list[str]
 
 
@@ -86,8 +90,12 @@ def make_item(
     where: str | None = None,
     ref: str | None = None,
     actions: Iterable[str] = ("open",),
+    needs_owner: bool | None = None,
 ) -> WaitingItem:
-    """Build one item, computing ``stale`` from the kind's limit."""
+    """Build one item, computing ``stale`` from the kind's limit.
+
+    ``needs_owner`` defaults from the kind; thread items pass it from their state.
+    """
     return WaitingItem(
         kind=kind,
         session_id=session_id,
@@ -97,6 +105,7 @@ def make_item(
         where=where,
         ref=ref,
         stale=_is_stale(kind, since, now),
+        needs_owner=kind in _OWNER_KINDS if needs_owner is None else needs_owner,
         actions=list(actions),
     )
 
@@ -261,6 +270,7 @@ def thread_items(conv: Conversation, *, now: int) -> list[WaitingItem]:
                 detail=" · ".join(parts),
                 ref=row["counterpart"],
                 actions=("open", "nudge"),
+                needs_owner=state in _OWNER_THREAD_STATES,
             )
         )
     return items
