@@ -1621,13 +1621,10 @@ def _preregister_agent(  # type: ignore[explicit-any]  # agent_store / artifact_
     # :func:`omnigent.inner.cli._omnigent_register_yaml_bundle` —
     # see designs/RUN_OMNIGENT_SESSION_RESUMPTION.md. Reusing the
     # existing ``agent_id`` (rather than delete + recreate)
-    # is load-bearing for ``--continue``: deleting the old
-    # row cascades through the ``tasks`` FK
-    # (``ondelete=CASCADE`` in
-    # :class:`omnigent.db.db_models.SqlTask`), wiping every
-    # prior task — which makes the next ``--continue``
-    # filter by ``agent_id`` return zero conversations and
-    # exit ``"No prior conversation for agent ..."``. Update
+    # is load-bearing for ``--continue``: a recreated row gets
+    # a new ``agent_id``, so the next ``--continue``
+    # filter by ``agent_id`` returns zero conversations and
+    # exits ``"No prior conversation for agent ..."``. Update
     # the bundle in place and only refresh
     # ``bundle_location`` when the content hash actually
     # changed so the row stays stable across no-op restarts.

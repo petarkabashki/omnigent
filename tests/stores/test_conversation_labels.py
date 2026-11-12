@@ -21,6 +21,9 @@ from omnigent.stores.conversation_store import ARCHIVED_AT_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
+from tests.stores.write_hook_guard import write_hook_guard  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("write_hook_guard")
 
 # ── Happy-path CRUD ────────────────────────────────────
 
