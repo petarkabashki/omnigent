@@ -230,29 +230,53 @@ export interface TreeNode {
   children: TreeNode[];
 }
 
-/** Session rows as a spawned_by forest; a row whose parent is not in the result is a root. */
+/**
+ * Session rows as a spawned_by forest, every row exactly once and in linear time. A row
+ * whose parent is not in the result is a root; a parent chain that loops is cut where
+ * the walk closes it. Parents are looked up by the first row with that id.
+ */
 export function buildTree(rows: Row[]): TreeNode[] {
-  const nodes = new Map<string, TreeNode>();
-  for (const row of rows) {
-    const id = fieldValue(row, "id");
-    if (typeof id === "string") nodes.set(id, { row, children: [] });
-  }
-  const parentOf = (node: TreeNode): TreeNode | undefined => {
+  const nodes = rows.map((row): TreeNode => ({ row, children: [] }));
+  const byId = new Map<string, number>();
+  nodes.forEach((node, index) => {
+    const id = fieldValue(node.row, "id");
+    if (typeof id === "string" && !byId.has(id)) byId.set(id, index);
+  });
+  const parentIndex = nodes.map((node, index) => {
     const parentId = fieldValue(node.row, "parent_actor_id");
-    return typeof parentId === "string" ? nodes.get(parentId) : undefined;
-  };
-  const roots: TreeNode[] = [];
-  for (const node of nodes.values()) {
-    const parent = parentOf(node);
-    // A parent chain that loops back to this node is cut here, so every row is shown once.
-    const seen = new Set<TreeNode>();
-    let ancestor = parent;
-    while (ancestor !== undefined && ancestor !== node && !seen.has(ancestor)) {
-      seen.add(ancestor);
-      ancestor = parentOf(ancestor);
+    const parent = typeof parentId === "string" ? byId.get(parentId) : undefined;
+    return parent === index ? undefined : parent;
+  });
+  // 0 unvisited, 1 on the current walk, 2 settled.
+  const state = new Uint8Array(nodes.length);
+  for (let start = 0; start < nodes.length; start += 1) {
+    const walk: number[] = [];
+    let current: number | undefined = start;
+    while (current !== undefined && state[current] === 0) {
+      state[current] = 1;
+      walk.push(current);
+      current = parentIndex[current];
     }
-    if (parent !== undefined && ancestor === undefined) parent.children.push(node);
-    else roots.push(node);
+    if (current !== undefined && state[current] === 1) parentIndex[current] = undefined;
+    for (const index of walk) state[index] = 2;
   }
+  const roots: TreeNode[] = [];
+  nodes.forEach((node, index) => {
+    const parent = parentIndex[index];
+    if (parent === undefined) roots.push(node);
+    else nodes[parent].children.push(node);
+  });
   return roots;
+}
+
+/** How many rows sit below a node. */
+export function descendantCount(node: TreeNode): number {
+  let count = 0;
+  const pending = [...node.children];
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    count += 1;
+    pending.push(...next.children);
+  }
+  return count;
 }

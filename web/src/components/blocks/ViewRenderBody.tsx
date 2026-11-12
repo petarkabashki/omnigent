@@ -13,6 +13,7 @@ import {
   type ViewNode,
   bindText,
   buildTree,
+  descendantCount,
   displayText,
   hubRefRoute,
   renderedSpec,
@@ -160,6 +161,11 @@ function TreeItem({ node, tree, depth }: { node: ViewNode; tree: TreeNode; depth
       <div className={cn("rounded-md border", markClass(node, tree.row))}>
         <ItemView item={node.item!} row={tree.row} />
       </div>
+      {tree.children.length > 0 && depth >= MAX_TREE_DEPTH && (
+        <p className="mt-1 ml-4 text-muted-foreground text-xs">
+          {descendantCount(tree)} more nested rows not shown
+        </p>
+      )}
       {tree.children.length > 0 && depth < MAX_TREE_DEPTH && (
         <ul className="mt-1 ml-4 space-y-1 border-l pl-2">
           {tree.children.map((child, index) => (
@@ -215,7 +221,8 @@ function markClass(node: ViewNode, row: Row): string | undefined {
   return mark === undefined ? undefined : cn("border-l-4", MARK_CLASS[mark.tone ?? "warning"]);
 }
 
+/** Row ids can repeat, so the position keeps keys unique; rows are not reordered in place. */
 function rowKey(row: Row, index: number): string {
   const id = row.id;
-  return typeof id === "string" ? id : `row-${index}`;
+  return typeof id === "string" ? `${id}:${index}` : `row-${index}`;
 }

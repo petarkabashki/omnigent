@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { bindText, buildTree, hubRefRoute, renderedSpec, ruleHolds } from "./viewSpec";
+import {
+  bindText,
+  buildTree,
+  descendantCount,
+  hubRefRoute,
+  renderedSpec,
+  ruleHolds,
+} from "./viewSpec";
 
 const row = {
   id: "s1",
@@ -80,7 +87,30 @@ describe("buildTree", () => {
       { id: "x", parent_actor_id: "y" },
       { id: "y", parent_actor_id: "x" },
     ]);
-    expect(tree.map((node) => node.row.id)).toEqual(["a", "x", "y"]);
+    expect(tree.map((node) => node.row.id)).toEqual(["a", "x"]);
     expect(tree[0].children.map((node) => node.row.id)).toEqual(["b"]);
+    expect(tree[1].children.map((node) => node.row.id)).toEqual(["y"]);
+  });
+});
+
+describe("buildTree rows", () => {
+  it("keeps duplicate and non-string ids and counts descendants", () => {
+    const tree = buildTree([
+      { id: "a" },
+      { id: "a", parent_actor_id: "a" },
+      { id: 7, parent_actor_id: "a" },
+      { title: "no id" },
+    ]);
+    expect(tree).toHaveLength(2);
+    expect(descendantCount(tree[0])).toBe(2);
+  });
+
+  it("builds a 500-deep chain", () => {
+    const rows = Array.from({ length: 500 }, (_, index) => ({
+      id: `n${index}`,
+      parent_actor_id: index === 0 ? undefined : `n${index - 1}`,
+    }));
+    const [root] = buildTree(rows);
+    expect(descendantCount(root)).toBe(499);
   });
 });
