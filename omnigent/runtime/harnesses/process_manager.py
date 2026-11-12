@@ -248,11 +248,11 @@ def _socket_path(instance_dir: Path, conversation_id: str) -> Path:
     """
     Per-conversation socket path under the per-AP-instance dir.
 
-    :param instance_dir: This Omnigent instance's directory, e.g.
-        ``/tmp/omnigent/ap-abc123``.
     The name is a digest of the id so the path length does not depend on it:
     Unix sockets must fit in ~104 bytes even under a long runtime parent.
 
+    :param instance_dir: This Omnigent instance's directory, e.g.
+        ``/tmp/omnigent/ap-0123456789ab``.
     :param conversation_id: AP-allocated conversation id, e.g.
         ``"conv_xyz789"``.
     :returns: Absolute Unix socket path the runner binds and AP's
