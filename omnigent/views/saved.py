@@ -175,6 +175,8 @@ def parse_spec_object(raw: str) -> Any:
 def coerce(decl: ParamDecl, raw: str, name: str) -> ParamValue:
     """A query-string value converted to the param's type, e.g. ``"true"`` to ``True``."""
     value: ParamValue
+    if len(raw) > MAX_PARAM_VALUE_CHARS:
+        raise ValueError(f"param {name!r} is longer than {MAX_PARAM_VALUE_CHARS} characters")
     if decl.type == "bool":
         if raw not in ("true", "false"):
             raise ValueError(f"param {name!r} must be true or false")

@@ -18,6 +18,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConver
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.stores.saved_view_store import SqlAlchemySavedViewStore
+from omnigent.views import saved
 
 OWNER = "alice"
 OTHER = "bob"
@@ -126,7 +127,8 @@ def test_resolve_binds_query_params_and_returns_only_the_callers_rows(
     assert [row["title"] for row in default["rows"]] == ["deploy one"]
     assert default["spec"]["view"]["source"]["params"] == {"search": "deploy"}
     assert [row["title"] for row in build["rows"]] == ["build two"]
-    for query in ("p.nope=1", "p.text=a&p.text=b"):
+    too_long = "x" * (saved.MAX_PARAM_VALUE_CHARS + 1)
+    for query in ("p.nope=1", "p.text=a&p.text=b", f"p.text={too_long}"):
         bad = client.get(f"/v1/views/{view_id}/resolve?{query}", headers=_as(OWNER))
         assert bad.status_code == 400, query
 

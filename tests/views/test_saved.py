@@ -66,11 +66,14 @@ def test_coerce_types_query_values_and_checks_the_enum() -> None:
     assert saved.coerce(saved.ParamDecl(type="bool"), "true", "b") is True
     assert saved.coerce(saved.ParamDecl(type="int"), "7", "n") == 7
     assert saved.coerce(saved.ParamDecl(type="int"), "-7", "n") == -7
+    longest = "x" * saved.MAX_PARAM_VALUE_CHARS
+    assert saved.coerce(saved.ParamDecl(type="string"), longest, "s") == longest
     for decl, raw in [
         (saved.ParamDecl(type="bool"), "1"),
         (saved.ParamDecl(type="int"), "x"),
         *((saved.ParamDecl(type="int"), raw) for raw in (" 7", "+7", "0_7", "\u0667", "1.0", "")),
         (saved.ParamDecl(type="string", enum=["a"]), "b"),
+        (saved.ParamDecl(type="string"), "x" * (saved.MAX_PARAM_VALUE_CHARS + 1)),
     ]:
         with pytest.raises(ValueError):
             saved.coerce(decl, raw, "p")
