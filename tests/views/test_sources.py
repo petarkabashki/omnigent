@@ -136,6 +136,8 @@ def test_subagents_walk_the_tree_to_the_requested_depth(stores: SimpleNamespace)
     assert [(row["title"], row["depth"]) for row in one] == [("helper", 1)]
     assert one[0]["spawn_kind"] == "subagent"
     assert one[0]["parent_actor_id"] == root
+    searched = _resolve(stores, {"name": "sessions", "params": {"search": "HELP"}})
+    assert [row["title"] for row in searched] == ["helper"]
     assert [(row["title"], row["depth"]) for row in two] == [("helper", 1), ("grandchild", 2)]
     assert set(two[1]) == SESSION_FIELDS | {"depth"}
 
