@@ -45,6 +45,10 @@ def _title(conv: Conversation) -> str | None:
     return conv.sub_agent_name or conv.title or (conv.labels or {}).get(_DESCRIPTION_LABEL)
 
 
+def _stopped(conv: Conversation) -> bool:
+    return bool(conv.archived or is_session_closed(conv.labels or {}, conv.title))
+
+
 class SourceError(ValueError):
     """A source request the hub cannot answer, e.g. an unknown session for ``subagents``."""
 
@@ -92,8 +96,11 @@ class HubSources:
     def resolve(
         self, source: SessionsSource | ThreadsSource | RolesSource | SubagentsSource
     ) -> Resolved:
+        limit = min(source.limit, MAX_ROWS)
         if isinstance(source, SessionsSource):
-            rows = self.sessions(**source.params.model_dump())
+            # The scan runs newest first, so the default order can stop once the limit is filled.
+            enough = limit if source.order == "-last_event_ts" else None
+            rows = self.sessions(**source.params.model_dump(), enough=enough)
         elif isinstance(source, ThreadsSource):
             rows = self.threads(**source.params.model_dump())
         elif isinstance(source, RolesSource):
@@ -101,7 +108,6 @@ class HubSources:
         else:
             rows = self.subagents(**source.params.model_dump())
         ordered = order_rows(rows, source.order)
-        limit = min(source.limit, MAX_ROWS)
         return Resolved(ordered[:limit], len(ordered) > limit or not self.scanned_all)
 
     # ---- shared lookups -------------------------------------------------
@@ -147,8 +153,20 @@ class HubSources:
                 held.setdefault(role.holder_session_id, []).append(self._role_handle(role))
         return {session_id: sorted(handles) for session_id, handles in held.items()}
 
-    def _scan(self, *, scoped: bool = True, **filters: Any) -> list[Conversation]:
-        """Newest first; ``scoped`` keeps rows whose root the caller has a grant on."""
+    def _scan(
+        self,
+        *,
+        scoped: bool = True,
+        keep: Callable[[Conversation], bool] | None = None,
+        enough: int | None = None,
+        **filters: Any,
+    ) -> list[Conversation]:
+        """Newest first; ``scoped`` keeps rows whose root the caller has a grant on.
+
+        ``keep`` drops rows as they are read. With ``enough``, the scan stops once it holds
+        more than that many rows and the last one is older than row ``enough``, so a tie at
+        the cut is never split.
+        """
         found: list[Conversation] = []
         after: str | None = None
         while True:
@@ -157,7 +175,7 @@ class HubSources:
                 self.scanned_all = False
                 return found
             page = self.conversations.list_conversations(
-                limit=min(_PAGE_SIZE, budget),
+                limit=min(_PAGE_SIZE, budget, (enough + 1) if enough is not None else budget),
                 after=after,
                 accessible_by=self.user_id if scoped else None,
                 # Sub-agents carry no grant of their own; the hub authorizes them by their root.
@@ -166,9 +184,15 @@ class HubSources:
                 sort_by="updated_at",
                 **filters,
             )
-            found.extend(page.data)
+            found.extend(conv for conv in page.data if keep is None or keep(conv))
             self.scanned += len(page.data)
             if not page.has_more or not page.data:
+                return found
+            if (
+                enough is not None
+                and len(found) > enough
+                and found[-1].updated_at != found[enough - 1].updated_at
+            ):
                 return found
             after = page.last_id
 
@@ -189,7 +213,7 @@ class HubSources:
         elif labels.get(SIDE_CHAT_LABEL_KEY) and fork_source:
             spawn_kind = "side_chat"
         closed = is_session_closed(labels, conv.title)
-        stopped = conv.archived or closed
+        stopped = _stopped(conv)
         return {
             "id": conv.id,
             "hub_ref": self._hub_ref("session", conv.id),
@@ -217,23 +241,32 @@ class HubSources:
         archived: bool | None = None,
         host: str | None = None,
         role: str | None = None,
+        enough: int | None = None,
     ) -> list[dict[str, Any]]:
+        """``enough`` lets the scan stop early when no filter needs a built row."""
+        needle = None if search is None else search.lower()
+
+        def keep(conv: Conversation) -> bool:
+            if needle is not None and needle not in (_title(conv) or "").lower():
+                return False
+            return archived is None or _stopped(conv) == archived
+
+        row_filtered = project is not None or host is not None or role is not None
         hub_kind = {"session": "default", "subagent": "sub_agent"}.get(kind or "")
         scanned = self._scan(
             kind=hub_kind,
             has_agent_id=True,
-            # No hub-side title search: the row title falls back to the sub-agent name and
-            # description label, which only the filter below sees; truncated covers the cap.
+            # The hub narrows to rows whose title fields match; ``keep`` checks the exact fallback.
+            # SQLite's lower() folds only ASCII, so non-ASCII searches stay in Python.
+            title_search=search if search and search.isascii() else None,
+            title_search_label=_DESCRIPTION_LABEL if search and search.isascii() else None,
             include_archived=archived is not False,
+            keep=keep,
+            enough=None if row_filtered else enough,
         )
-        if search is not None:
-            needle = search.lower()
-            scanned = [conv for conv in scanned if needle in (_title(conv) or "").lower()]
         rows = []
         for row in self.session_rows(scanned):
             if project is not None and project not in (row["project"], row["project_id"]):
-                continue
-            if archived is not None and row["stopped"] != archived:
                 continue
             if host is not None and host not in (row["host"], row["host_id"]):
                 continue

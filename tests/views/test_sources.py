@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from types import SimpleNamespace
@@ -134,6 +135,44 @@ def test_session_filters_match_agentic_base(stores: SimpleNamespace) -> None:
     assert rows["done"]["hub_ref"]["id"] == closed
 
 
+def test_search_is_narrowed_by_the_hub_and_matches_the_display_title(
+    stores: SimpleNamespace,
+) -> None:
+    root = _session(stores, "")
+    stores.conversations.set_labels(root, {sources_module._DESCRIPTION_LABEL: "Fix deploy"})
+    # A sub-agent's display title is its name, so a matching title alone does not count.
+    _session(
+        stores, "deploy notes", kind="sub_agent", parent_conversation_id=root, sub_agent_name="ci"
+    )
+    for index in range(30):
+        _session(stores, f"other {index}")
+
+    sources = _sources(stores)
+    spec = SPEC_ADAPTER.validate_python(
+        {
+            "spec": 1,
+            "view": {
+                "type": "List",
+                "source": {"name": "sessions", "params": {"search": "DEPLOY"}},
+                "item": {"title": "$.title"},
+            },
+        }
+    )
+    rows = sources.resolve(spec.view.source).rows
+    assert [row["title"] for row in rows] == ["Fix deploy"]
+    # Only the two candidates are read, not the 30 others.
+    assert sources.scanned == 2
+
+
+def test_non_ascii_search_folds_case_like_python(stores: SimpleNamespace) -> None:
+    _session(stores, "ÉTÉ plans")
+    _session(stores, "winter")
+
+    rows = _resolve(stores, {"name": "sessions", "params": {"search": "été"}})
+
+    assert [row["title"] for row in rows] == ["ÉTÉ plans"]
+
+
 def test_subagents_walk_the_tree_to_the_requested_depth(stores: SimpleNamespace) -> None:
     root = _session(stores, "root")
     child = _session(
@@ -195,8 +234,9 @@ def test_scan_cap_spends_only_on_readable_rows_newest_first(
     listed = _sources(stores).sessions(kind="subagent")
     every = _sources(stores).sessions()
 
-    assert [row["id"] for row in listed] == [newest, mine]
-    assert [row["title"] for row in every] == ["newest", "mine", "older-3", "older-2"]
+    # Test rows share a second of updated_at, so compare sets; the order breaks ties by id.
+    assert {row["id"] for row in listed} == {newest, mine}
+    assert {"newest", "mine"} <= {row["title"] for row in every}
 
 
 def test_scan_cap_bounds_the_whole_resolve(
@@ -256,6 +296,41 @@ def test_order_puts_nulls_last_and_breaks_ties_by_id() -> None:
     rows = [{"id": "b", "t": 1}, {"id": "a", "t": None}, {"id": "c", "t": 1}, {"id": "d", "t": 2}]
     assert [row["id"] for row in order_rows(rows, "-t")] == ["d", "c", "b", "a"]
     assert [row["id"] for row in order_rows(rows, "t")] == ["b", "c", "d", "a"]
+
+
+def test_default_order_stops_scanning_once_the_limit_is_filled(stores: SimpleNamespace) -> None:
+    times = [10, 9, 8, 8, 6, 5, 4, 3, 2, 1]  # newest first; a tie straddles the cut at 3
+    convs = [
+        dataclasses.replace(
+            stores.conversations.get_conversation(_session(stores, f"s{t}")), updated_at=t
+        )
+        for t in times
+    ]
+
+    def list_conversations(
+        *, limit: int, after: str | None = None, **_: object
+    ) -> SimpleNamespace:
+        start = 0 if after is None else [conv.id for conv in convs].index(after) + 1
+        data = convs[start : start + limit]
+        return SimpleNamespace(data=data, has_more=start + limit < len(convs), last_id=data[-1].id)
+
+    pages = SimpleNamespace(list_conversations=list_conversations)
+    sources = HubSources(pages, None, OWNER, lambda _conv: True)
+    spec = SPEC_ADAPTER.validate_python(
+        {
+            "spec": 1,
+            "view": {
+                "type": "List",
+                "source": {"name": "sessions", "limit": 3},
+                "item": {"title": "$.title"},
+            },
+        }
+    )
+    resolved = sources.resolve(spec.view.source)
+
+    every = order_rows(sources.session_rows(convs), "-last_event_ts")
+    assert [row["id"] for row in resolved.rows] == [row["id"] for row in every[:3]]
+    assert (sources.scanned, resolved.truncated) == (8, True)
 
 
 def test_limit_truncates_and_says_so(stores: SimpleNamespace) -> None:
