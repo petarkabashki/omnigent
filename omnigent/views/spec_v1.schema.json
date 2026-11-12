@@ -1,0 +1,800 @@
+{
+  "$defs": {
+    "Badge": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "description": "A '$.path' binds a row field; other text is shown as is.",
+          "maxLength": 500,
+          "title": "Text",
+          "type": "string"
+        },
+        "tone": {
+          "default": "neutral",
+          "enum": [
+            "neutral",
+            "muted",
+            "info",
+            "success",
+            "warning",
+            "danger"
+          ],
+          "title": "Tone",
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}.",
+              "maxProperties": 1,
+              "minProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "var",
+                  "==",
+                  "!=",
+                  "<",
+                  "<=",
+                  ">",
+                  ">=",
+                  "and",
+                  "or",
+                  "!",
+                  "in"
+                ]
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "Badge",
+      "type": "object"
+    },
+    "Column": {
+      "additionalProperties": false,
+      "properties": {
+        "badges": {
+          "items": {
+            "$ref": "#/$defs/Badge"
+          },
+          "maxItems": 8,
+          "title": "Badges",
+          "type": "array"
+        },
+        "header": {
+          "maxLength": 80,
+          "title": "Header",
+          "type": "string"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "description": "Row field path, e.g. '$.title'.",
+              "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_]*)+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Link"
+        },
+        "value": {
+          "description": "A '$.path' binds a row field; other text is shown as is.",
+          "maxLength": 500,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "header",
+        "value"
+      ],
+      "title": "Column",
+      "type": "object"
+    },
+    "Item": {
+      "additionalProperties": false,
+      "properties": {
+        "badges": {
+          "items": {
+            "$ref": "#/$defs/Badge"
+          },
+          "maxItems": 8,
+          "title": "Badges",
+          "type": "array"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "description": "Row field path, e.g. '$.title'.",
+              "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_]*)+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path to a hub_ref, e.g. '$.hub_ref'.",
+          "title": "Link"
+        },
+        "subtitle": {
+          "anyOf": [
+            {
+              "description": "A '$.path' binds a row field; other text is shown as is.",
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtitle"
+        },
+        "title": {
+          "description": "A '$.path' binds a row field; other text is shown as is.",
+          "maxLength": 500,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "Item",
+      "type": "object"
+    },
+    "ListView": {
+      "additionalProperties": false,
+      "properties": {
+        "empty": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text when no rows match.",
+          "title": "Empty"
+        },
+        "item": {
+          "$ref": "#/$defs/Item"
+        },
+        "marks": {
+          "items": {
+            "$ref": "#/$defs/Mark"
+          },
+          "maxItems": 8,
+          "title": "Marks",
+          "type": "array"
+        },
+        "source": {
+          "discriminator": {
+            "mapping": {
+              "roles": "#/$defs/RolesSource",
+              "sessions": "#/$defs/SessionsSource",
+              "subagents": "#/$defs/SubagentsSource",
+              "threads": "#/$defs/ThreadsSource"
+            },
+            "propertyName": "name"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SessionsSource"
+            },
+            {
+              "$ref": "#/$defs/ThreadsSource"
+            },
+            {
+              "$ref": "#/$defs/RolesSource"
+            },
+            {
+              "$ref": "#/$defs/SubagentsSource"
+            }
+          ],
+          "title": "Source"
+        },
+        "type": {
+          "const": "List",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "type",
+        "item"
+      ],
+      "title": "ListView",
+      "type": "object"
+    },
+    "Mark": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "tone": {
+          "default": "warning",
+          "enum": [
+            "neutral",
+            "muted",
+            "info",
+            "success",
+            "warning",
+            "danger"
+          ],
+          "title": "Tone",
+          "type": "string"
+        },
+        "when": {
+          "additionalProperties": true,
+          "description": "JSONLogic subset: one operator per object, e.g. {'==': [{'var': 'kind'}, 'group']}.",
+          "maxProperties": 1,
+          "minProperties": 1,
+          "propertyNames": {
+            "enum": [
+              "var",
+              "==",
+              "!=",
+              "<",
+              "<=",
+              ">",
+              ">=",
+              "and",
+              "or",
+              "!",
+              "in"
+            ]
+          },
+          "title": "When",
+          "type": "object"
+        }
+      },
+      "required": [
+        "when"
+      ],
+      "title": "Mark",
+      "type": "object"
+    },
+    "RolesParams": {
+      "additionalProperties": false,
+      "properties": {
+        "handle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Handle"
+        },
+        "held": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Held"
+        }
+      },
+      "title": "RolesParams",
+      "type": "object"
+    },
+    "RolesSource": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "name": {
+          "const": "roles",
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "default": "-last_event_ts",
+          "pattern": "^-?[a-z_]+$",
+          "title": "Order",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/RolesParams",
+          "default": {
+            "handle": null,
+            "held": null
+          }
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RolesSource",
+      "type": "object"
+    },
+    "SessionsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "archived": {
+          "default": false,
+          "title": "Archived",
+          "type": "boolean"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "kind": {
+          "default": "default",
+          "enum": [
+            "default",
+            "sub_agent",
+            "any"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Search"
+        }
+      },
+      "title": "SessionsParams",
+      "type": "object"
+    },
+    "SessionsSource": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "name": {
+          "const": "sessions",
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "default": "-last_event_ts",
+          "pattern": "^-?[a-z_]+$",
+          "title": "Order",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/SessionsParams",
+          "default": {
+            "archived": false,
+            "host": null,
+            "kind": "default",
+            "project": null,
+            "role": null,
+            "search": null
+          }
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SessionsSource",
+      "type": "object"
+    },
+    "SubagentsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "default": 3,
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "of": {
+          "description": "Hub session id whose sub-agent tree to list.",
+          "title": "Of",
+          "type": "string"
+        }
+      },
+      "required": [
+        "of"
+      ],
+      "title": "SubagentsParams",
+      "type": "object"
+    },
+    "SubagentsSource": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "name": {
+          "const": "subagents",
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "default": "-last_event_ts",
+          "pattern": "^-?[a-z_]+$",
+          "title": "Order",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/SubagentsParams"
+        }
+      },
+      "required": [
+        "name",
+        "params"
+      ],
+      "title": "SubagentsSource",
+      "type": "object"
+    },
+    "TableView": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/Column"
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "empty": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text when no rows match.",
+          "title": "Empty"
+        },
+        "marks": {
+          "items": {
+            "$ref": "#/$defs/Mark"
+          },
+          "maxItems": 8,
+          "title": "Marks",
+          "type": "array"
+        },
+        "source": {
+          "discriminator": {
+            "mapping": {
+              "roles": "#/$defs/RolesSource",
+              "sessions": "#/$defs/SessionsSource",
+              "subagents": "#/$defs/SubagentsSource",
+              "threads": "#/$defs/ThreadsSource"
+            },
+            "propertyName": "name"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SessionsSource"
+            },
+            {
+              "$ref": "#/$defs/ThreadsSource"
+            },
+            {
+              "$ref": "#/$defs/RolesSource"
+            },
+            {
+              "$ref": "#/$defs/SubagentsSource"
+            }
+          ],
+          "title": "Source"
+        },
+        "type": {
+          "const": "Table",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "type",
+        "columns"
+      ],
+      "title": "TableView",
+      "type": "object"
+    },
+    "ThreadsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "group",
+                "role_thread"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "member": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Member"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        }
+      },
+      "title": "ThreadsParams",
+      "type": "object"
+    },
+    "ThreadsSource": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "name": {
+          "const": "threads",
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "default": "-last_event_ts",
+          "pattern": "^-?[a-z_]+$",
+          "title": "Order",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/ThreadsParams",
+          "default": {
+            "kind": null,
+            "member": null,
+            "state": null
+          }
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ThreadsSource",
+      "type": "object"
+    },
+    "TreeView": {
+      "additionalProperties": false,
+      "properties": {
+        "edge": {
+          "const": "spawned_by",
+          "default": "spawned_by",
+          "title": "Edge",
+          "type": "string"
+        },
+        "empty": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text when no rows match.",
+          "title": "Empty"
+        },
+        "item": {
+          "$ref": "#/$defs/Item"
+        },
+        "marks": {
+          "items": {
+            "$ref": "#/$defs/Mark"
+          },
+          "maxItems": 8,
+          "title": "Marks",
+          "type": "array"
+        },
+        "source": {
+          "discriminator": {
+            "mapping": {
+              "roles": "#/$defs/RolesSource",
+              "sessions": "#/$defs/SessionsSource",
+              "subagents": "#/$defs/SubagentsSource",
+              "threads": "#/$defs/ThreadsSource"
+            },
+            "propertyName": "name"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SessionsSource"
+            },
+            {
+              "$ref": "#/$defs/ThreadsSource"
+            },
+            {
+              "$ref": "#/$defs/RolesSource"
+            },
+            {
+              "$ref": "#/$defs/SubagentsSource"
+            }
+          ],
+          "title": "Source"
+        },
+        "type": {
+          "const": "Tree",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "type",
+        "item"
+      ],
+      "title": "TreeView",
+      "type": "object"
+    }
+  },
+  "$id": "https://omnigent.invalid/views/spec_v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One agent-built view.",
+  "properties": {
+    "spec": {
+      "const": 1,
+      "title": "Spec",
+      "type": "integer"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "view": {
+      "discriminator": {
+        "mapping": {
+          "List": "#/$defs/ListView",
+          "Table": "#/$defs/TableView",
+          "Tree": "#/$defs/TreeView"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ListView"
+        },
+        {
+          "$ref": "#/$defs/TableView"
+        },
+        {
+          "$ref": "#/$defs/TreeView"
+        }
+      ],
+      "title": "View"
+    }
+  },
+  "required": [
+    "spec",
+    "view"
+  ],
+  "title": "Omnigent view spec v1",
+  "type": "object"
+}
