@@ -22,6 +22,7 @@ import functools
 import logging
 import re
 
+from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.db.db_models import LABEL_VALUE_MAX_LEN
 from omnigent.entities import MessageData
 from omnigent.server import reply_classifier, session_live_state
@@ -124,11 +125,18 @@ def _latest_assistant_text(store: ConversationStore, session_id: str) -> str:
     return final.strip()
 
 
+def _is_subagent(labels: dict[str, str]) -> bool:
+    """A native subagent session talks to its parent agent, never to the user."""
+    return labels.get(WRAPPER_LABEL_KEY, "").endswith("-subagent")
+
+
 def set_awaiting_input(store: ConversationStore, session_id: str, reason: str) -> None:
     """Write the awaiting-input reason (empty clears it); unchanged values skip the write."""
     reason = reason[:LABEL_VALUE_MAX_LEN]
     conv = store.get_conversation(session_id)
     if conv is None or conv.labels.get(AWAITING_INPUT_LABEL_KEY, "") == reason:
+        return
+    if reason and _is_subagent(conv.labels):
         return
     store.set_labels(session_id, {AWAITING_INPUT_LABEL_KEY: reason})
 
@@ -185,6 +193,10 @@ def apply_classification(
 
 def refresh_after_turn(store: ConversationStore, session_id: str) -> None:
     """Set or clear the labels from the turn's final assistant message; the answer is consumed."""
+    conv = store.get_conversation(session_id)
+    if conv is not None and _is_subagent(conv.labels):
+        _write(store, session_id, "", "", "")
+        return
     text = _latest_assistant_text(store, session_id)
     if not text or not reply_classifier.enabled():
         _apply_heuristic(store, session_id, text)

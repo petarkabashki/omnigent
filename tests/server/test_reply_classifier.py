@@ -175,6 +175,20 @@ def test_turn_end_waits_for_the_classifier(
     assert store.labels[awaiting_input.AWAITING_ACK_LABEL_KEY] == ""
 
 
+def test_a_subagent_question_never_awaits_the_user(
+    with_key: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submitted: list[str] = []
+    monkeypatch.setattr(reply_classifier, "submit", lambda text, *a, **k: submitted.append(text))
+    store = _turn("Done. Should I land it?")
+    store.labels["omnigent.wrapper"] = "claude-code-native-ui-subagent"
+    store.labels[awaiting_input.AWAITING_INPUT_LABEL_KEY] = "Old question?"
+    awaiting_input.refresh_after_turn(store, "s")  # type: ignore[arg-type]
+    awaiting_input.set_awaiting_input(store, "s", "Permission needed")  # type: ignore[arg-type]
+    assert submitted == []
+    assert store.labels[awaiting_input.AWAITING_INPUT_LABEL_KEY] == ""
+
+
 @pytest.mark.parametrize(
     ("kind", "last", "state", "expected"),
     [
