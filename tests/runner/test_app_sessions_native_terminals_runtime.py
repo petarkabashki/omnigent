@@ -50,8 +50,12 @@ from omnigent.runner.session_init_protocol import (
     RunnerSessionInitEnvelope,
     RunnerSessionInitSnapshot,
 )
+from omnigent.server.role_threads import THREAD_ROLE_LABEL
 from omnigent.spec.types import AgentSpec, ExecutorSpec
-from omnigent.stores.conversation_store import CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY
+from omnigent.stores.conversation_store import (
+    ALIAS_LABEL_KEY,
+    CODEX_NATIVE_COLLABORATION_MODE_LABEL_KEY,
+)
 from omnigent.terminals import TerminalRegistry
 from tests.budgets import budget
 from tests.runner.conftest import (
@@ -3947,6 +3951,92 @@ async def test_codex_child_from_init_envelope_gets_sub_agent_idle_window(
     assert reapable_at(3599.0) == set()
     assert reapable_at(3600.0) == {"conv_child"}
     assert reapable_at(86400.0) == {"conv_top", "conv_child"}
+
+
+@pytest.mark.asyncio
+async def test_thread_session_gets_the_thread_window_and_rereads_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A thread side chat is listed on the thread window; a role taken since then counts."""
+    monkeypatch.delenv("OMNIGENT_NATIVE_PANE_IDLE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("OMNIGENT_THREAD_PANE_IDLE_TIMEOUT_S", raising=False)
+    thread = {THREAD_ROLE_LABEL: "omnigent/Product"}
+    holder = {**thread, ALIAS_LABEL_KEY: "Product"}
+    server_labels = {"conv_thread": dict(thread), "conv_holder": dict(holder)}
+    server_status = {"conv_thread": 200}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        session_id = request.url.path.rsplit("/", 1)[-1]
+        if session_id not in server_labels:
+            return httpx.Response(200, json={})
+        body = {"id": session_id, "agent_id": "ag_worker", "labels": server_labels[session_id]}
+        return httpx.Response(server_status.get(session_id, 200), json=body)
+
+    terminal_registry = TerminalRegistry()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://ap"
+    ) as server_client:
+        app = create_runner_app(
+            process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+            server_client=server_client,
+            terminal_registry=terminal_registry,
+            native_pane_idle_timeout_s=3600,
+        )
+        resource_registry = app.state.session_resource_registry
+        async with _runner_client(app) as client:
+            for session_id, labels in (("conv_thread", thread), ("conv_holder", holder)):
+                envelope = RunnerSessionInitEnvelope(
+                    protocol_version=SESSION_INIT_PROTOCOL_VERSION,
+                    server_version="0.16.0",
+                    session_id=session_id,
+                    agent_id="ag_worker",
+                    snapshot=RunnerSessionInitSnapshot(created_at=1, updated_at=1, labels=labels),
+                )
+                response = await client.post(
+                    "/v1/sessions",
+                    json={
+                        "session_id": session_id,
+                        "agent_id": "ag_worker",
+                        SESSION_INIT_PAYLOAD_KEY: envelope.model_dump(mode="json"),
+                    },
+                )
+                assert response.status_code == 201, response.text
+                terminal_registry._by_conversation[session_id] = {
+                    ("codex", "main"): make_test_terminal_instance(
+                        "codex", "main", tmp_path / session_id
+                    )
+                }
+        monkeypatch.setattr(
+            resource_registry, "terminal_resource_role", lambda *_args: CODEX_NATIVE_TERMINAL_ROLE
+        )
+        reaper = app.state.native_pane_reaper
+
+        def thread_flags() -> dict[str, bool]:
+            return {
+                pane.conversation_id: pane.thread_session for pane in reaper._list_native_panes()
+            }
+
+        panes = reaper._list_native_panes()
+
+        def reapable_at(now: float) -> set[str]:
+            return {pane.conversation_id for pane in reaper._classify(now, panes, set())}
+
+        assert reapable_at(0.0) == set()
+        assert reapable_at(1800.0) == {"conv_thread"}
+        assert reapable_at(3600.0) == {"conv_thread", "conv_holder"}
+        thread_pane = next(pane for pane in panes if pane.conversation_id == "conv_thread")
+        assert await reaper._still_thread_session(thread_pane) is True
+        assert thread_flags() == {"conv_thread": True, "conv_holder": False}
+
+        # The side chat took a role: the re-read sees it, and the cached labels follow.
+        server_labels["conv_thread"] = {**holder}
+        assert await reaper._still_thread_session(thread_pane) is False
+        assert thread_flags() == {"conv_thread": False, "conv_holder": False}
+
+        # A failed re-read never reaps early.
+        server_labels["conv_thread"] = dict(thread)
+        server_status["conv_thread"] = 500
+        assert await reaper._still_thread_session(thread_pane) is False
 
 
 @pytest.mark.asyncio

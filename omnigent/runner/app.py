@@ -2349,14 +2349,15 @@ def create_runner_app(
         _search_fs_registries.move_to_end(key)
         return registry
 
-    async def _session_snapshot(session_id: str) -> _SessionSnapshot:
-        cached = _session_snapshot_cache.get(session_id)
+    async def _session_snapshot(session_id: str, *, fresh: bool = False) -> _SessionSnapshot:
+        """``fresh`` reads the server and leaves the cache untouched."""
+        cached = None if fresh else _session_snapshot_cache.get(session_id)
         if cached is not None:
             return cached
         lock = _session_snapshot_locks.setdefault(session_id, asyncio.Lock())
         generation = _session_cache_generation(session_id)
         async with lock:
-            cached = _session_snapshot_cache.get(session_id)
+            cached = None if fresh else _session_snapshot_cache.get(session_id)
             if cached is not None:
                 return cached
             status_code: int | None = None
@@ -2409,7 +2410,7 @@ def create_runner_app(
                 wrapper_label=wrapper_label,
                 labels=labels,
             )
-            if snapshot.ok and snapshot.agent_id is not None:
+            if snapshot.ok and snapshot.agent_id is not None and not fresh:
                 if _session_cache_generation_is_current(session_id, generation):
                     _session_snapshot_cache[session_id] = snapshot
             return snapshot
@@ -8992,6 +8993,7 @@ def create_runner_app(
             return panes
 
         def _is_thread_session(snapshot: _SessionSnapshot | None) -> bool:
+            # Labels cached before a role release still show the alias: the safe, longer window.
             return (
                 snapshot is not None
                 and snapshot.parent_session_id is None
@@ -9000,9 +9002,15 @@ def create_runner_app(
 
         async def _still_thread_session(pane: PaneRef) -> bool:
             """Re-read the session's labels: a role taken since the pane started counts."""
-            _session_snapshot_cache.pop(pane.conversation_id, None)
-            snapshot = await _session_snapshot(pane.conversation_id)
-            return snapshot.ok and _is_thread_session(snapshot)
+            snapshot = await _session_snapshot(pane.conversation_id, fresh=True)
+            if not snapshot.ok:
+                return False
+            cached = _session_snapshot_cache.get(pane.conversation_id)
+            if cached is not None:
+                _session_snapshot_cache[pane.conversation_id] = dataclasses.replace(
+                    cached, labels=snapshot.labels
+                )
+            return _is_thread_session(snapshot)
 
         async def _server_confirms_turn_in_flight(conv_id: str) -> bool:
             """Whether the server still records the session's turn as in flight.
