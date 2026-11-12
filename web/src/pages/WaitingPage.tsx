@@ -47,46 +47,49 @@ export function WaitingPage() {
       {data && sessions.length === 0 && (
         <p className="text-sm text-muted-foreground">No session is waiting on anything.</p>
       )}
-      {sessions.map((session) => (
-        <section
-          key={session.session_id}
-          data-testid="waiting-session"
-          className="rounded-lg border border-border p-3"
-        >
-          <div className="flex items-center gap-2">
-            <StateDot tone={session.status === "waiting" ? "amber" : "blue"} />
-            <button
-              type="button"
-              className="truncate text-left text-ui font-medium hover:underline"
-              onClick={() => actions.onOpen(session.session_id)}
-            >
-              {sessionContext(session) && (
-                <span data-testid="waiting-session-context" className="text-muted-foreground">
-                  {sessionContext(session)} ·{" "}
-                </span>
-              )}
-              {session.title || session.session_id}
-            </button>
-            {session.status_since != null &&
-              (session.status === "running" || session.status === "waiting") && (
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                  {waitingChipLabel(session.status, session.status_since, session.waiting_reason)}
-                </span>
-              )}
-          </div>
-          {session.items.length > 0 && (
-            <ul className="mt-1 divide-y divide-border">
-              {session.items.map((item, index) => (
-                <WaitingItemRow
-                  key={`${item.kind}-${item.ref ?? index}`}
-                  item={item}
-                  {...actions}
-                />
-              ))}
-            </ul>
-          )}
-        </section>
-      ))}
+      {sessions.map((session) => {
+        const context = sessionContext(session);
+        return (
+          <section
+            key={session.session_id}
+            data-testid="waiting-session"
+            className="rounded-lg border border-border p-3"
+          >
+            <div className="flex items-center gap-2">
+              <StateDot tone={session.status === "waiting" ? "amber" : "blue"} />
+              <button
+                type="button"
+                className="truncate text-left text-ui font-medium hover:underline"
+                onClick={() => actions.onOpen(session.session_id)}
+              >
+                {context && (
+                  <span data-testid="waiting-session-context" className="text-muted-foreground">
+                    {context} ·{" "}
+                  </span>
+                )}
+                {session.title || session.session_id}
+              </button>
+              {session.status_since != null &&
+                (session.status === "running" || session.status === "waiting") && (
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                    {waitingChipLabel(session.status, session.status_since, session.waiting_reason)}
+                  </span>
+                )}
+            </div>
+            {session.items.length > 0 && (
+              <ul className="mt-1 divide-y divide-border">
+                {session.items.map((item, index) => (
+                  <WaitingItemRow
+                    key={`${item.kind}-${item.ref ?? index}`}
+                    item={item}
+                    {...actions}
+                  />
+                ))}
+              </ul>
+            )}
+          </section>
+        );
+      })}
     </main>
   );
 }

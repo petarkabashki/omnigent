@@ -76,7 +76,7 @@ export function countOwnerItems(sessions: readonly SessionWaiting[]): number {
   return sessions.reduce((sum, s) => sum + s.items.filter((i) => i.needs_owner).length, 0);
 }
 
-/** What tells same-titled sessions apart: the role handle, else the project. */
+/** What tells same-titled sessions apart: the role handle (even a released one), else the project. */
 export function sessionContext(session: SessionWaiting): string | null {
   if (session.handle) return session.holds_role ? session.handle : `formerly ${session.handle}`;
   return session.project || null;
