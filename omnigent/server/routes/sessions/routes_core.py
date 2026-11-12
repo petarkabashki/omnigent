@@ -2293,6 +2293,16 @@ def register_core_routes(
             )
         return source, holder, counterpart
 
+    def _waiting_for_holder_by_sender() -> dict[str, dict[str, tuple[int, int]]]:
+        """Role mail waiting for a holder; empty when the lookup fails, like other sections."""
+        from omnigent.server.role_mail import waiting_by_sender
+
+        try:
+            return waiting_by_sender(conversation_store, project_store)
+        except Exception:
+            _logger.warning("Failed to read role mail waiting for a holder", exc_info=True)
+            return {}
+
     def _waiting_payload(
         conv: Conversation,
         liveness: SessionLiveness | None,
@@ -2332,12 +2342,11 @@ def register_core_routes(
     async def list_waiting_sessions(request: Request) -> dict[str, Any]:
         """What each of the caller's busy or blocked sessions is waiting on."""
         from omnigent.runtime import pending_elicitations
-        from omnigent.server.role_mail import waiting_by_sender
         from omnigent.server.role_threads import THREAD_ROLE_LABEL
 
         user_id = _get_user_id(request, auth_provider)
         # One scan for every sender; only the caller's own sessions below read from it.
-        held = await asyncio.to_thread(waiting_by_sender, conversation_store, project_store)
+        held = await asyncio.to_thread(_waiting_for_holder_by_sender)
 
         def _collect() -> list[Conversation]:
             candidates: list[Conversation] = []
@@ -2395,9 +2404,7 @@ def register_core_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
         if conv is None:
             raise _session_not_found()
-        from omnigent.server.role_mail import waiting_by_sender
-
-        held = await asyncio.to_thread(waiting_by_sender, conversation_store, project_store)
+        held = await asyncio.to_thread(_waiting_for_holder_by_sender)
         return await asyncio.to_thread(
             _waiting_payload, conv, liveness, user_id, held.get(conv.id)
         )
