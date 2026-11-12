@@ -63,3 +63,52 @@ class UiOpenFileTool(Tool):
                 "parameters": OpenFileRequest.model_json_schema(),
             },
         }
+
+
+class UiRenderTool(Tool):
+    """Schema-only tool; the runner validates the spec through ``/v1/views``."""
+
+    @classmethod
+    def name(cls) -> str:
+        """Return the tool name."""
+        return "ui_render"
+
+    @classmethod
+    def description(cls) -> str:
+        """Return the agent-facing contract."""
+        return (
+            "Show the user a live view of hub data (sessions, threads, roles or a sub-agent "
+            "tree) as a List, Table or Tree in this conversation. Pass a view spec v1: "
+            '{"spec": 1, "title": "...", "view": {"type": "Table", "source": {"name": '
+            '"sessions", "params": {"archived": false}}, "columns": [{"header": "Session", '
+            '"value": "$.title", "link": "$.hub_ref"}]}}. Bind row fields with "$.field"; '
+            'decide badges and marks with JSONLogic rules such as {"==": [{"var": "stopped"}, '
+            "true]}. The view is resolved for the user who reads it, so it stays current. "
+            "Returns the normalized spec and how many rows it matches now, or why it is invalid."
+        )
+
+    def get_schema(self) -> dict[str, Any]:
+        """Return the OpenAI-format tool schema; the full spec schema is enforced server-side."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "spec": {
+                            "type": "object",
+                            "description": (
+                                "View spec v1 (omnigent/views/spec_v1.schema.json): spec, "
+                                "title, view{type List|Table|Tree, source{name sessions|"
+                                "threads|roles|subagents, params, order, limit}, item or "
+                                "columns, marks, empty}."
+                            ),
+                        }
+                    },
+                    "required": ["spec"],
+                    "additionalProperties": False,
+                },
+            },
+        }

@@ -406,6 +406,7 @@ _AGY_ENABLED_TOOLS = [
     "sys_thread_list",
     "sys_thread_note",
     "sys_thread_post",
+    "ui_render",
     "update_comment",
 ]
 

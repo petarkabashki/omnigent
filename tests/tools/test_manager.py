@@ -78,6 +78,7 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         # peer_session_messaging; the server enforces its own flags.
         "sys_session_message",
         "ui_open_file",
+        "ui_render",
         # Read-only agent discovery tools are likewise always available
         # (global, permission-bounded reads of any accessible session's
         # agent / bundle).

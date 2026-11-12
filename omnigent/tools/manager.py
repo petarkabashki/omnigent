@@ -524,10 +524,11 @@ class ToolManager:
 
     def _register_session_tools(self) -> None:
         """Register framework-owned tools for the current session."""
-        from omnigent.tools.builtins.ui import UiOpenFileTool
+        from omnigent.tools.builtins.ui import UiOpenFileTool, UiRenderTool
 
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
         self._tools[UiOpenFileTool.name()] = UiOpenFileTool()
+        self._tools[UiRenderTool.name()] = UiRenderTool()
 
     def _register_agent_mgmt_tools(self) -> None:
         """
