@@ -35,6 +35,18 @@ examples, including ownership and configuration limits.
   fixtures that should apply to that directory; avoid widening an autouse
   fixture's scope just to share it.
 
+## Write-hook coverage
+
+Writes to the tables in `omnigent.db.write_hooks.OBSERVED_TABLES` must be
+visible to the write observer. ORM flushes and `session.execute` of
+insert/update/delete statements are noted automatically; raw SQL text and
+writes on a bare connection need an explicit `write_hooks.note(...)` or
+`note_matching(...)` in the same transaction. Store test modules opt into the
+guard in `tests/stores/write_hook_guard.py` (see its docstring); it fails a
+test that commits an unnoted write and names the table and call site. Its
+allowlist (`ALLOWED_UNHOOKED`) lists migrations and the stores not hooked yet.
+Writes made directly by test code to seed state are allowed.
+
 ## Moving or splitting existing tests
 
 Preserve the execution lane and inherited fixtures. Check imports (including

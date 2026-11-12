@@ -27,6 +27,9 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+from tests.stores.write_hook_guard import write_hook_guard  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("write_hook_guard")
 
 
 @pytest.fixture()

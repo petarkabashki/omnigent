@@ -1175,7 +1175,8 @@ class SqlConversationItem(ConversationBase):
     :param id: Unique item identifier with a type-based prefix,
         e.g. ``"msg_a1b2c3..."``, ``"fc_d4e5f6..."``.
     :param conversation_id: Foreign key to
-        :class:`SqlConversation.id`. Cascades on delete.
+        :class:`SqlConversation.id`. No DB foreign key; the store
+        deletes items with their conversation.
     :param response_id: The task/response ID this item belongs to,
         e.g. ``"resp_d8e9f0a1..."``.
     :param created_at: Unix epoch seconds when the item was created.
@@ -1292,7 +1293,7 @@ class SqlConversationLabel(ConversationBase):
 
     :param conversation_id: The conversation this label belongs
         to. Composite PK member. Deleted with the conversation
-        via ``ON DELETE CASCADE``.
+        by the store (no DB foreign key).
     :param key: The label key, e.g. ``"integrity"``,
         ``"sensitivity"``. Composite PK member.
     :param value: The label value as a string, e.g. ``"0"``,
@@ -1441,8 +1442,8 @@ class SqlPolicy(OmnigentBase):
         ``ix_policies_name_cksum``. Stamped on INSERT by a column
         default; recomputed by the store on rename.
     :param session_id: FK to ``conversations.id``. ``None`` for
-        server-wide default policies. ``ON DELETE CASCADE`` so
-        removing a session cleans up its policies.
+        server-wide default policies. No DB foreign key; the
+        conversation store deletes a session's policies with it.
     :param created_at: Unix epoch seconds at row creation.
     :param updated_at: Unix epoch seconds of the last write,
         ``None`` if the row has never been updated.
