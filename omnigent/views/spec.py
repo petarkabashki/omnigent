@@ -74,10 +74,12 @@ class _Strict(BaseModel):
 
 
 class SessionsParams(_Strict):
-    project: str | None = None
-    kind: Literal["default", "sub_agent", "any"] = "default"
-    search: str | None = None
-    archived: bool = False
+    """Filters as in agentic_base.query; ``None`` means any."""
+
+    project: str | None = Field(default=None, description="Project path or id.")
+    kind: Literal["session", "subagent"] | None = None
+    search: str | None = Field(default=None, description="Case-insensitive title substring.")
+    archived: bool | None = Field(default=None, description="Matches the row's 'stopped'.")
     host: str | None = None
     role: str | None = None
 
@@ -95,7 +97,7 @@ class RolesParams(_Strict):
 
 class SubagentsParams(_Strict):
     of: str = Field(min_length=1, description="Hub session id whose sub-agent tree to list.")
-    depth: int = Field(default=3, ge=1, le=5)
+    depth: int = Field(default=1, ge=1, le=5)
 
 
 def _order_field(*fields: str) -> Any:
@@ -227,14 +229,24 @@ class ViewSpec(_Strict):
 SPEC_ADAPTER = TypeAdapter(ViewSpec)
 
 
+def _refuse_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def parse_spec(raw: Any) -> ViewSpec:
-    """Validate a spec given as a JSON string or an already decoded object."""
-    if isinstance(raw, str):
-        if len(raw.encode()) > MAX_SPEC_BYTES:
+    """Validate a spec given as a JSON string or an already decoded object.
+
+    Every failure is a ``ValueError`` (pydantic's ``ValidationError`` included).
+    """
+    try:
+        if isinstance(raw, str):
+            if len(raw.encode()) > MAX_SPEC_BYTES:
+                raise ValueError(f"spec is larger than {MAX_SPEC_BYTES} bytes")
+            raw = json.loads(raw, parse_constant=_refuse_constant)
+        elif len(json.dumps(raw, ensure_ascii=False, allow_nan=False).encode()) > MAX_SPEC_BYTES:
             raise ValueError(f"spec is larger than {MAX_SPEC_BYTES} bytes")
-        raw = json.loads(raw)
-    elif len(json.dumps(raw, ensure_ascii=False).encode()) > MAX_SPEC_BYTES:
-        raise ValueError(f"spec is larger than {MAX_SPEC_BYTES} bytes")
+    except RecursionError as error:
+        raise ValueError("spec is nested too deeply") from error
     return SPEC_ADAPTER.validate_python(raw)
 
 
@@ -278,6 +290,11 @@ def json_schema() -> dict[str, Any]:
     schema.setdefault("$defs", {}).update(_rule_defs())
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = "https://omnigent.invalid/views/spec_v1.schema.json"
+    schema["$comment"] = (
+        "The hub's parse_spec is the authority and is stricter than this schema: rules nest at"
+        " most 16 deep, integers must be JSON integers (5.0 is refused), and a path or var name"
+        " may not end in a newline (Python's re lets '$' match before one)."
+    )
     return schema
 
 

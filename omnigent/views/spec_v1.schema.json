@@ -1,4 +1,5 @@
 {
+  "$comment": "The hub's parse_spec is the authority and is stricter than this schema: rules nest at most 16 deep, integers must be JSON integers (5.0 is refused), and a path or var name may not end in a newline (Python's re lets '$' match before one).",
   "$defs": {
     "Badge": {
       "additionalProperties": false,
@@ -387,11 +388,20 @@
     },
     "SessionsParams": {
       "additionalProperties": false,
+      "description": "Filters as in agentic_base.query; ``None`` means any.",
       "properties": {
         "archived": {
-          "default": false,
-          "title": "Archived",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matches the row's 'stopped'.",
+          "title": "Archived"
         },
         "host": {
           "anyOf": [
@@ -406,14 +416,20 @@
           "title": "Host"
         },
         "kind": {
-          "default": "default",
-          "enum": [
-            "default",
-            "sub_agent",
-            "any"
+          "anyOf": [
+            {
+              "enum": [
+                "session",
+                "subagent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Kind",
-          "type": "string"
+          "default": null,
+          "title": "Kind"
         },
         "project": {
           "anyOf": [
@@ -425,6 +441,7 @@
             }
           ],
           "default": null,
+          "description": "Project path or id.",
           "title": "Project"
         },
         "role": {
@@ -449,6 +466,7 @@
             }
           ],
           "default": null,
+          "description": "Case-insensitive title substring.",
           "title": "Search"
         }
       },
@@ -500,9 +518,9 @@
         "params": {
           "$ref": "#/$defs/SessionsParams",
           "default": {
-            "archived": false,
+            "archived": null,
             "host": null,
-            "kind": "default",
+            "kind": null,
             "project": null,
             "role": null,
             "search": null
@@ -519,7 +537,7 @@
       "additionalProperties": false,
       "properties": {
         "depth": {
-          "default": 3,
+          "default": 1,
           "maximum": 5,
           "minimum": 1,
           "title": "Depth",

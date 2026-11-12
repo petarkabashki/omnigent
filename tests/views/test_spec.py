@@ -88,3 +88,24 @@ def test_invalid_specs_fail_both_the_models_and_the_schema(
 def test_an_oversized_spec_is_refused_before_parsing() -> None:
     with pytest.raises(ValueError, match="larger than"):
         parse_spec("x" * (MAX_SPEC_BYTES + 1))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[" * 60000,
+        '{"a":' * 12000,
+        '{"spec": 1, "view": {"type": "List", "source": {"name": "roles"}, "item": {"title": "x"},'
+        ' "marks": [{"when": {"<": [{"var": "id"}, NaN]}}]}}',
+    ],
+    ids=["deep-array", "deep-object", "nan"],
+)
+def test_malformed_json_is_a_value_error(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_spec(raw)
+
+
+def test_a_decoded_spec_with_nan_is_refused() -> None:
+    spec = _list_view(marks=[{"when": {"<": [{"var": "id"}, float("nan")]}}])
+    with pytest.raises(ValueError):
+        parse_spec(spec)
