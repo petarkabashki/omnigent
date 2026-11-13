@@ -2298,6 +2298,30 @@ async def test_agent_take_of_a_held_role_fails_before_asking_the_owner(
     assert owner_verdicts["asked"] == [] and _alias_of(db_uri, source) is None
 
 
+@pytest.mark.parametrize(
+    ("caller", "status"), [("child", 400), ("closed", 403), ("archived", 403)]
+)
+async def test_agent_take_from_an_ineligible_session_fails_before_asking_the_owner(
+    auth_client, peers, db_uri, owner_verdicts, caller, status
+):
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    if caller == "child":
+        parent = store.get_conversation(source["id"])
+        child = store.create_conversation(
+            agent_id=parent.agent_id, parent_conversation_id=source["id"]
+        )
+        auth_client.headers.update(_bind_runner(db_uri, child.id))
+        source = {"id": child.id}
+    elif caller == "closed":
+        store.set_labels(source["id"], {"omnigent.closed": "true"})
+    else:
+        store.update_conversation_with_changes(source["id"], archived=True)
+    refused = await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    assert refused["error"].endswith(f"returned {status}"), refused
+    assert owner_verdicts["asked"] == [] and _alias_of(db_uri, source) is None
+
+
 async def test_sys_role_list_reports_holder_runner_state(auth_client, peers, db_uri):
     source, holder, _ = peers
     await _hold(auth_client, holder, "Keeper")

@@ -930,3 +930,17 @@ def test_tree_and_legacy_flat_match_uses_the_exact_text(
         f"'a/b' matches both project a/b (tree, id {child}) and legacy project 'a/b' "
         f"(id {legacy}). Run `omnigent projects migrate-slashes --dry-run`."
     )
+
+
+@pytest.mark.parametrize(
+    ("last_seen", "expected"),
+    [
+        (None, "runner offline, runner last seen not recorded, session last active 5m ago"),
+        (700, "runner offline, runner last seen 5m ago, session last active 5m ago"),
+    ],
+)
+def test_offline_holder_text_separates_runner_and_session_times(last_seen, expected):
+    from omnigent.server.session_aliases import HolderStatus, _holder_state_text
+
+    status = HolderStatus(runner_online=False, runner_last_seen=last_seen, last_activity_at=700)
+    assert _holder_state_text(status, now=1000) == expected

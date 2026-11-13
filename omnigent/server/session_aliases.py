@@ -365,7 +365,7 @@ def _ago(epoch: int | None, now: float) -> str | None:
 
 
 def _holder_state_text(status: HolderStatus | None, now: float) -> str | None:
-    """``runner online`` / ``runner offline, last seen 3h ago``; ``None`` when unknown."""
+    """``runner online`` / ``runner offline, runner last seen 3h ago``; ``None`` when unknown."""
     if status is None:
         return None
     if status.runner_online:
@@ -375,8 +375,11 @@ def _holder_state_text(status: HolderStatus | None, now: float) -> str | None:
     text = "runner offline" if status.runner_online is False else "runner state unknown"
     if seen:
         text += f", runner last seen {seen}"
+    elif status.runner_online is False:
+        # A deregistered runner keeps no last-seen time.
+        text += ", runner last seen not recorded"
     if active:
-        text += f", last active {active}"
+        text += f", session last active {active}"
     return text
 
 
@@ -630,6 +633,14 @@ def require_role_takeable(
     Read-only; :func:`take_role` still decides under the store's CAS.
     """
     value = validate_alias(alias)
+    if session.parent_conversation_id is not None:
+        raise OmnigentError(
+            "Only top-level sessions can have an alias", code=ErrorCode.INVALID_INPUT
+        )
+    if not _is_live(session):
+        raise OmnigentError(
+            f"Session {session.id} is closed or archived", code=ErrorCode.INVALID_INPUT
+        )
     namespace = namespace_for_session(session, projects, user_id)
     roles = _role_store(projects)
     if roles is None or projects is None or not _has_roles(namespace):
