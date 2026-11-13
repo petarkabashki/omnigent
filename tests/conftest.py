@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import pwd
 import shutil
 import sys
 import tempfile
@@ -340,6 +341,24 @@ def short_tmp_dir() -> Generator[Path, None, None]:
     if len(os.fsencode(path)) + 16 > RUNTIME_PARENT_MAX:
         shutil.rmtree(path, ignore_errors=True)
         pytest.skip(f"no temp dir short enough for a runtime parent ({path.parent})")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def outside_home_tmp_dir() -> Generator[Path, None, None]:
+    """A temp dir outside the real home, so upward config walks never reach ``~``."""
+    try:
+        path = Path(tempfile.mkdtemp(prefix="oh-", dir="/tmp"))
+    except OSError:
+        path = Path(tempfile.mkdtemp(prefix="oh-"))
+    path = Path(os.path.realpath(path))
+    real_home = Path(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+    if real_home == path or real_home in path.parents:
+        shutil.rmtree(path, ignore_errors=True)
+        pytest.fail(f"no temp dir outside the real home ({path.parent} is under {real_home})")
     try:
         yield path
     finally:

@@ -110,17 +110,17 @@ def _real_env_supports_chdir() -> bool:
 
 
 @functools.cache
-def _real_env_is_gnu() -> bool:
-    """Return whether ``/usr/bin/env`` is GNU's; uutils (Ubuntu 26.04) differs in edge cases."""
+def _real_env_is_uutils() -> bool:
+    """Return whether ``/usr/bin/env`` is uutils (Ubuntu 26.04), which departs from GNU."""
     probe = subprocess.run(
         ["/usr/bin/env", "--version"], capture_output=True, text=True, check=False
     )
-    return "GNU coreutils" in probe.stdout
+    return "uutils" in probe.stdout.lower()
 
 
 # Rows where uutils env 0.10 departs from GNU, which the model follows.
 _GNU_ENV_ONLY = pytest.mark.skipif(
-    "not _real_env_is_gnu()", reason="uutils env differs from GNU here"
+    "_real_env_is_uutils()", reason="uutils env differs from GNU here"
 )
 
 

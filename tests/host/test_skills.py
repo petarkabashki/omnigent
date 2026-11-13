@@ -65,9 +65,9 @@ def _response(bundle: bytes, version: str = "1") -> httpx.Response:
 
 
 @pytest.fixture
-def tmp_path(short_tmp_dir: Path) -> Path:
-    """A workspace under /tmp: Claude's skill walk climbs to /, past any real ~/.claude."""
-    return short_tmp_dir
+def tmp_path(outside_home_tmp_dir: Path) -> Path:
+    """A workspace outside home: Claude's skill walk climbs to /, past any real ~/.claude."""
+    return outside_home_tmp_dir
 
 
 @pytest.fixture(autouse=True)
