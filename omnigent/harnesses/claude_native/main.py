@@ -1074,7 +1074,8 @@ def _claude_model_probe_invocation(
         claude_config, extra_args, stream_input=stream_input
     )
     env = dict(os.environ)
-    env.update(build_native_claude_terminal_env(claude_config))
+    # The probe runs from home, so bound Claude Code's walk above it too.
+    env.update(build_native_claude_terminal_env(claude_config, workspace=Path.home()))
     env.update(
         {
             "DISABLE_TELEMETRY": "1",

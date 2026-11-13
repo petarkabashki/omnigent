@@ -54,6 +54,25 @@ def test_model_probe_uses_configured_auth_helper(
         assert json.loads(args[args.index("--settings") + 1])["apiKeyHelper"] == helper
 
 
+def test_model_probe_skips_untrusted_folders_above_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".claude" / "skills" / "planted").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("CLAUDE_CODE_AUTOMOUNT_ROOTS", raising=False)
+    monkeypatch.setattr(
+        "omnigent.claude_launcher.resolve_claude_launch", lambda command, args: (command, args)
+    )
+
+    _, _, env = claude_native._claude_model_probe_invocation(None)
+
+    skipped = env["CLAUDE_CODE_AUTOMOUNT_ROOTS"].split(":")
+    assert str(tmp_path.resolve()) in skipped
+    assert str(home.resolve()) not in skipped
+
+
 @pytest.mark.posix_only
 @pytest.mark.parametrize("previous_bare_catalog", [False, True], ids=["empty-store", "bare-cache"])
 async def test_catalog_runs_wrapper_bootstrap_before_discovery(
