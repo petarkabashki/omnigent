@@ -325,6 +325,28 @@ def _no_workspace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def short_tmp_dir() -> Generator[Path, None, None]:
+    """A temp dir short enough for a runtime parent under it, even when TMPDIR is long.
+
+    Prefers /tmp, as the harness parent above does; some sandboxes allow only TMPDIR.
+    """
+    try:
+        path = Path(tempfile.mkdtemp(prefix="rp-", dir="/tmp"))
+    except OSError:
+        path = Path(tempfile.mkdtemp(prefix="rp-"))
+    from omnigent.runtime.harnesses.paths import RUNTIME_PARENT_MAX
+
+    # Room for a child such as ``/omnigent-<uid>`` that tests use as the parent.
+    if len(os.fsencode(path)) + 16 > RUNTIME_PARENT_MAX:
+        shutil.rmtree(path, ignore_errors=True)
+        pytest.skip(f"no temp dir short enough for a runtime parent ({path.parent})")
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
 def frozen_recurrence_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a slow runner from tripping the RRULE search's CPU-time limit.
 

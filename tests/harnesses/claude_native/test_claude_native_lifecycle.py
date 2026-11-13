@@ -473,11 +473,11 @@ def test_lifecycle_reader_rejects_linked_nonregular_and_oversize_input(
 
 
 def test_generated_session_end_command_records_evidence_in_an_isolated_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, short_tmp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The hook child resolves the root from the pinned runtime parent, so all three move together.
-    runtime_parent = tmp_path / f"omnigent-{stable_user_id()}"
-    monkeypatch.setattr(bridge, "_TRUSTED_PARENT", tmp_path)
+    runtime_parent = short_tmp_dir / f"omnigent-{stable_user_id()}"
+    monkeypatch.setattr(bridge, "_TRUSTED_PARENT", short_tmp_dir)
     monkeypatch.setattr(bridge, "_BRIDGE_ROOT_PARENT", runtime_parent)
     monkeypatch.setattr(bridge, "_BRIDGE_ROOT", runtime_parent / "claude-native")
     directory = bridge.prepare_bridge_dir("synthetic-session", workspace=tmp_path)

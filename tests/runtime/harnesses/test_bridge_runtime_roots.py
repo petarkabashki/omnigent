@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -34,16 +32,6 @@ _CREATE_SESSION_DIR = {
 }
 
 
-@pytest.fixture
-def short_dir() -> Iterator[Path]:
-    """A dir short enough that a parent below it fits the socket limit."""
-    path = Path(tempfile.mkdtemp(prefix="rp-"))
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
-
-
 def _child_env(**overrides: str | None) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("OMNIGENT_")}
     for key, value in overrides.items():
@@ -63,10 +51,10 @@ def _run_python(script: str, env: dict[str, str]) -> str:
 
 
 @pytest.mark.parametrize("harness", sorted(_CREATE_SESSION_DIR))
-def test_bridge_dirs_land_under_the_configured_parent(harness: str, short_dir: Path) -> None:
-    system_tmp = short_dir / "sys"
+def test_bridge_dirs_land_under_the_configured_parent(harness: str, short_tmp_dir: Path) -> None:
+    system_tmp = short_tmp_dir / "sys"
     system_tmp.mkdir()
-    parent = short_dir / "rp"
+    parent = short_tmp_dir / "rp"
     script = (
         f"from omnigent.harnesses.{harness}_native import bridge as b\n"
         f"{_CREATE_SESSION_DIR[harness]}\n"
@@ -95,13 +83,13 @@ def test_bridge_roots_default_to_the_per_user_tmp_dir() -> None:
 
 
 def test_claude_hooks_and_serve_mcp_agree_with_the_runner_root(
-    short_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    short_tmp_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Children resolve the runner's root even when they inherit another parent."""
-    runner_parent = short_dir / "runner"
+    runner_parent = short_tmp_dir / "runner"
     monkeypatch.setattr(claude_bridge, "_BRIDGE_ROOT_PARENT", runner_parent)
     monkeypatch.setattr(claude_bridge, "_BRIDGE_ROOT", runner_parent / "claude-native")
-    monkeypatch.setattr(claude_bridge, "_TRUSTED_PARENT", short_dir)
+    monkeypatch.setattr(claude_bridge, "_TRUSTED_PARENT", short_tmp_dir)
     bridge_dir = runner_parent / "claude-native" / "sess"
     bridge_dir.mkdir(parents=True)
     args = claude_bridge.augment_claude_args(
@@ -139,11 +127,11 @@ def test_claude_bridge_refuses_a_parent_too_long_for_sockets(
 
 
 def test_claude_bridge_refuses_a_symlinked_parent(
-    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+    short_tmp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    elsewhere = short_dir / "elsewhere"
+    elsewhere = short_tmp_dir / "elsewhere"
     elsewhere.mkdir()
-    parent = short_dir / "rp"
+    parent = short_tmp_dir / "rp"
     parent.symlink_to(elsewhere, target_is_directory=True)
     monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(parent))
 
@@ -153,11 +141,11 @@ def test_claude_bridge_refuses_a_symlinked_parent(
 
 
 def test_claude_sdk_cli_tmpdir_follows_the_parent(
-    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+    short_tmp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(short_dir / "rp"))
-    assert claude_sdk_executor._claude_cli_tmpdir() == short_dir / "rp"
-    assert (short_dir / "rp").is_dir()
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(short_tmp_dir / "rp"))
+    assert claude_sdk_executor._claude_cli_tmpdir() == short_tmp_dir / "rp"
+    assert (short_tmp_dir / "rp").is_dir()
 
     monkeypatch.delenv(HARNESS_TMP_PARENT_ENV_VAR)
     assert claude_sdk_executor._claude_cli_tmpdir() == Path(tempfile.gettempdir())
