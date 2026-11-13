@@ -1104,23 +1104,3 @@ def test_shared_viewer_gets_no_project_private_for_a_foreign_project(db_uri: str
     seen_by_alice = client.get(f"/v1/sessions/{conv_id}", headers=_hdr(ALICE)).json()
     assert seen_by_alice["project_id"] == bob_project["id"]
     assert seen_by_alice.get("project_private") is None
-
-
-def test_shared_viewer_gets_no_project_private_for_a_foreign_project(db_uri: str) -> None:
-    """A non-owner viewer gets None, never False, for another owner's private project."""
-    _ensure_agent(db_uri)
-    conv_id = _seed_owned_session(db_uri, BOB)
-    perms = SqlAlchemyPermissionStore(db_uri)
-    perms.ensure_user(ALICE)
-    perms.grant(ALICE, conv_id, LEVEL_EDIT)
-    client = TestClient(_multi_user_app(db_uri))
-    bob_project = client.post("/v1/projects", json={"name": "Bob"}, headers=_hdr(BOB)).json()
-    client.patch(
-        f"/v1/sessions/{conv_id}", json={"project_id": bob_project["id"]}, headers=_hdr(BOB)
-    )
-    client.patch(f"/v1/projects/{bob_project['id']}", json={"private": True}, headers=_hdr(BOB))
-
-    assert client.get(f"/v1/sessions/{conv_id}", headers=_hdr(BOB)).json()["project_private"]
-    seen_by_alice = client.get(f"/v1/sessions/{conv_id}", headers=_hdr(ALICE)).json()
-    assert seen_by_alice["project_id"] == bob_project["id"]
-    assert seen_by_alice.get("project_private") is None
