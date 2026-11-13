@@ -29,12 +29,16 @@ _PAGE_LIMIT = 200
 
 
 def _thread_sessions(store: ConversationStore) -> list[Any]:
-    """Every session with a thread index, holding a role now or not."""
+    """Every session with a thread index, archived or holding a role now or not."""
     sessions: list[Any] = []
     after: str | None = None
     while True:
         page = store.list_conversations(
-            limit=_PAGE_LIMIT, after=after, has_label=role_threads.THREAD_ROLE_LABEL, kind=None
+            limit=_PAGE_LIMIT,
+            after=after,
+            has_label=role_threads.THREAD_ROLE_LABEL,
+            kind=None,
+            include_archived=True,
         )
         sessions.extend(page.data)
         if not page.has_more:

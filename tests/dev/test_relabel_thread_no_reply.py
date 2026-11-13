@@ -41,7 +41,17 @@ def test_dry_run_apply_and_revert(db_uri: str, tmp_path: Path, capsys) -> None:
         labels = store.get_conversation(holder).labels  # type: ignore[union-attr]
         return labels[role_threads._label(counterpart, "state")]
 
-    expected = {"escalated_rows": 2, "sessions": 1, "left_alone_rows": 2}
+    archived = store.create_conversation(kind="default").id
+    store.set_labels(
+        archived,
+        {
+            role_threads.THREAD_ROLE_LABEL: "Bench",
+            **_row("/Old", state="waiting_on_owner", unread="1"),
+        },
+    )
+    store.update_conversation(archived, archived=True)
+
+    expected = {"escalated_rows": 3, "sessions": 2, "left_alone_rows": 2}
     assert run() == {**expected, "applied": 0}
     assert state("/Escalated") == "waiting_on_owner"  # a dry run writes nothing
 
@@ -55,6 +65,6 @@ def test_dry_run_apply_and_revert(db_uri: str, tmp_path: Path, capsys) -> None:
     ]
 
     store.set_labels(holder, {role_threads._label("/Later", "state"): "blocked"})
-    assert run("--revert", str(backup)) == {"restored_rows": 1, "skipped_rows": 1}
+    assert run("--revert", str(backup)) == {"restored_rows": 2, "skipped_rows": 1}
     assert state("/Escalated") == "waiting_on_owner"
     assert state("/Later") == "blocked"  # a change after the relabel wins
