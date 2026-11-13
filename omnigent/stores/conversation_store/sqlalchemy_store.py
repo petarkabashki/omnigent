@@ -212,17 +212,23 @@ _SEARCH_SCOPES = frozenset({"all", "title", "content"})
 _LIKE_ESCAPE = "/"
 
 
-def _like_contains_pattern(query: str) -> str:
+def _like_contains_pattern(query: str, *, ascii_only: bool = False) -> str:
     """
     Return a lowercase ``LIKE`` pattern matching ``query`` as a literal substring.
 
     :param query: The user's search string, e.g. ``"50%_off"``.
+    :param ascii_only: Fold only ASCII letters, as SQLite's ``lower()`` does to
+        the column, so a same-case non-ASCII query still matches.
     :returns: The pattern with ``%``, ``_`` and the escape character escaped,
         e.g. ``"%50/%/_off%"``; pass ``escape=_LIKE_ESCAPE`` alongside it.
     """
+    folded = (
+        "".join(char.lower() if char.isascii() else char for char in query)
+        if ascii_only
+        else query.lower()
+    )
     escaped = (
-        query.lower()
-        .replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        folded.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
         .replace("%", f"{_LIKE_ESCAPE}%")
         .replace("_", f"{_LIKE_ESCAPE}_")
     )
@@ -6034,7 +6040,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param label_key: Label whose value also counts, or ``None``.
         :returns: A clause for ``list_conversations``; a superset of the display-title match.
         """
-        pattern = _like_contains_pattern(query)
+        pattern = _like_contains_pattern(
+            query, ascii_only=self._conv_engine.dialect.name == "sqlite"
+        )
+        meta_pattern = _like_contains_pattern(
+            query, ascii_only=self._engine.dialect.name == "sqlite"
+        )
         matches: list[ColumnElement[bool]] = [
             SqlConversation.title.ilike(pattern, escape=_LIKE_ESCAPE)
         ]
@@ -6051,7 +6062,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
         named = select(SqlConversationMetadata.id).where(
             SqlConversationMetadata.workspace_id == current_workspace_id(),
-            SqlConversationMetadata.sub_agent_name.ilike(pattern, escape=_LIKE_ESCAPE),
+            SqlConversationMetadata.sub_agent_name.ilike(meta_pattern, escape=_LIKE_ESCAPE),
         )
         if self._conv_engine is self._engine:
             matches.append(SqlConversation.id.in_(named))

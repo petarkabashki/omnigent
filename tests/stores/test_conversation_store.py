@@ -2073,6 +2073,27 @@ def test_list_conversations_title_search_matches_every_title_field(
     assert matched("%") == set()
 
 
+@pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
+def test_list_conversations_title_search_matches_same_case_non_ascii(
+    store_fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """A same-case non-ASCII query always hits, though SQLite's lower() folds only ASCII."""
+    store: SqlAlchemyConversationStore = request.getfixturevalue(store_fixture)
+    upper = store.create_conversation(title="Ärger im Build")
+    root = store.create_conversation(title="root")
+    lower = store.create_conversation(
+        title="", kind="sub_agent", parent_conversation_id=root.id, sub_agent_name="Prüfer"
+    )
+
+    def matched(query: str) -> set[str]:
+        page = store.list_conversations(kind=None, title_search=query, limit=50)
+        return {c.id for c in page.data}
+
+    assert matched("Ärg") == {upper.id}
+    assert matched("Ärger IM BUILD") == {upper.id}  # ASCII letters still fold
+    assert matched("prü") == {lower.id}
+
+
 def test_list_conversations_search_scope_splits_title_and_content_matches(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

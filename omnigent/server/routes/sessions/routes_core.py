@@ -3278,9 +3278,9 @@ def register_core_routes(
             ``"all"`` (default) returns all accessible non-archived
             sessions, matching the legacy behaviour.
         :param title: Only sessions whose title is exactly this.
-        :param title_contains: Only sessions whose display title (title, sub-agent
-            name or Claude-native description) contains this, ignoring case; on
-            SQLite case folding covers ASCII only.
+        :param title_contains: Only sessions whose title, sub-agent name or
+            Claude-native description label (set on sub-agent children) contains
+            this, ignoring case; on SQLite non-ASCII letters match same-case only.
         :param workspace: Only sessions whose working directory is exactly this path.
         :param handle: Only the session holding this role, e.g. ``"Architect"`` or
             ``"omnigent/Architect"``; a bare role is relative to the orchestration
@@ -3387,7 +3387,7 @@ def register_core_routes(
             pinned_owner=user_id,
             title=title or None,
             title_search=title_contains or None,
-            # Claude-native sessions show their description label as the title.
+            # Claude-native sub-agent children show their description label as the title.
             title_search_label=_CLAUDE_NATIVE_DESCRIPTION_LABEL_KEY if title_contains else None,
             workspace=workspace or None,
             conversation_ids=handle_ids,
