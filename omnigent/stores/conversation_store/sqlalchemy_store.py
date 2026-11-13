@@ -212,21 +212,49 @@ _SEARCH_SCOPES = frozenset({"all", "title", "content"})
 _LIKE_ESCAPE = "/"
 
 
-def _like_contains_pattern(query: str) -> str:
+def _like_contains_pattern(query: str, *, ascii_only: bool = False) -> str:
     """
     Return a lowercase ``LIKE`` pattern matching ``query`` as a literal substring.
 
     :param query: The user's search string, e.g. ``"50%_off"``.
+    :param ascii_only: Fold only ASCII letters, as SQLite's ``lower()`` does to
+        the column, so a same-case non-ASCII query still matches.
     :returns: The pattern with ``%``, ``_`` and the escape character escaped,
         e.g. ``"%50/%/_off%"``; pass ``escape=_LIKE_ESCAPE`` alongside it.
     """
+    folded = (
+        "".join(char.lower() if char.isascii() else char for char in query)
+        if ascii_only
+        else query.lower()
+    )
     escaped = (
-        query.lower()
-        .replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        folded.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
         .replace("%", f"{_LIKE_ESCAPE}%")
         .replace("_", f"{_LIKE_ESCAPE}_")
     )
     return f"%{escaped}%"
+
+
+def _like_contains_patterns(query: str, dialect_name: str) -> list[str]:
+    """
+    Return the ``LIKE`` patterns a case-insensitive substring search tries.
+
+    SQLite's ``lower()`` folds only ASCII, so it also tries the query with
+    only its ASCII folded: either case of a non-ASCII query then finds a title
+    in the same case, and an uppercase query finds a lowercase title. A
+    lowercase non-ASCII query still misses an uppercase non-ASCII title there.
+
+    :param query: The search string, e.g. ``"PRÜ"``.
+    :param dialect_name: The engine's dialect, e.g. ``"sqlite"``.
+    :returns: One pattern, or two distinct ones on SQLite, e.g.
+        ``["%prü%", "%prÜ%"]``.
+    """
+    patterns = [_like_contains_pattern(query)]
+    if dialect_name == "sqlite":
+        folded = _like_contains_pattern(query, ascii_only=True)
+        if folded not in patterns:
+            patterns.append(folded)
+    return patterns
 
 
 # Upper bound on rows fetched per SQL statement when listing conversation
@@ -3887,6 +3915,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         project_id: str | None = None,
         title_search: str | None = None,
         title_search_label: str | None = None,
+        workspace: str | None = None,
+        conversation_ids: list[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3958,6 +3988,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             superset: callers needing the exact fallback re-check the rows.
         :param title_search_label: Label key whose value ``title_search`` also
             matches, e.g. ``"omnigent.claude_native.description"``.
+        :param workspace: When set, only return sessions whose working
+            directory is exactly this path. ``None`` disables the filter.
+        :param conversation_ids: When set, only return these sessions; an
+            empty list returns none. ``None`` disables the filter.
         :param has_label: When set, restrict to sessions carrying this label
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to.
@@ -4322,6 +4356,10 @@ class SqlAlchemyConversationStore(ConversationStore):
                 )
             if title_search:
                 stmt = stmt.where(self._title_search_match(title_search, title_search_label))
+            if conversation_ids is not None:
+                stmt = stmt.where(SqlConversation.id.in_(conversation_ids))
+            if workspace is not None:
+                stmt = stmt.where(self._workspace_match(workspace))
             if has_label:
                 stmt = stmt.where(
                     SqlConversation.id.in_(
@@ -6024,10 +6062,13 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param label_key: Label whose value also counts, or ``None``.
         :returns: A clause for ``list_conversations``; a superset of the display-title match.
         """
-        pattern = _like_contains_pattern(query)
-        matches: list[ColumnElement[bool]] = [
-            SqlConversation.title.ilike(pattern, escape=_LIKE_ESCAPE)
-        ]
+        patterns = _like_contains_patterns(query, self._conv_engine.dialect.name)
+        meta_patterns = _like_contains_patterns(query, self._engine.dialect.name)
+
+        def like_any(column: Any, candidates: list[str]) -> ColumnElement[bool]:
+            return or_(*(column.ilike(candidate, escape=_LIKE_ESCAPE) for candidate in candidates))
+
+        matches: list[ColumnElement[bool]] = [like_any(SqlConversation.title, patterns)]
         if label_key:
             matches.append(
                 select(SqlConversationLabel.conversation_id)
@@ -6035,13 +6076,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationLabel.workspace_id == current_workspace_id(),
                     SqlConversationLabel.conversation_id == SqlConversation.id,
                     SqlConversationLabel.key == label_key,
-                    SqlConversationLabel.value.ilike(pattern, escape=_LIKE_ESCAPE),
+                    like_any(SqlConversationLabel.value, patterns),
                 )
                 .exists()
             )
         named = select(SqlConversationMetadata.id).where(
             SqlConversationMetadata.workspace_id == current_workspace_id(),
-            SqlConversationMetadata.sub_agent_name.ilike(pattern, escape=_LIKE_ESCAPE),
+            like_any(SqlConversationMetadata.sub_agent_name, meta_patterns),
         )
         if self._conv_engine is self._engine:
             matches.append(SqlConversation.id.in_(named))
@@ -6052,6 +6093,23 @@ class SqlAlchemyConversationStore(ConversationStore):
             if named_ids:
                 matches.append(SqlConversation.id.in_(named_ids))
         return or_(*matches)
+
+    def _workspace_match(self, workspace: str) -> ColumnElement[bool]:
+        """
+        Match sessions whose working directory is exactly ``workspace``.
+
+        :param workspace: An absolute path, e.g. ``"/home/user/repo"``.
+        :returns: A clause for ``list_conversations``.
+        """
+        in_workspace = select(SqlConversationMetadata.id).where(
+            SqlConversationMetadata.workspace_id == current_workspace_id(),
+            SqlConversationMetadata.workspace == workspace,
+        )
+        if self._conv_engine is self._engine:
+            return SqlConversation.id.in_(in_workspace)
+        # Split-DB: workspaces live with the metadata, so prefetch their ids.
+        with self._session("list_conversations") as meta_sess:
+            return SqlConversation.id.in_(list(meta_sess.execute(in_workspace).scalars()))
 
     def _role_handle_match(self, session: Session, search_query: str) -> ColumnElement[bool]:
         """

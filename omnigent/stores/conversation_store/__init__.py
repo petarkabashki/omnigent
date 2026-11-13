@@ -135,17 +135,20 @@ ROLE_ID_LABEL_KEY = "omnigent.role_id"
 # Carries the row's ``overlay_ref`` when the role file is not the role's name.
 ROLE_OVERLAY_LABEL_KEY = "omnigent.role_overlay"
 # Set on a session whose role the owner force-released: the role handle, when
-# (ISO 8601 UTC), the requesting session id ("" for the owner) and the new
-# holder ("" when vacant). Cleared when the session takes a role again.
+# (ISO 8601 UTC), the requesting session id ("" for the owner), the new
+# holder ("" when vacant) and "true" for a permanent role ("" otherwise).
+# Cleared when the session takes a role again.
 ROLE_RELEASED_LABEL_KEY = "omnigent.role_released"
 ROLE_RELEASED_AT_LABEL_KEY = "omnigent.role_released.at"
 ROLE_RELEASED_BY_LABEL_KEY = "omnigent.role_released.by"
 ROLE_RELEASED_TO_LABEL_KEY = "omnigent.role_released.to"
+ROLE_RELEASED_PERMANENT_LABEL_KEY = "omnigent.role_released.permanent"
 ROLE_RELEASED_LABEL_KEYS = (
     ROLE_RELEASED_LABEL_KEY,
     ROLE_RELEASED_AT_LABEL_KEY,
     ROLE_RELEASED_BY_LABEL_KEY,
     ROLE_RELEASED_TO_LABEL_KEY,
+    ROLE_RELEASED_PERMANENT_LABEL_KEY,
 )
 
 # Name of the executor profile a session was created with, so Bench can score it.
@@ -1179,6 +1182,8 @@ class ConversationStore(ABC):
         project_id: str | None = None,
         title_search: str | None = None,
         title_search_label: str | None = None,
+        workspace: str | None = None,
+        conversation_ids: list[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1303,6 +1308,10 @@ class ConversationStore(ABC):
             superset: callers needing the exact fallback re-check the rows.
         :param title_search_label: Label key whose value ``title_search`` also
             matches, e.g. ``"omnigent.claude_native.description"``.
+        :param workspace: When set, only return sessions whose working
+            directory is exactly this path. ``None`` disables the filter.
+        :param conversation_ids: When set, only return these sessions; an
+            empty list returns none. ``None`` disables the filter.
         :param has_label: When set, restrict to sessions carrying this label
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to

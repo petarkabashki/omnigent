@@ -2022,6 +2022,25 @@ def test_list_conversations_search_query_matches_role_handle(
 
 
 @pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
+def test_list_conversations_filters_by_workspace_and_ids(
+    store_fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """``workspace`` matches the exact working directory; ``conversation_ids`` pins the set."""
+    store: SqlAlchemyConversationStore = request.getfixturevalue(store_fixture)
+    in_repo = store.create_conversation(title="a", workspace="/srv/repo")
+    nested = store.create_conversation(title="b", workspace="/srv/repo/sub")
+    store.create_conversation(title="c")
+
+    def listed(**filters: object) -> set[str]:
+        return {c.id for c in store.list_conversations(kind=None, limit=50, **filters).data}
+
+    assert listed(workspace="/srv/repo") == {in_repo.id}
+    assert listed(workspace="/srv") == set()
+    assert listed(conversation_ids=[nested.id]) == {nested.id}
+    assert listed(conversation_ids=[]) == set()
+
+
+@pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
 def test_list_conversations_title_search_matches_every_title_field(
     store_fixture: str, request: pytest.FixtureRequest
 ) -> None:
@@ -2052,6 +2071,30 @@ def test_list_conversations_title_search_matches_every_title_field(
     assert matched("deploy") == {by_title.id, by_name.id, by_label.id}
     assert matched("deploy", label=None) == {by_title.id, by_name.id}
     assert matched("%") == set()
+
+
+@pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
+def test_list_conversations_title_search_matches_same_case_non_ascii(
+    store_fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """A same-case or uppercase non-ASCII query hits, though SQLite's lower() folds only ASCII."""
+    store: SqlAlchemyConversationStore = request.getfixturevalue(store_fixture)
+    upper = store.create_conversation(title="Ärger im Build")
+    exam = store.create_conversation(title="Abnahmeprüfung")
+    root = store.create_conversation(title="root")
+    lower = store.create_conversation(
+        title="", kind="sub_agent", parent_conversation_id=root.id, sub_agent_name="Prüfer"
+    )
+
+    def matched(query: str) -> set[str]:
+        page = store.list_conversations(kind=None, title_search=query, limit=50)
+        return {c.id for c in page.data}
+
+    assert matched("Ärg") == matched("ÄRG") == {upper.id}
+    assert matched("Ärger IM BUILD") == matched("build") == {upper.id}  # ASCII still folds
+    assert matched("prü") == matched("PRÜ") == {exam.id, lower.id}
+    # Documented SQLite limit: a lowercase query misses an uppercase non-ASCII title.
+    assert matched("ärg") == set()
 
 
 def test_list_conversations_search_scope_splits_title_and_content_matches(

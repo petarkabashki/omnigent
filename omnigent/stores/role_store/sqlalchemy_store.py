@@ -409,6 +409,24 @@ class SqlAlchemyRoleStore(RoleStore):
         self._before_write("release")
         return run_write_transaction(self._session_immediate, "release_role", write)
 
+    def set_permanent(self, role: Role, permanent: bool) -> Role | None:
+        """Set the permanent flag if ``role.generation`` is still current."""
+
+        def write(session: Session) -> Role | None:
+            if not self._swap(
+                session,
+                role,
+                permanent=permanent,
+                updated_at=now_epoch(),
+                generation=role.generation + 1,
+            ):
+                return None
+            row = session.get(SqlRole, (current_workspace_id(), role.id), populate_existing=True)
+            return _to_entity(row) if row is not None else None
+
+        self._before_write("set_permanent")
+        return run_write_transaction(self._session_immediate, "set_role_permanent", write)
+
     def events(self, role_id: str) -> builtins.list[RoleEvent]:
         """List one role's events, oldest first."""
         with self._session("list_role_events") as session:

@@ -1,5 +1,6 @@
 """Runner dispatch through authenticated routes and real ownership/sharing stores."""
 
+import asyncio
 import json
 import time
 from contextvars import ContextVar
@@ -29,6 +30,7 @@ from omnigent.stores.conversation_store import (
     ROLE_OVERLAY_LABEL_KEY,
     ROLE_RELEASED_BY_LABEL_KEY,
     ROLE_RELEASED_LABEL_KEY,
+    ROLE_RELEASED_PERMANENT_LABEL_KEY,
     ROLE_RELEASED_TO_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -1532,6 +1534,20 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
     assert handles[target["id"]] == "py-qwant/Product"
     assert handles[other["id"]] is None
 
+    # A bare handle filter resolves in the caller's project; an unknown one lists nothing.
+    found = json.loads(
+        await execute_tool(
+            tool_name="sys_session_list",
+            arguments=json.dumps({"handle": "Product", "compact": True}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert [row["session_id"] for row in found["sessions"]] == [target["id"]]
+    assert found["sessions"][0]["handle"] == "py-qwant/Product"
+    unknown = await auth_client.get("/v1/sessions", params={"handle": "py-qwant/Nobody"})
+    assert unknown.status_code == 200 and unknown.json()["data"] == []
+
     listed = (await auth_client.get("/v1/sessions/aliases", params={"project": "py-qwant"})).json()
     assert {entry["handle"] for entry in listed["data"]} == {
         "py-qwant/Architect",
@@ -1663,6 +1679,8 @@ async def test_role_rows_follow_session_lifecycle(auth_client, peers, db_uri):
     assert refused.status_code == 403
     assert roles.get(role_id, user_id="alice").holder_session_id == target["id"]
 
+    # The owner's own calls carry no runner token.
+    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
     # Close through the labels PATCH.
     closed = await auth_client.patch(
         f"/v1/sessions/{target['id']}", json={"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}}
@@ -2357,6 +2375,168 @@ async def test_owner_force_release_is_its_own_approval(auth_client, peers, db_ur
     _, events = _role_row(db_uri, "Keeper")
     assert (events[-1].actor, events[-1].reason) == ("owner", "forced:")
     assert _labels_of(db_uri, holder)[ROLE_RELEASED_BY_LABEL_KEY] == ""
+
+
+async def _set_permanent(client, name, permanent, headers=None):
+    return await client.put(
+        f"/v1/sessions/aliases/roles/{name}/permanent",
+        json={"permanent": permanent},
+        headers=headers,
+    )
+
+
+async def test_owner_marks_a_role_permanent_and_role_list_shows_it(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    before, _ = _role_row(db_uri, "Keeper")
+
+    marked = await _set_permanent(auth_client, "Keeper", True)
+    assert marked.status_code == 200, marked.text
+    assert marked.json() == {
+        "role": "/Keeper",
+        "permanent": True,
+        "generation": before.generation + 1,
+    }
+    assert owner_verdicts["asked"] == []
+    listed = await _role_tool(auth_client, source, "sys_role_list")
+    assert {row["name"]: row for row in listed["roles"]}["Keeper"]["permanent"] is True
+
+    missing = await _set_permanent(auth_client, "Nobody", True)
+    assert missing.status_code == 404
+    invalid = await _set_permanent(auth_client, "Keeper", "yes")
+    assert invalid.status_code == 400
+
+
+@pytest.mark.parametrize("action", ["accept", "decline"])
+async def test_an_agent_marks_a_role_permanent_only_with_owner_approval(
+    auth_client, peers, db_uri, owner_verdicts, action
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    owner_verdicts["action"] = action
+
+    response = await _set_permanent(
+        auth_client, "Keeper", True, headers={ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    )
+    assert response.status_code == (200 if action == "accept" else 403), response.text
+    [(asked_session, question)] = owner_verdicts["asked"]
+    assert asked_session == source["id"] and "permanent" in question
+    assert _role_row(db_uri, "Keeper")[0].permanent is (action == "accept")
+
+
+@pytest.mark.parametrize("second", ["accept", "decline"])
+async def test_force_releasing_a_permanent_role_asks_the_owner_twice(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch, second
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.schemas import ElicitationResult
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    answers = iter(["accept", second])
+    asked = []
+
+    async def answer(request, *, params, **kwargs):
+        asked.append(params.message)
+        return ElicitationResult(action=next(answers))
+
+    monkeypatch.setattr(routes_core, "_publish_and_wait_for_harness_elicitation", answer)
+    result = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+
+    assert len(asked) == 2
+    assert "FORCE-RELEASE" in asked[0] and "SECOND CONFIRMATION" in asked[1]
+    assert "PERMANENT" in asked[1]
+    after, _ = _role_row(db_uri, "Keeper")
+    if second == "accept":
+        assert result["released"] is True and after.holder_session_id is None
+    else:
+        assert result["error"].endswith("returned 403")
+        assert after.holder_session_id == holder["id"]
+
+
+async def test_a_second_approval_after_the_shared_deadline_changes_nothing(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.schemas import ElicitationResult
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    before, before_events = _role_row(db_uri, "Keeper")
+    # Both questions share a 0.3s budget; the second answer takes longer than that.
+    monkeypatch.setattr(routes_core, "_ROLE_ASK_MARGIN_S", 0.1)
+    monkeypatch.setattr(routes_core, "DEFAULT_ASK_TIMEOUT", 0.4)
+    timeouts = []
+
+    async def late_second_answer(request, *, params, timeout_s, **kwargs):
+        timeouts.append(timeout_s)
+        if len(timeouts) == 2:
+            await asyncio.sleep(0.4)
+        return ElicitationResult(action="accept")
+
+    monkeypatch.setattr(
+        routes_core, "_publish_and_wait_for_harness_elicitation", late_second_answer
+    )
+    late = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+
+    assert late["error"].endswith("returned 409") and "nothing was changed" in late["detail"]
+    assert len(timeouts) == 2 and all(timeout <= 0.3 for timeout in timeouts)
+    after, after_events = _role_row(db_uri, "Keeper")
+    assert (after.holder_session_id, after.generation) == (holder["id"], before.generation)
+    assert len(after_events) == len(before_events)
+
+
+async def test_a_holder_releasing_its_permanent_role_is_asked_once_naming_it_permanent(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    holder, _, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+
+    released = await _role_tool(auth_client, holder, "sys_role_release")
+    assert "error" not in released, released
+    [(_, question)] = owner_verdicts["asked"]
+    assert "PERMANENT role '/Keeper'" in question
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
+
+
+async def test_a_permanent_role_stays_permanent_when_vacated_and_retaken(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+
+    await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    vacant, _ = _role_row(db_uri, "Keeper")
+    assert vacant.holder_session_id is None and vacant.permanent is True
+    labels = _labels_of(db_uri, holder)
+    assert labels[ROLE_RELEASED_PERMANENT_LABEL_KEY] == "true"
+    assert "permanent role /Keeper" in role_release_instruction(labels)
+
+    await _hold(auth_client, source, "Keeper")
+    assert _role_row(db_uri, "Keeper")[0].permanent is True
+
+
+async def test_owner_force_release_of_a_permanent_role_needs_confirm_permanent(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    _, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    url = "/v1/sessions/aliases/roles/Keeper/release"
+
+    refused = await auth_client.post(url, json={"force": True})
+    assert refused.status_code == 400 and "confirm_permanent" in refused.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == holder["id"]
+    released = await auth_client.post(url, json={"force": True, "confirm_permanent": True})
+    assert released.status_code == 200, released.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
+    assert owner_verdicts["asked"] == []
 
 
 async def test_force_release_never_consults_the_messaging_policy(
@@ -3846,3 +4026,72 @@ async def test_deleting_a_session_moves_or_drops_its_role_mail(
         return
     assert listed["dropped"] == 1
     assert sent["message_id"] in caplog.text
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"title": "done :closed: here"},
+        {"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}},
+        {"archived": True},
+        {"archived": False},
+        {"project_id": "new"},
+    ],
+    ids=["closed_title", "closed_label", "archive", "unarchive", "project_move"],
+)
+async def test_an_agent_cannot_release_its_role_by_closing_its_session(
+    auth_client, peers, db_uri, patch
+):
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    await _hold(auth_client, source, "Keeper")
+    if patch.get("archived") is False:
+        store.update_conversation_with_changes(source["id"], archived=True)
+    if patch.get("project_id") == "new":
+        created = await auth_client.post("/v1/projects", json={"name": "elsewhere"})
+        patch = {"project_id": created.json()["id"]}
+    before = store.get_conversation(source["id"])
+    response = await auth_client.patch(f"/v1/sessions/{source['id']}", json=patch)
+    assert response.status_code == 409, response.text
+    assert "sys_role_release" in response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
+    after = store.get_conversation(source["id"])
+    assert (after.labels, after.archived, after.project_id) == (
+        before.labels,
+        before.archived,
+        before.project_id,
+    )
+
+
+@pytest.mark.parametrize("route", ["agent-title", "auto-title"])
+async def test_a_rename_cannot_close_a_role_holder(auth_client, peers, db_uri, route):
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    await _hold(auth_client, source, "Keeper")
+    before = store.get_conversation(source["id"]).title
+    response = await auth_client.post(
+        f"/v1/sessions/{source['id']}/{route}", json={"title": "keeper:guard:closed:x"}
+    )
+    assert response.status_code == 409, response.text
+    assert "sys_role_release" in response.text
+    assert store.get_conversation(source["id"]).title == before
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
+
+
+async def test_an_agent_may_refile_its_session_where_it_already_is(auth_client, peers, db_uri):
+    source, _, _ = peers
+    await _hold(auth_client, source, "Keeper")
+    response = await auth_client.patch(f"/v1/sessions/{source['id']}", json={"project_id": ""})
+    assert response.status_code == 200, response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
+
+
+async def test_an_owner_close_still_releases_the_role(auth_client, peers, db_uri):
+    source, _, _ = peers
+    await _hold(auth_client, source, "Keeper")
+    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
+    response = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"title": "done :closed: here"}
+    )
+    assert response.status_code == 200, response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None

@@ -5388,11 +5388,12 @@ async def _execute_session_query_tool(
     if tool_name == "sys_session_list":
         agent_name = args.get("agent_name")
         include_archived = args.get("include_archived") is True
+        match = _session_list_match(args)
         window = _discovery_list_window(
             args,
             tool_name,
             ("sessions",),
-            _session_list_filters(agent_name, include_archived),
+            _session_list_filters(agent_name, include_archived, match),
         )
         if isinstance(window, str):
             return window
@@ -5402,6 +5403,7 @@ async def _execute_session_query_tool(
             server_client,
             agent_name,
             include_archived=include_archived,
+            match=match,
             limit=limit,
             cursor_state=cursor_state,
             continued=continued,
@@ -6550,15 +6552,38 @@ def _project_agent_list(
     }
 
 
-def _session_list_filters(agent_name: object, include_archived: bool) -> _JsonObject:
+_SESSION_LIST_MATCH_KEYS = ("handle", "title", "title_contains", "workspace")
+
+
+def _session_list_match(args: _JsonObject) -> _JsonObject:
+    """
+    The caller's non-empty ``sys_session_list`` match filters and ``compact`` flag.
+
+    :param args: The tool arguments.
+    :returns: e.g. ``{"handle": "Architect", "compact": True}``; empty for a plain call.
+    """
+    match: _JsonObject = {
+        key: value
+        for key in _SESSION_LIST_MATCH_KEYS
+        if isinstance(value := args.get(key), str) and value
+    }
+    if args.get("compact") is True:
+        match["compact"] = True
+    return match
+
+
+def _session_list_filters(
+    agent_name: object, include_archived: bool, match: _JsonObject | None = None
+) -> _JsonObject:
     """
     The ``sys_session_list`` filters a continuation cursor is bound to.
 
-    ``include_archived`` is recorded only when set, so cursors issued before
-    the flag existed still match a call that omits it.
+    ``include_archived`` and the match filters are recorded only when set, so
+    cursors issued before they existed still match a call that omits them.
 
     :param agent_name: The caller's ``agent_name`` argument, e.g. ``"researcher"``.
     :param include_archived: Whether archived sessions are listed.
+    :param match: From :func:`_session_list_match`.
     :returns: The filter mapping, e.g. ``{"agent_name": None}``.
     """
     filters: _JsonObject = {
@@ -6566,6 +6591,7 @@ def _session_list_filters(agent_name: object, include_archived: bool) -> _JsonOb
     }
     if include_archived:
         filters["include_archived"] = True
+    filters.update(match or {})
     return filters
 
 
@@ -6575,12 +6601,16 @@ async def _session_list_via_rest(
     agent_name: object = None,
     *,
     include_archived: bool = False,
+    match: _JsonObject | None = None,
     limit: int | None,
     cursor_state: dict[str, _DiscoveryState],
     continued: bool,
 ) -> str:
     """
     Return the two-view session list: ``sub_agents`` + global ``sessions``.
+
+    With ``compact`` in ``match``, only ``sessions`` is returned, each row cut
+    to :data:`_COMPACT_SESSION_FIELDS`.
 
     ``sub_agents`` is the caller's named-sub-agent view (children, plus
     parent/siblings when the caller is itself a child) — see
@@ -6602,7 +6632,9 @@ async def _session_list_via_rest(
     :returns: The legacy complete JSON result while it fits, otherwise a
         bounded page with continuation metadata.
     """
-    sub_agents = await _collect_sub_agents(conversation_id, server_client)
+    match = match or {}
+    compact = match.get("compact") is True
+    sub_agents = [] if compact else await _collect_sub_agents(conversation_id, server_client)
     sessions_page = (
         _DiscoveryPage([], False)
         if cursor_state["sessions"][0] == _DISCOVERY_END
@@ -6610,21 +6642,53 @@ async def _session_list_via_rest(
             server_client,
             agent_name,
             include_archived=include_archived,
+            match=match,
+            source_id=conversation_id,
             after=cursor_state["sessions"][1],
             limit=limit or _AGENT_LIST_PAGE_LIMIT,
         )
     )
+    if compact:
+        sessions_page = _DiscoveryPage(
+            [{key: row.get(key) for key in _COMPACT_SESSION_FIELDS} for row in sessions_page.rows],
+            sessions_page.has_more,
+            sessions_page.next_after,
+            failed=sessions_page.failed,
+        )
+    sections: dict[str, list[_JsonObject]] = {"sessions": sessions_page.rows}
+    if not compact:
+        sections = {"sub_agents": cast(list[_JsonObject], sub_agents), **sections}
     result = _bounded_discovery_result(
-        {"sub_agents": cast(list[_JsonObject], sub_agents), "sessions": sessions_page.rows},
+        sections,
         limit=limit,
         cursor_state=cursor_state,
         continued=continued,
         tool_name="sys_session_list",
-        filters=_session_list_filters(agent_name, include_archived),
+        filters=_session_list_filters(agent_name, include_archived, match),
         source_pages={"sessions": sessions_page},
         page_sections=("sessions",),
     )
-    return await _fill_returned_runner_online(result, server_client)
+    filled = await _fill_returned_runner_online(result, server_client)
+    if not compact:
+        return filled
+    # runner_id was only needed to resolve runner_online.
+    payload = json.loads(filled)
+    for row in payload.get("sessions") or []:
+        if isinstance(row, dict):
+            row.pop("runner_id", None)
+    return json.dumps(payload)
+
+
+# What ``compact=true`` keeps per session: enough to address it and tell if it is alive.
+_COMPACT_SESSION_FIELDS = (
+    "session_id",
+    "title",
+    "workspace",
+    "handle",
+    "runner_id",
+    "runner_online",
+    "last_activity_at",
+)
 
 
 async def _fill_returned_runner_online(result: str, server_client: httpx.AsyncClient) -> str:
@@ -6907,11 +6971,16 @@ async def _collect_global_sessions(
     agent_name: object,
     *,
     include_archived: bool = False,
+    match: _JsonObject | None = None,
+    source_id: str | None = None,
     after: str | None,
     limit: int,
 ) -> _DiscoveryPage:
     """
     Fetch the global session list via ``GET /v1/sessions``.
+
+    ``match`` filters (handle, title, title_contains, workspace) are applied
+    by the server; a bare handle is relative to ``source_id``'s project.
 
     Projects each accessible session to ``{session_id, agent_name, title,
     status, runner_id, runner_online, parent_session_id}``.
@@ -6936,10 +7005,21 @@ async def _collect_global_sessions(
         params["agent_name"] = agent_name
     if include_archived:
         params["include_archived"] = "true"
+    for key in _SESSION_LIST_MATCH_KEYS:
+        if (value := (match or {}).get(key)) is not None:
+            params[key] = value
     if after is not None:
         params["after"] = after
+    compact = (match or {}).get("compact") is True
+    headers = (
+        {ORCHESTRATION_SOURCE_HEADER: source_id}
+        if source_id and (match or {}).get("handle")
+        else None
+    )
     try:
-        resp = await server_client.get("/v1/sessions", params=params, timeout=30.0)
+        resp = await server_client.get(
+            "/v1/sessions", params=params, headers=headers, timeout=30.0
+        )
     except Exception:  # noqa: BLE001
         return _DiscoveryPage([], False, failed=True)
     if resp.status_code != 200:
@@ -6971,6 +7051,7 @@ async def _collect_global_sessions(
                 "runner_id": r.get("runner_id"),
                 "runner_online": _RUNNER_ONLINE_SIZING_PLACEHOLDER,
                 "parent_session_id": r.get("parent_session_id"),
+                **({"last_activity_at": r.get("updated_at")} if compact else {}),
                 "family": r.get("family"),
                 "created_by_session_id": (_string_mapping(r.get("labels")) or {}).get(
                     CREATED_BY_SESSION_LABEL_KEY

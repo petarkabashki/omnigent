@@ -18579,6 +18579,74 @@
               "title": "Visibility",
               "type": "string"
             }
+          },
+          {
+            "description": "Only sessions whose title is exactly this.",
+            "in": "query",
+            "name": "title",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          {
+            "description": "Only sessions whose title, sub-agent name or Claude-native description label (set on sub-agent children) contains this, ignoring case; on SQLite non-ASCII letters match same-case only.",
+            "in": "query",
+            "name": "title_contains",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title Contains"
+            }
+          },
+          {
+            "description": "Only sessions whose working directory is exactly this path.",
+            "in": "query",
+            "name": "workspace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace"
+            }
+          },
+          {
+            "description": "Only the session holding this role, e.g. `\"Architect\"` or `\"omnigent/Architect\"`; a bare role is relative to the orchestration source's project. An unknown or vacant role lists nothing.",
+            "in": "query",
+            "name": "handle",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Handle"
+            }
           }
         ],
         "responses": {
@@ -18856,9 +18924,54 @@
         ]
       }
     },
+    "/v1/sessions/aliases/roles/{name}/permanent": {
+      "put": {
+        "description": "Set or clear a role's owner-approved permanent flag.\n\nBody: `{\"permanent\": bool, \"namespace\": <path>?}`. An agent call\n(orchestration header) acts in its own namespace and parks on the\nowner's approval; a direct owner call is its own approval. The write is\na CAS on the generation shown in the question.",
+        "operationId": "put_role_permanent_v1_sessions_aliases_roles__name__permanent_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Role Permanent V1 Sessions Aliases Roles  Name  Permanent Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Role Permanent",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/aliases/roles/{name}/release": {
       "post": {
-        "description": "Force-release a role whoever holds it, optionally handing it to `give_to`.\n\nBody: `{\"force\": true, \"give_to\": <session id or role>?, \"namespace\": <path>?}`.\nAn agent call (orchestration header) acts in its own namespace and always\nparks on the owner's approval; a direct owner call is its own approval.\nThe write is a CAS on the generation shown in the question.",
+        "description": "Force-release a role whoever holds it, optionally handing it to `give_to`.\n\nBody: `{\"force\": true, \"give_to\": <session id or role>?, \"namespace\": <path>?, \"confirm_permanent\": true?}`. An agent call (orchestration header) acts in\nits own namespace and always parks on the owner's approval; a direct owner\ncall is its own approval. A permanent role needs a second owner\nconfirmation: a second question for an agent call, `confirm_permanent`\nfor a direct one. The write is a CAS on the generation shown in the question.",
         "operationId": "force_release_role_v1_sessions_aliases_roles__name__release_post",
         "parameters": [
           {

@@ -983,6 +983,38 @@ async def test_list_sessions_filters_by_agent_id(
     assert all(s["agent_id"] == a1["id"] for s in data)
 
 
+async def test_list_sessions_filters_by_title_and_workspace(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """``title`` is exact, ``title_contains`` ignores case, ``workspace`` is an exact path."""
+    agent = await create_test_agent(client)
+    product = await _create_session(client, agent["id"], title="Product")
+    lane = await _create_session(client, agent["id"], title="product lane")
+    host = HostStore(db_uri).upsert_on_connect(
+        "6b9c07bfb42f687d53af44f018adebec", "test-laptop", "owner@example.com"
+    )
+    SqlAlchemyConversationStore(db_uri).set_host_id(
+        lane["id"], host_id=host.host_id, workspace="/srv/repo"
+    )
+
+    async def listed(**params: str) -> set[str]:
+        resp = await client.get("/v1/sessions", params=params)
+        assert resp.status_code == 200
+        return {s["id"] for s in resp.json()["data"]}
+
+    assert await listed(title="Product") == {product["id"]}
+    assert await listed(title_contains="PRODUCT") == {product["id"], lane["id"]}
+    assert await listed(workspace="/srv/repo") == {lane["id"]}
+    # A Claude-native session is found by the description shown as its sidebar title.
+    native = await _create_session(client, agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_labels(
+        native["id"], {"omnigent.claude_native.description": "Fix the Product build"}
+    )
+    assert await listed(title_contains="product build") == {native["id"]}
+    assert await listed(workspace="/srv") == set()
+
+
 async def test_list_sessions_pagination(
     client: httpx.AsyncClient,
 ) -> None:
