@@ -122,6 +122,11 @@ def ensure_shared_dir_is_sticky(directory: Path, my_uid: int) -> None:
         )
 
 
+def runtime_parent_too_long(parent: str | Path) -> bool:
+    """Whether Unix sockets under *parent* would exceed the ``sun_path`` limit."""
+    return not IS_WINDOWS and len(os.fsencode(parent)) > RUNTIME_PARENT_MAX
+
+
 class RuntimeParentError(RuntimeError):
     """The runtime parent is unusable: a configuration error, not a crash."""
 
@@ -141,7 +146,7 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
     """
     parent = resolve_harness_tmp_parent(env)
     length = len(os.fsencode(parent))
-    if not IS_WINDOWS and length > RUNTIME_PARENT_MAX:
+    if runtime_parent_too_long(parent):
         raise RuntimeParentError(
             f"runtime parent {parent} is {length} bytes; the limit is {RUNTIME_PARENT_MAX} "
             f"bytes, so Unix sockets under it fit. Shorten {HARNESS_TMP_PARENT_ENV_VAR}"

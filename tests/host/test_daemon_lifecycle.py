@@ -162,22 +162,31 @@ def test_reuse_legacy_record_probes_its_original_lock_path(
     assert probed_paths == [cli._daemon_record_path(legacy_target)]
 
 
+_TOO_LONG_PARENT = "/tmp/" + "p" * 60
+
+
 @pytest.mark.parametrize(
-    ("recorded_parent", "replaced"),
+    ("recorded_parent", "outcome"),
     [
-        pytest.param("/tmp/og-old", True, id="changed"),
-        pytest.param("/tmp/og-now", False, id="same"),
-        pytest.param(None, False, id="legacy-record"),
+        # Bench's G1: the old parent can't host a session, so nothing is lost.
+        pytest.param(_TOO_LONG_PARENT, "replaced", id="unusable-parent"),
+        # Another terminal's live sessions may run on it: leave it alone.
+        pytest.param("/tmp/og-old", "refused", id="usable-but-different"),
+        pytest.param("/tmp/og-now", "reused", id="same"),
+        pytest.param(None, "reused", id="legacy-record"),
     ],
 )
-def test_reuse_replaces_a_daemon_under_another_runtime_parent(
+def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recorded_parent: str | None,
-    replaced: bool,
+    outcome: str,
 ) -> None:
     from omnigent import cli
-    from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
+    from omnigent.runtime.harnesses.paths import (
+        HARNESS_TMP_PARENT_ENV_VAR,
+        RuntimeParentError,
+    )
 
     monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
     monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, "/tmp/og-now")
@@ -200,10 +209,25 @@ def test_reuse_replaces_a_daemon_under_another_runtime_parent(
         cli, "_terminate_host_unit", lambda record, *, reason: terminated.append(reason)
     )
 
+    if outcome == "refused":
+        with pytest.raises(RuntimeParentError) as excinfo:
+            cli._reuse_existing_daemon_record(target)
+        message = str(excinfo.value)
+        assert "runs under runtime parent /tmp/og-old" in message
+        assert "this shell resolves /tmp/og-now" in message
+        assert f"{HARNESS_TMP_PARENT_ENV_VAR}=/tmp/og-old" in message
+        assert f"`omnigent host stop --server {target}`" in message
+        assert terminated == []
+        assert cli._find_daemon_record(target) is not None
+        return
+
     decision = cli._reuse_existing_daemon_record(target)
 
-    assert decision.reuse is not replaced
-    assert terminated == (["runtime parent changed"] if replaced else [])
+    assert decision.reuse is (outcome == "reused")
+    if outcome == "replaced":
+        assert terminated == [f"runtime parent changed: {_TOO_LONG_PARENT} -> /tmp/og-now"]
+    else:
+        assert terminated == []
 
 
 def test_record_path_uses_digest(tmp_path: Path) -> None:

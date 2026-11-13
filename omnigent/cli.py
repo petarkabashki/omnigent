@@ -130,9 +130,12 @@ from omnigent.process_logging import (
     process_log_dir_reference,
 )
 from omnigent.runtime.harnesses.paths import (
+    HARNESS_TMP_PARENT_ENV_VAR,
+    RuntimeParentError,
     ensure_runtime_parent,
     resolve_harness_tmp_parent,
     runtime_mkdtemp,
+    runtime_parent_too_long,
 )
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
@@ -3174,8 +3177,7 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _terminate_host_unit(existing, reason="host identity changed")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
     if background and _daemon_runtime_parent_changed(existing):
-        # Its sessions would keep sockets under the old parent.
-        _terminate_host_unit(existing, reason="runtime parent changed")
+        _replace_or_refuse_daemon_under_other_parent(existing)
         return _DaemonReuseDecision(reuse=False, config_changed=False)
 
     if target != _LOCAL_DAEMON_MARKER:
@@ -3220,6 +3222,30 @@ def _daemon_runtime_parent_changed(record: _HostDaemonRecord) -> bool:
     if record.runtime_parent is None:
         return False
     return record.runtime_parent != str(resolve_harness_tmp_parent())
+
+
+def _replace_or_refuse_daemon_under_other_parent(record: _HostDaemonRecord) -> None:
+    """
+    Replace a daemon whose runtime parent is unusable; refuse to touch any other.
+
+    Another shell's env may differ, and a daemon under a usable parent can be
+    serving live sessions from other terminals, so only a broken one is stopped.
+
+    :param record: Background daemon record whose parent differs from this CLI's.
+    :raises RuntimeParentError: If the daemon's parent is usable.
+    """
+    recorded = record.runtime_parent
+    current = str(resolve_harness_tmp_parent())
+    if recorded is not None and runtime_parent_too_long(recorded):
+        _terminate_host_unit(record, reason=f"runtime parent changed: {recorded} -> {current}")
+        return
+    stop_command = "omnigent host stop"
+    if record.mode == "server":
+        stop_command += f" --server {record.server_url or record.target}"
+    raise RuntimeParentError(
+        f"the host daemon runs under runtime parent {recorded}, but this shell resolves "
+        f"{current}. Set {HARNESS_TMP_PARENT_ENV_VAR}={recorded}, or run `{stop_command}` first"
+    )
 
 
 def _same_workspace_daemon(
