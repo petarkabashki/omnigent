@@ -1668,6 +1668,7 @@ def build_native_claude_terminal_env(
     claude_config: ClaudeNativeUcodeConfig | None,
     *,
     client_surface: str | None = None,
+    workspace: Path | None = None,
 ) -> dict[str, str]:
     """
     Build env overrides for a native Claude Code terminal process.
@@ -1687,6 +1688,9 @@ def build_native_claude_terminal_env(
     :param claude_config: Optional provider/ucode launch config, e.g.
         one carrying ``{"ANTHROPIC_BASE_URL": "https://example.com"}``.
         ``None`` means use Claude Code's own native auth.
+    :param workspace: The terminal's cwd. When given, folders above it that
+        Omnigent doesn't trust for skills are added to Claude Code's automount
+        skip list, so its own project-file walk can't reach them.
     :returns: Environment overrides for the terminal process, e.g.
         ``{"ENABLE_TOOL_SEARCH": "true"}``.
     """
@@ -1728,6 +1732,20 @@ def build_native_claude_terminal_env(
 
         retry_env = RetryPolicy().claude_cli.env()
         terminal_env[_CLAUDE_CODE_API_TIMEOUT_ENV] = retry_env[_CLAUDE_CODE_API_TIMEOUT_ENV]
+    if workspace is not None:
+        from omnigent.spec.repo_scope import (
+            CLAUDE_AUTOMOUNT_ROOTS_ENV,
+            claude_untrusted_ancestors,
+            with_claude_automount_roots,
+        )
+
+        roots = with_claude_automount_roots(
+            terminal_env.get(CLAUDE_AUTOMOUNT_ROOTS_ENV)
+            or os.environ.get(CLAUDE_AUTOMOUNT_ROOTS_ENV),
+            claude_untrusted_ancestors(workspace, home=Path.home()),
+        )
+        if roots:
+            terminal_env[CLAUDE_AUTOMOUNT_ROOTS_ENV] = roots
     # A raw credential can override the helper or open Claude's API-key menu.
     for name in native_claude_auth_env_unset(claude_config):
         if name in terminal_env:
@@ -7057,7 +7075,9 @@ def _claude_terminal_request(
         "scrollback": _CLAUDE_TERMINAL_SCROLLBACK_LINES,
     }
     # This wrapper is the CLI; don't trust a surface inherited from a session's shell.
-    spec["env"] = build_native_claude_terminal_env(claude_config, client_surface="cli")
+    spec["env"] = build_native_claude_terminal_env(
+        claude_config, client_surface="cli", workspace=Path(spec["cwd"])
+    )
     if claude_config is not None:
         # The runner's terminal layer inherits the parent process env.
         # Remove credentials that override the selected auth and the

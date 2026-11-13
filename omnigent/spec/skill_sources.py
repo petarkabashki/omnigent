@@ -212,7 +212,11 @@ def _claude_code_skills(
     seen_dirs: set[Path] = set()
 
     def _add(candidate: Path) -> None:
-        if candidate in seen_dirs or not candidate.is_dir() or not is_trusted_dir(candidate):
+        if (
+            candidate in seen_dirs
+            or not candidate.is_dir()
+            or not is_trusted_dir(candidate, warnings=ctx.warnings)
+        ):
             return
         seen_dirs.add(candidate)
         dirs.append(candidate)
@@ -237,7 +241,9 @@ def _claude_code_skills(
         skipped: list[str] = []
         for spec in _discover_skills(skills_dir, skipped=skipped):
             # A linked skill must resolve inside the trust boundary too.
-            if spec.skill_dir is not None and not is_trusted_dir(spec.skill_dir):
+            if spec.skill_dir is not None and not is_trusted_dir(
+                spec.skill_dir, warnings=ctx.warnings
+            ):
                 continue
             # Portable command names become directory names in the launch overlay.
             if dotdir == ".agents" and not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", spec.name):
@@ -673,7 +679,9 @@ def _claude_command_roots(ctx: SkillSourceContext) -> list[Path]:
     if ctx.roots:
         project = skill_scope_dirs(ctx.roots[0], home=ctx.home)
         roots += [directory / ".claude" / "commands" for directory in project]
-    return [root for root in roots if not root.is_dir() or is_trusted_dir(root)]
+    return [
+        root for root in roots if not root.is_dir() or is_trusted_dir(root, warnings=ctx.warnings)
+    ]
 
 
 def _discover_claude_commands(

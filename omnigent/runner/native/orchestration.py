@@ -10231,6 +10231,7 @@ async def _auto_create_claude_terminal(
         env=build_native_claude_terminal_env(
             claude_config,
             client_surface=resource_registry.client_surface(session_id),
+            workspace=Path(workspace),
         ),
         # Names to strip (see ``_claude_terminal_env_unset``). Dropping
         # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers

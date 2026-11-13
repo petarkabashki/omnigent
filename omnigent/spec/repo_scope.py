@@ -122,13 +122,67 @@ def untrusted_reason(path: Path) -> str | None:
     return None
 
 
-def is_trusted_dir(path: Path) -> bool:
-    """Check :func:`untrusted_reason`, warning once per directory and reason."""
+def is_trusted_dir(path: Path, *, warnings: list[str] | None = None) -> bool:
+    """Check :func:`untrusted_reason`, logging once per directory and reason.
+
+    :param warnings: When given, a user-facing note is appended for each skip, so
+        an API caller can show the catalog as filtered.
+    """
     reason = untrusted_reason(path)
     if reason is None:
         return True
+    if warnings is not None:
+        note = f"Skipped skills under {path}: {reason}"
+        if note not in warnings:
+            warnings.append(note)
     key = (str(path), reason)
     if key not in _warned_untrusted:
         _warned_untrusted.add(key)
         _log.warning("Skipping skills under %s: %s", path, reason)
     return False
+
+
+CLAUDE_AUTOMOUNT_ROOTS_ENV = "CLAUDE_CODE_AUTOMOUNT_ROOTS"
+
+
+def claude_untrusted_ancestors(workspace: Path, *, home: Path) -> list[Path]:
+    """
+    Return folders above *workspace* whose project files Claude Code must skip.
+
+    Claude Code reads ``.claude/skills``, ``CLAUDE.md`` and ``.mcp.json`` from
+    folders above its cwd. These are the ones :func:`skill_scope_dirs` leaves out
+    or whose skills folder is untrusted. Shared folders outside *home* are listed
+    even when empty, since a skill can be planted there after launch; *home*
+    itself, the user tier, never is.
+
+    :param workspace: The session's working directory.
+    :param home: The real user home.
+    :returns: Real paths, nearest first.
+    """
+    real_workspace = Path(os.path.realpath(workspace))
+    real_home = Path(os.path.realpath(home))
+    scope = set(skill_scope_dirs(real_workspace, home=real_home))
+    skipped: list[Path] = []
+    for folder in (real_workspace, *real_workspace.parents):
+        if folder == real_home:
+            continue
+        skills = folder / ".claude" / "skills"
+        if folder in scope:
+            if skills.exists() and not is_trusted_dir(skills):
+                skipped.append(folder)
+        elif not folder.is_relative_to(real_home) or skills.exists():
+            skipped.append(folder)
+    return skipped
+
+
+def with_claude_automount_roots(existing: str | None, folders: list[Path]) -> str | None:
+    """Merge *folders* into a ``CLAUDE_CODE_AUTOMOUNT_ROOTS`` value, keeping *existing* first.
+
+    A path holding the ``:`` separator cannot be listed and is left out.
+    """
+    entries = [entry for entry in (existing or "").split(":") if entry]
+    for folder in folders:
+        text = str(folder)
+        if ":" not in text and text not in entries:
+            entries.append(text)
+    return ":".join(entries) or None

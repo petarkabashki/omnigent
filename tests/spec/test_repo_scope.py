@@ -10,10 +10,12 @@ from typing import Literal
 import pytest
 
 from omnigent.spec.repo_scope import (
+    claude_untrusted_ancestors,
     is_trusted_dir,
     repo_scope_dirs,
     skill_scope_dirs,
     untrusted_reason,
+    with_claude_automount_roots,
 )
 
 
@@ -223,3 +225,66 @@ def test_untrusted_reason_checks_world_writable_ancestors(
     skills.mkdir(parents=True)
     shared.chmod(mode)
     assert (untrusted_reason(skills) is None) is trusted
+
+
+def _real(path: Path) -> Path:
+    return Path(os.path.realpath(path))
+
+
+def test_claude_skips_shared_folders_but_keeps_home_and_the_repository(tmp_path: Path) -> None:
+    home = _real(tmp_path) / "home"
+    repo = home / "work" / "repo"
+    workspace = repo / "pkg"
+    workspace.mkdir(parents=True)
+    (repo / ".git").mkdir()
+
+    skipped = claude_untrusted_ancestors(workspace, home=home)
+
+    for kept in (workspace, repo, home / "work", home):
+        assert kept not in skipped
+    assert skipped[0] == _real(tmp_path) and Path("/") in skipped
+
+
+def test_claude_skips_a_home_folder_above_the_repository_only_when_it_has_skills(
+    tmp_path: Path,
+) -> None:
+    home = _real(tmp_path) / "home"
+    workspace = home / "work" / "repo"
+    workspace.mkdir(parents=True)
+    (workspace / ".git").mkdir()
+    (home / "work" / ".claude" / "skills").mkdir(parents=True)
+
+    assert home / "work" in claude_untrusted_ancestors(workspace, home=home)
+
+
+def test_claude_skips_everything_above_a_workspace_outside_home_and_repositories(
+    tmp_path: Path,
+) -> None:
+    shared = _real(tmp_path) / "shared"
+    workspace = shared / "work"
+    workspace.mkdir(parents=True)
+
+    skipped = claude_untrusted_ancestors(workspace, home=_real(tmp_path) / "home")
+
+    assert workspace not in skipped and skipped[:2] == [shared, _real(tmp_path)]
+
+
+def test_claude_skips_an_in_scope_folder_whose_skills_are_untrusted(tmp_path: Path) -> None:
+    home = _real(tmp_path) / "home"
+    repo = home / "repo"
+    workspace = repo / "pkg"
+    workspace.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    skills = repo / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    skills.chmod(0o777)
+
+    skipped = claude_untrusted_ancestors(workspace, home=home)
+
+    assert repo in skipped and workspace not in skipped
+
+
+def test_automount_roots_keep_the_existing_value_first_without_duplicates() -> None:
+    merged = with_claude_automount_roots("/mnt/a", [Path("/b"), Path("/mnt/a"), Path("/c:d")])
+    assert merged == "/mnt/a:/b"
+    assert with_claude_automount_roots(None, []) is None
