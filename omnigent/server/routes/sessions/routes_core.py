@@ -328,7 +328,8 @@ def _refuse_closed_title(title: str) -> None:
     """Refuse an automatic rename that would make the session read as closed."""
     if has_closed_title_marker(title):
         raise OmnigentError(
-            "A rename can't close a session; close it with sys_session_close instead.",
+            "A rename can't close a session. If it holds a role, release the role with "
+            "sys_role_release first, or ask the owner to close it.",
             code=ErrorCode.CONFLICT,
         )
 

@@ -3944,7 +3944,7 @@ async def test_a_rename_cannot_close_a_role_holder(auth_client, peers, db_uri, r
         f"/v1/sessions/{source['id']}/{route}", json={"title": "keeper:guard:closed:x"}
     )
     assert response.status_code == 409, response.text
-    assert "sys_session_close" in response.text
+    assert "sys_role_release" in response.text
     assert store.get_conversation(source["id"]).title == before
     assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
 
