@@ -235,6 +235,28 @@ def _like_contains_pattern(query: str, *, ascii_only: bool = False) -> str:
     return f"%{escaped}%"
 
 
+def _like_contains_patterns(query: str, dialect_name: str) -> list[str]:
+    """
+    Return the ``LIKE`` patterns a case-insensitive substring search tries.
+
+    SQLite's ``lower()`` folds only ASCII, so it also tries the query with
+    only its ASCII folded: either case of a non-ASCII query then finds a title
+    in the same case, and an uppercase query finds a lowercase title. A
+    lowercase non-ASCII query still misses an uppercase non-ASCII title there.
+
+    :param query: The search string, e.g. ``"PRÜ"``.
+    :param dialect_name: The engine's dialect, e.g. ``"sqlite"``.
+    :returns: One pattern, or two distinct ones on SQLite, e.g.
+        ``["%prü%", "%prÜ%"]``.
+    """
+    patterns = [_like_contains_pattern(query)]
+    if dialect_name == "sqlite":
+        folded = _like_contains_pattern(query, ascii_only=True)
+        if folded not in patterns:
+            patterns.append(folded)
+    return patterns
+
+
 # Upper bound on rows fetched per SQL statement when listing conversation
 # items. A deployed managed-Postgres backend failed one oversized read of a
 # large conversation (multi-megabyte pages 500'd at limit>=500 while limit<=400
@@ -6040,15 +6062,13 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param label_key: Label whose value also counts, or ``None``.
         :returns: A clause for ``list_conversations``; a superset of the display-title match.
         """
-        pattern = _like_contains_pattern(
-            query, ascii_only=self._conv_engine.dialect.name == "sqlite"
-        )
-        meta_pattern = _like_contains_pattern(
-            query, ascii_only=self._engine.dialect.name == "sqlite"
-        )
-        matches: list[ColumnElement[bool]] = [
-            SqlConversation.title.ilike(pattern, escape=_LIKE_ESCAPE)
-        ]
+        patterns = _like_contains_patterns(query, self._conv_engine.dialect.name)
+        meta_patterns = _like_contains_patterns(query, self._engine.dialect.name)
+
+        def like_any(column: Any, candidates: list[str]) -> ColumnElement[bool]:
+            return or_(*(column.ilike(candidate, escape=_LIKE_ESCAPE) for candidate in candidates))
+
+        matches: list[ColumnElement[bool]] = [like_any(SqlConversation.title, patterns)]
         if label_key:
             matches.append(
                 select(SqlConversationLabel.conversation_id)
@@ -6056,13 +6076,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationLabel.workspace_id == current_workspace_id(),
                     SqlConversationLabel.conversation_id == SqlConversation.id,
                     SqlConversationLabel.key == label_key,
-                    SqlConversationLabel.value.ilike(pattern, escape=_LIKE_ESCAPE),
+                    like_any(SqlConversationLabel.value, patterns),
                 )
                 .exists()
             )
         named = select(SqlConversationMetadata.id).where(
             SqlConversationMetadata.workspace_id == current_workspace_id(),
-            SqlConversationMetadata.sub_agent_name.ilike(meta_pattern, escape=_LIKE_ESCAPE),
+            like_any(SqlConversationMetadata.sub_agent_name, meta_patterns),
         )
         if self._conv_engine is self._engine:
             matches.append(SqlConversation.id.in_(named))
