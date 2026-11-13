@@ -1,5 +1,6 @@
 """Runner dispatch through authenticated routes and real ownership/sharing stores."""
 
+import asyncio
 import json
 import time
 from contextvars import ContextVar
@@ -29,6 +30,7 @@ from omnigent.stores.conversation_store import (
     ROLE_OVERLAY_LABEL_KEY,
     ROLE_RELEASED_BY_LABEL_KEY,
     ROLE_RELEASED_LABEL_KEY,
+    ROLE_RELEASED_PERMANENT_LABEL_KEY,
     ROLE_RELEASED_TO_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
@@ -2322,6 +2324,71 @@ async def test_force_releasing_a_permanent_role_asks_the_owner_twice(
     else:
         assert result["error"].endswith("returned 403")
         assert after.holder_session_id == holder["id"]
+
+
+async def test_a_second_approval_after_the_shared_deadline_changes_nothing(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.schemas import ElicitationResult
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    before, before_events = _role_row(db_uri, "Keeper")
+    # Both questions share a 0.3s budget; the second answer takes longer than that.
+    monkeypatch.setattr(routes_core, "_ROLE_ASK_MARGIN_S", 0.1)
+    monkeypatch.setattr(routes_core, "DEFAULT_ASK_TIMEOUT", 0.4)
+    timeouts = []
+
+    async def late_second_answer(request, *, params, timeout_s, **kwargs):
+        timeouts.append(timeout_s)
+        if len(timeouts) == 2:
+            await asyncio.sleep(0.4)
+        return ElicitationResult(action="accept")
+
+    monkeypatch.setattr(
+        routes_core, "_publish_and_wait_for_harness_elicitation", late_second_answer
+    )
+    late = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+
+    assert late["error"].endswith("returned 409") and "nothing was changed" in late["detail"]
+    assert len(timeouts) == 2 and all(timeout <= 0.3 for timeout in timeouts)
+    after, after_events = _role_row(db_uri, "Keeper")
+    assert (after.holder_session_id, after.generation) == (holder["id"], before.generation)
+    assert len(after_events) == len(before_events)
+
+
+async def test_a_holder_releasing_its_permanent_role_is_asked_once_naming_it_permanent(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    holder, _, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+
+    released = await _role_tool(auth_client, holder, "sys_role_release")
+    assert "error" not in released, released
+    [(_, question)] = owner_verdicts["asked"]
+    assert "PERMANENT role '/Keeper'" in question
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
+
+
+async def test_a_permanent_role_stays_permanent_when_vacated_and_retaken(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+
+    await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    vacant, _ = _role_row(db_uri, "Keeper")
+    assert vacant.holder_session_id is None and vacant.permanent is True
+    labels = _labels_of(db_uri, holder)
+    assert labels[ROLE_RELEASED_PERMANENT_LABEL_KEY] == "true"
+    assert "permanent role /Keeper" in role_release_instruction(labels)
+
+    await _hold(auth_client, source, "Keeper")
+    assert _role_row(db_uri, "Keeper")[0].permanent is True
 
 
 async def test_owner_force_release_of_a_permanent_role_needs_confirm_permanent(

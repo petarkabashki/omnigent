@@ -30,6 +30,7 @@ from omnigent.stores.conversation_store import (
     ROLE_RELEASED_BY_LABEL_KEY,
     ROLE_RELEASED_LABEL_KEY,
     ROLE_RELEASED_LABEL_KEYS,
+    ROLE_RELEASED_PERMANENT_LABEL_KEY,
     ROLE_RELEASED_TO_LABEL_KEY,
     ConversationStore,
 )
@@ -991,6 +992,12 @@ def plan_force_release(
     return ForceRelease(role=role, namespace=namespace, holder=holder, target=target)
 
 
+def holds_permanent_role(projects: ProjectStore | None, session_id: str) -> bool:
+    """Whether the session holds a role the owner marked permanent."""
+    roles = _role_store(projects)
+    return roles is not None and any(role.permanent for role in roles.held_by([session_id]))
+
+
 def plan_role_permanent(
     projects: ProjectStore | None,
     *,
@@ -1137,7 +1144,9 @@ def apply_force_release(
     if old_holder is not None:
         if target is not None:
             _clear_mirror(conversations, old_holder)
-        _mark_released(conversations, old_holder, plan.handle, requester_id, target)
+        _mark_released(
+            conversations, old_holder, plan.handle, requester_id, target, plan.role.permanent
+        )
     if target is not None:
         _bring_role_mail(conversations, projects, {old_holder})
     return written
@@ -1149,6 +1158,7 @@ def _mark_released(
     handle: str,
     requester_id: str | None,
     target: Conversation | None,
+    permanent: bool,
 ) -> None:
     """Leave the old holder its release notice; best effort, the row already moved."""
     try:
@@ -1159,6 +1169,7 @@ def _mark_released(
                 ROLE_RELEASED_AT_LABEL_KEY: datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ROLE_RELEASED_BY_LABEL_KEY: requester_id or "",
                 ROLE_RELEASED_TO_LABEL_KEY: target.id if target is not None else "",
+                ROLE_RELEASED_PERMANENT_LABEL_KEY: "true" if permanent else "",
             },
         )
     except Exception:

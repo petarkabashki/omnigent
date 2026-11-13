@@ -305,6 +305,9 @@ ClearSessionIntoFreshSession = Callable[
     [Request, Conversation, Callable[[], Awaitable[None]]], Awaitable[str]
 ]
 _SESSION_LIST_BATCH_SIZE = 1000
+# Owner questions in one role request end this long before the caller's one-day
+# read timeout, so an approval can't land after the caller has given up.
+_ROLE_ASK_MARGIN_S = 600.0
 
 
 def _require_attachment_compatible_history(
@@ -2706,10 +2709,13 @@ def register_core_routes(
         await _ask_owner_on(request, source, question)
         return source
 
-    async def _ask_owner_on(request: Request, source: Conversation, question: str) -> None:
+    async def _ask_owner_on(
+        request: Request, source: Conversation, question: str, *, timeout_s: float | None = None
+    ) -> None:
         """Park on the owner's answer in ``source``; raises unless they accept.
 
         Never consults the messaging policy: only the owner can approve.
+        ``timeout_s`` defaults to ``DEFAULT_ASK_TIMEOUT``.
         """
         session_id = source.id
         verdict = await _publish_and_wait_for_harness_elicitation(
@@ -2723,7 +2729,7 @@ def register_core_routes(
                 policy_name="role_change",
                 content_preview=question,
             ),
-            timeout_s=float(DEFAULT_ASK_TIMEOUT),
+            timeout_s=float(DEFAULT_ASK_TIMEOUT) if timeout_s is None else timeout_s,
             conversation_store=conversation_store,
         )
         if verdict is None or verdict.action != "accept":
@@ -2808,7 +2814,11 @@ def register_core_routes(
 
         An agent call (orchestration header) parks on an owner approval first.
         """
-        from omnigent.server.session_aliases import clear_session_alias, session_handle
+        from omnigent.server.session_aliases import (
+            clear_session_alias,
+            holds_permanent_role,
+            session_handle,
+        )
 
         user_id = _require_user(request, auth_provider)
         if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
@@ -2819,12 +2829,14 @@ def register_core_routes(
             handle = session_handle(current, project_store, user_id)
             if source.id == session_id and handle is None:
                 raise OmnigentError("This session holds no role", code=ErrorCode.INVALID_INPUT)
+            permanent = await asyncio.to_thread(holds_permanent_role, project_store, source.id)
+            kind = "PERMANENT role" if permanent else "role handle"
             await _approve_agent_alias_change(
                 request,
                 user_id,
                 session_id,
                 f"Session '{source.title or source.id}' ({source.id}) asks to release the "
-                f"role handle '{handle}'. Approve?",
+                f"{kind} '{handle}'. Approve?",
             )
         else:
             await _require_access_and_level(
@@ -2936,6 +2948,8 @@ def register_core_routes(
                 user_id, plan.target.id, LEVEL_OWNER, permission_store, conversation_store
             )
         if source is not None:
+            # Both questions share the runner's one request timeout, less a margin.
+            deadline = time.monotonic() + DEFAULT_ASK_TIMEOUT - _ROLE_ASK_MARGIN_S
             holder = plan.holder
             holder_text = (
                 f"session '{holder.title or holder.id}' ({holder.id})"
@@ -2964,14 +2978,30 @@ def register_core_routes(
                 f"Session '{source.title or source.id}' ({source.id}) asks to FORCE-RELEASE "
                 f"the role '{plan.handle}' (generation {plan.role.generation}) from "
                 f"{holder_text}{state}{then}. Approve?",
+                timeout_s=deadline - time.monotonic(),
             )
             if plan.role.permanent:
+                remaining = deadline - time.monotonic()
+                if remaining < _ROLE_ASK_MARGIN_S:
+                    raise OmnigentError(
+                        f"Too little time is left to confirm the permanent role '{plan.handle}' "
+                        "before this request times out; nothing was changed. Ask again.",
+                        code=ErrorCode.CONFLICT,
+                    )
                 await _ask_owner_on(
                     request,
                     source,
                     f"SECOND CONFIRMATION: '{plan.handle}' is a PERMANENT role. Really "
                     f"force-release it (generation {plan.role.generation}) from {holder_text}"
                     f"{then}? Approve only if you mean to unseat a permanent role.",
+                    timeout_s=remaining,
+                )
+            # An answer past the deadline or after the caller left must not apply.
+            if time.monotonic() > deadline or await request.is_disconnected():
+                raise OmnigentError(
+                    f"The owner's answer for '{plan.handle}' came after this request's "
+                    "deadline or after the caller left; nothing was changed. Ask again.",
+                    code=ErrorCode.CONFLICT,
                 )
 
         def _apply() -> dict[str, Any]:

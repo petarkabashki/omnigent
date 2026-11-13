@@ -135,17 +135,20 @@ ROLE_ID_LABEL_KEY = "omnigent.role_id"
 # Carries the row's ``overlay_ref`` when the role file is not the role's name.
 ROLE_OVERLAY_LABEL_KEY = "omnigent.role_overlay"
 # Set on a session whose role the owner force-released: the role handle, when
-# (ISO 8601 UTC), the requesting session id ("" for the owner) and the new
-# holder ("" when vacant). Cleared when the session takes a role again.
+# (ISO 8601 UTC), the requesting session id ("" for the owner), the new
+# holder ("" when vacant) and "true" for a permanent role ("" otherwise).
+# Cleared when the session takes a role again.
 ROLE_RELEASED_LABEL_KEY = "omnigent.role_released"
 ROLE_RELEASED_AT_LABEL_KEY = "omnigent.role_released.at"
 ROLE_RELEASED_BY_LABEL_KEY = "omnigent.role_released.by"
 ROLE_RELEASED_TO_LABEL_KEY = "omnigent.role_released.to"
+ROLE_RELEASED_PERMANENT_LABEL_KEY = "omnigent.role_released.permanent"
 ROLE_RELEASED_LABEL_KEYS = (
     ROLE_RELEASED_LABEL_KEY,
     ROLE_RELEASED_AT_LABEL_KEY,
     ROLE_RELEASED_BY_LABEL_KEY,
     ROLE_RELEASED_TO_LABEL_KEY,
+    ROLE_RELEASED_PERMANENT_LABEL_KEY,
 )
 
 # Name of the executor profile a session was created with, so Bench can score it.
