@@ -499,6 +499,10 @@ async def test_claude_native_title_uses_tool_free_print_mode(
     from omnigent.harnesses.claude_native.main import ClaudeNativeUcodeConfig
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+    monkeypatch.delenv("CLAUDE_CODE_AUTOMOUNT_ROOTS", raising=False)
+    (tmp_path / ".claude" / "skills" / "planted").mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "ambient-token")
     captured: dict[str, Any] = {}
     claude_config = ClaudeNativeUcodeConfig(
@@ -547,7 +551,7 @@ async def test_claude_native_title_uses_tool_free_print_mode(
                 harness="claude-native",
                 spawn_env={},
                 process_manager=None,
-                cwd=tmp_path,
+                cwd=workspace,
                 model_override="claude-sonnet-4-6",
             )
         )
@@ -577,7 +581,9 @@ async def test_claude_native_title_uses_tool_free_print_mode(
         },
     }
     assert "--no-session-persistence" in args
-    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["cwd"] == str(workspace)
+    skipped = captured["kwargs"]["env"]["CLAUDE_CODE_AUTOMOUNT_ROOTS"].split(":")
+    assert str(tmp_path.resolve()) in skipped, "planted parent skill folder not skipped"
     assert "CLAUDECODE" not in captured["kwargs"]["env"]
     assert "ANTHROPIC_API_KEY" not in captured["kwargs"]["env"]
     assert "ANTHROPIC_AUTH_TOKEN" not in captured["kwargs"]["env"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1928,3 +1929,30 @@ def test_planted_skills_reach_no_discovery_path(
 
     codex = codex_skill_sources(None, home, workspace=workspace).native
     assert all("planted" not in {p.name for p in d.iterdir()} for d in codex)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership")
+def test_skipped_skill_dirs_are_reported_in_the_catalog_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A skipped skills dir reaches ``ctx.warnings`` (the API field) as dir and reason only."""
+    home = tmp_path / "home"
+    home.mkdir()
+    workspace = tmp_path / "repo"
+    (workspace / ".git").mkdir(parents=True)
+    skills = workspace / ".claude" / "skills"
+    (skills / "planted").mkdir(parents=True)
+    (skills / "planted" / "SKILL.md").write_text("---\nname: planted\n---\nsecret body\n")
+    skills.chmod(0o777)
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    ctx = replace(_ctx(workspace, home), warnings=[])
+
+    assert resolve_harness_skills(ctx, "claude-native") == []
+    real = os.path.realpath(skills)
+    assert ctx.warnings == [
+        f"Skipped skills under {skills}: {real} is writable by other users",
+        f"Claude Code skips {os.path.realpath(workspace)}/.claude, CLAUDE.md and .mcp.json: "
+        "its .claude/skills folder is untrusted",
+    ]
+    assert all("secret body" not in warning for warning in ctx.warnings)

@@ -36,7 +36,11 @@ from omnigent.spec.parser import (
     discover_host_skills,
     skill_matches_names,
 )
-from omnigent.spec.repo_scope import is_trusted_dir, skill_scope_dirs
+from omnigent.spec.repo_scope import (
+    claude_workspace_skip_note,
+    is_trusted_dir,
+    skill_scope_dirs,
+)
 from omnigent.spec.types import AgentSpec, SkillSpec
 
 _log = logging.getLogger(__name__)
@@ -212,7 +216,11 @@ def _claude_code_skills(
     seen_dirs: set[Path] = set()
 
     def _add(candidate: Path) -> None:
-        if candidate in seen_dirs or not candidate.is_dir() or not is_trusted_dir(candidate):
+        if (
+            candidate in seen_dirs
+            or not candidate.is_dir()
+            or not is_trusted_dir(candidate, warnings=ctx.warnings)
+        ):
             return
         seen_dirs.add(candidate)
         dirs.append(candidate)
@@ -237,7 +245,9 @@ def _claude_code_skills(
         skipped: list[str] = []
         for spec in _discover_skills(skills_dir, skipped=skipped):
             # A linked skill must resolve inside the trust boundary too.
-            if spec.skill_dir is not None and not is_trusted_dir(spec.skill_dir):
+            if spec.skill_dir is not None and not is_trusted_dir(
+                spec.skill_dir, warnings=ctx.warnings
+            ):
                 continue
             # Portable command names become directory names in the launch overlay.
             if dotdir == ".agents" and not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", spec.name):
@@ -673,7 +683,9 @@ def _claude_command_roots(ctx: SkillSourceContext) -> list[Path]:
     if ctx.roots:
         project = skill_scope_dirs(ctx.roots[0], home=ctx.home)
         roots += [directory / ".claude" / "commands" for directory in project]
-    return [root for root in roots if not root.is_dir() or is_trusted_dir(root)]
+    return [
+        root for root in roots if not root.is_dir() or is_trusted_dir(root, warnings=ctx.warnings)
+    ]
 
 
 def _discover_claude_commands(
@@ -834,6 +846,10 @@ def claude_host_skills(ctx: SkillSourceContext) -> list[SkillSpec]:
             replace(ctx, skills_filter="all") if isinstance(ctx.skills_filter, list) else ctx
         )
         native = _claude_code_skills(native_ctx)
+        if ctx.warnings is not None and ctx.roots:
+            note = claude_workspace_skip_note(ctx.roots[0], home=ctx.home)
+            if note is not None and note not in ctx.warnings:
+                ctx.warnings.append(note)
         standalone = (
             [
                 skill

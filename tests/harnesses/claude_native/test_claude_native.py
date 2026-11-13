@@ -98,6 +98,17 @@ def _load_invocation_settings(args: list[str]) -> dict[str, Any]:
     return json.loads(settings_path.read_text(encoding="utf-8"))
 
 
+def _automount_env(workspace: Path) -> dict[str, str]:
+    """The automount skip list the terminal env adds for *workspace*."""
+    from omnigent.spec.repo_scope import claude_untrusted_ancestors, with_claude_automount_roots
+
+    roots = with_claude_automount_roots(
+        os.environ.get("CLAUDE_CODE_AUTOMOUNT_ROOTS"),
+        claude_untrusted_ancestors(workspace.resolve(), home=Path.home()),
+    )
+    return {"CLAUDE_CODE_AUTOMOUNT_ROOTS": roots} if roots else {}
+
+
 def test_claude_terminal_request_pins_launch_cwd(tmp_path, monkeypatch) -> None:
     """
     The terminal launch body pins ``cwd`` to the user's launch dir.
@@ -139,6 +150,7 @@ def test_claude_terminal_request_pins_launch_cwd(tmp_path, monkeypatch) -> None:
         "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
         "CLAUDE_ENV_FILE": claude_native.claude_tool_env_file(),
         "API_TIMEOUT_MS": "120000",
+        **_automount_env(tmp_path),
     }
     assert spec["os_env_type"] == "caller_process"
     # Claude Code emits long interactive transcripts; this value is
@@ -331,6 +343,7 @@ def test_claude_terminal_request_injects_claude_config(tmp_path, monkeypatch) ->
         "CLAUDE_ENV_FILE": claude_native.claude_tool_env_file(),
         "API_TIMEOUT_MS": "120000",
         "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK": "1",
+        **_automount_env(Path.cwd()),
     }
     args = spec["args"]
     assert args[:11] == [
@@ -13161,3 +13174,22 @@ def test_resolve_native_claude_config_spec_api_key_auth_skips_connect_broker(
     dc._write_sidecar(cfg, "https://srv", "hid", "launch-tok", "https://ws.example")
 
     assert claude_native.resolve_native_claude_config(spec=spec, refresh_models=False) is None
+
+
+def test_terminal_env_skips_untrusted_folders_above_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code's own walk skips shared folders; a user's automount value stays first."""
+    root = Path(os.path.realpath(tmp_path))
+    workspace = root / "shared" / "work"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root / "home"))
+    monkeypatch.setenv("CLAUDE_CODE_AUTOMOUNT_ROOTS", "/mnt/user")
+
+    terminal_env = claude_native.build_native_claude_terminal_env(None, workspace=workspace)
+
+    roots = terminal_env["CLAUDE_CODE_AUTOMOUNT_ROOTS"].split(":")
+    assert roots[:3] == ["/mnt/user", str(root / "shared"), str(root)]
+    assert str(workspace) not in roots
+    without = claude_native.build_native_claude_terminal_env(None)
+    assert "CLAUDE_CODE_AUTOMOUNT_ROOTS" not in without

@@ -96,7 +96,9 @@ async def generate_background_title(context: BackgroundTitleContext) -> str | No
     env = dict(os.environ)
     env.update(
         build_native_claude_terminal_env(
-            claude_config, client_surface=context.spawn_env.get(CLIENT_SURFACE_ENV_VAR)
+            claude_config,
+            client_surface=context.spawn_env.get(CLIENT_SURFACE_ENV_VAR),
+            workspace=context.cwd,
         )
     )
     for name in _claude_terminal_env_unset(claude_config):
