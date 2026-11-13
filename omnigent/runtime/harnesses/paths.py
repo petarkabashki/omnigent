@@ -12,6 +12,7 @@ from omnigent._platform import IS_WINDOWS
 
 # Relocates the per-user runtime parent. A parent outside /tmp escapes tmpfiles
 # aging, so files left there (bang logs, srt settings) persist until removed.
+# Its own parent must be sticky (like /tmp) or not writable by other users.
 HARNESS_TMP_PARENT_ENV_VAR = "OMNIGENT_HARNESS_TMP_PARENT"
 
 
@@ -84,14 +85,52 @@ def ensure_private_dir(path: Path, my_uid: int | None) -> None:
         os.chmod(path, 0o700)
 
 
+def _is_private_group(gid: int, my_uid: int) -> bool:
+    """Return whether ``gid`` is the user's own primary group with no listed members."""
+    import grp  # POSIX-only modules; callers skip this on Windows.
+    import pwd
+
+    try:
+        return pwd.getpwuid(my_uid).pw_gid == gid and not grp.getgrgid(gid).gr_mem
+    except KeyError:
+        return False
+
+
+def ensure_shared_dir_is_sticky(directory: Path, my_uid: int) -> None:
+    """
+    Refuse a directory that other users can write to without the sticky bit.
+
+    Without the sticky bit, another user could rename the runtime parent out of it.
+
+    :param directory: The runtime parent's own parent, e.g. ``Path("/tmp")``.
+    :param my_uid: Current uid; the user's own private group may write.
+    :raises RuntimeError: If ``directory`` is other-writable, or writable by a
+        shared group, and lacks the sticky bit.
+    """
+    st = os.stat(directory)
+    if st.st_mode & stat.S_ISVTX:
+        return
+    other_writable = bool(st.st_mode & stat.S_IWOTH)
+    shared_group_writable = bool(st.st_mode & stat.S_IWGRP) and not (
+        st.st_uid == my_uid and _is_private_group(st.st_gid, my_uid)
+    )
+    if other_writable or shared_group_writable:
+        raise RuntimeError(
+            f"refusing to use {directory!s} for the runtime parent: other users can write "
+            f"to it and it lacks the sticky bit. Run `chmod +t {directory!s}` or `chmod go-w "
+            f"{directory!s}`, or point {HARNESS_TMP_PARENT_ENV_VAR} elsewhere"
+        )
+
+
 def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
     """
     Create or validate the per-user parent of every Omnigent runtime dir.
 
     :param env: Environment to read the override from; defaults to ``os.environ``.
     :returns: The absolute parent, e.g. ``Path("/tmp/omnigent-1000")``.
-    :raises RuntimeError: If the parent is too long to hold Unix sockets, or
-        is a symlink, a non-directory, or owned by another uid.
+    :raises RuntimeError: If the parent is too long to hold Unix sockets, sits
+        in a directory others can write without the sticky bit, or is a
+        symlink, a non-directory, or owned by another uid.
     """
     parent = resolve_harness_tmp_parent(env)
     length = len(os.fsencode(parent))
@@ -102,7 +141,10 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
         )
     parent.parent.mkdir(parents=True, exist_ok=True)
     getuid = getattr(os, "getuid", None)
-    ensure_private_dir(parent, getuid() if getuid is not None else None)
+    my_uid = getuid() if getuid is not None else None
+    if my_uid is not None:
+        ensure_shared_dir_is_sticky(parent.parent, my_uid)
+    ensure_private_dir(parent, my_uid)
     return parent
 
 
