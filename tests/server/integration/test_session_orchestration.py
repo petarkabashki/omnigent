@@ -2083,6 +2083,10 @@ async def test_force_release_asks_the_owner_then_frees_the_role(
     assert labels[ROLE_RELEASED_TO_LABEL_KEY] == ""
     notice = role_release_instruction(labels)
     assert "/Keeper" in notice and source["id"] in notice and "vacant" in notice
+    # Only a holder whose runner is online is sent the notice; a dead runner is not woken.
+    assert result["holder_notified"] is holder_online
+    items = (await auth_client.get(f"/v1/sessions/{holder['id']}/items")).text
+    assert ("force-released" in items) is holder_online
 
     # Sends to the role fail clearly, naming the last holder and how to take it.
     vacant = await _send(auth_client, source, {"id": "Keeper"})
@@ -2163,6 +2167,47 @@ async def test_force_release_can_hand_the_role_to_another_session(
     # Taking a role again clears the old notice.
     await _hold(auth_client, holder, "Fresh")
     assert ROLE_RELEASED_LABEL_KEY not in _labels_of(db_uri, holder)
+
+
+async def test_force_released_holder_can_no_longer_speak_for_the_role_in_threads(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    _bind_runner(db_uri, holder["id"])
+    _mark_runner_online(db_uri, holder)
+    created = await auth_client.post(
+        "/v1/sessions/group-threads",
+        json={"title": "Plan", "members": [{"kind": "role", "ref": "/Keeper"}]},
+    )
+    assert created.status_code == 201, created.text
+    key = created.json()["thread"]["key"]
+    assert "post" in await _tool(auth_client, holder, "sys_thread_post", thread=key, message="hi")
+
+    await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    refused = await _tool(auth_client, holder, "sys_thread_post", thread=key, message="still?")
+    assert "not a member" in refused["detail"]
+    # Its own handle no longer resolves to it either.
+    vacant = await _send(auth_client, holder, {"id": "Keeper"})
+    assert "vacant" in json.dumps(vacant)
+
+
+async def test_a_failed_force_release_leaves_the_holder_labelled(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.stores.role_store.sqlalchemy_store import SqlAlchemyRoleStore
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+
+    def broken_release(*args, **kwargs):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(SqlAlchemyRoleStore, "release", broken_release)
+    failed = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert "error" in failed
+    assert _alias_of(db_uri, holder) == "Keeper"
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == holder["id"]
 
 
 async def test_owner_force_release_is_its_own_approval(auth_client, peers, db_uri, owner_verdicts):

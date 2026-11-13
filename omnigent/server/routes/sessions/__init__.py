@@ -951,6 +951,7 @@ def create_sessions_router(
         project_store=project_store,
         background_title_coordinator=background_title_coordinator,
         pull_request_refresher=pull_request_refresher,
+        late_handlers=group_thread_handlers,
     )
 
     register_hooks_routes(

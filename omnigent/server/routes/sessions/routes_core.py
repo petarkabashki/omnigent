@@ -10,7 +10,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from itertools import batched
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -522,6 +522,10 @@ async def _fill_agent_id_from_executor(payload: dict[str, Any]) -> dict[str, Any
     return {**payload, "agent_id": profile.agent_id} if profile.agent_id else payload
 
 
+if TYPE_CHECKING:
+    from omnigent.server.routes.sessions.routes_group_threads import GroupThreadHandlers
+
+
 def register_core_routes(
     router: APIRouter,
     *,
@@ -541,6 +545,7 @@ def register_core_routes(
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     pull_request_refresher: server_prs.PullRequestRefresher | None = None,
+    late_handlers: GroupThreadHandlers | None = None,
 ) -> tuple[
     Callable[[Request, str, SessionForkRequest], Awaitable[SessionResponse]],
     ClearSessionIntoFreshSession,
@@ -2896,7 +2901,35 @@ def register_core_routes(
                 "generation": role.generation,
             }
 
-        return await asyncio.to_thread(_apply)
+        result = await asyncio.to_thread(_apply)
+        result["holder_notified"] = await _notify_released_holder(
+            request, plan.role.holder_session_id
+        )
+        return result
+
+    async def _notify_released_holder(request: Request, holder_id: str) -> bool:
+        """Queue one plain notice to a released holder whose runner is online.
+
+        An offline holder is not woken; it reads the label-based notice at its next launch.
+        Delivery is best effort: the release has already happened.
+        """
+        from omnigent.runtime.prompt import role_release_instruction
+
+        post_event = late_handlers.post_event if late_handlers is not None else None
+        status = (await asyncio.to_thread(_holder_status, [holder_id])).get(holder_id)
+        if post_event is None or status is None or not status.runner_online:
+            return False
+        holder = await asyncio.to_thread(conversation_store.get_conversation, holder_id)
+        notice = role_release_instruction(holder.labels if holder is not None else {})
+        if not notice:
+            return False
+        data = {"role": "user", "content": [{"type": "input_text", "text": notice}]}
+        try:
+            await post_event(request, holder_id, SessionEventInput(type="message", data=data))
+        except Exception:
+            _logger.warning("Could not notify session %s of its role release", holder_id)
+            return False
+        return True
 
     # ── PUT /sessions/{session_id}/read-state ─────────────────────
     #

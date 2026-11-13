@@ -1019,7 +1019,12 @@ def apply_force_release(
         # Labels first, as for any release; restored below if the CAS loses.
         if old_holder is not None:
             _clear_mirror(conversations, old_holder)
-        written = roles.release(role, actor="owner", reason=reason, role_path=plan.path)
+        try:
+            written = roles.release(role, actor="owner", reason=reason, role_path=plan.path)
+        except Exception:
+            if plan.holder is not None:
+                _write_mirror(conversations, plan.holder, role)
+            raise
     if written is None:
         current = roles.get(role.id, user_id=user_id)
         if target is None and plan.holder is not None and current is not None:
