@@ -2414,6 +2414,11 @@ def main() -> None:
         click.echo("Aborted!", err=True)
         raise SystemExit(1) from exc
     except Exception as exc:
+        if (config_error := _runtime_parent_error(exc)) is not None:
+            # A bad runtime parent is the operator's to fix, not a crash to report.
+            log_cli_exception(exc, prefix="Configuration error")
+            click.echo(f"Error: {config_error}", err=True)
+            raise SystemExit(1) from exc
         # Keep the diagnostics log line ("Details logged to …") — the
         # always-on CLI log has more context than this single crash — then
         # hand off to the friendly crash handler for the calm screen,
@@ -2427,6 +2432,20 @@ def main() -> None:
         log_cli_error_hint(exc)
         handle_crash(exc)
         raise SystemExit(1) from exc
+
+
+def _runtime_parent_error(exc: BaseException) -> BaseException | None:
+    """The :class:`RuntimeParentError` that *exc* is or was raised from, if any."""
+    from omnigent.runtime.harnesses.paths import RuntimeParentError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, RuntimeParentError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _is_run_shorthand(argv: list[str]) -> bool:
@@ -10176,6 +10195,10 @@ def host(
     ctx.obj["non_interactive"] = non_interactive
     if ctx.invoked_subcommand is not None:
         return
+    # Every session needs the runtime parent: refuse here, not after "Connected".
+    from omnigent.runtime.harnesses.paths import ensure_runtime_parent
+
+    ensure_runtime_parent()
     # Kept before the config fallback below: `--background` echoes a `host
     # stop` command that mirrors how this command was invoked.
     explicit_server = server

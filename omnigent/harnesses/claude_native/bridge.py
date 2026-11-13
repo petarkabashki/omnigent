@@ -8299,24 +8299,43 @@ def _serve_mcp(bridge_dir: Path) -> None:
     if not isinstance(token, str) or not token:
         raise SystemExit("bridge config missing token")
 
+    # Harness CLIs and tmux end serve-mcp with SIGTERM or SIGHUP; leave through the
+    # cleanup below so the control socket doesn't outlive the process.
+    _exit_cleanly_on_termination()
     notification_queue: queue.Queue[_JsonObject | None] = queue.Queue()
     stdout_lock = threading.Lock()
     httpd = _start_http_ingress(bridge_dir, token, notification_queue)
-    tools, close_tools = _build_tools(config)
-    writer = threading.Thread(
-        target=_notification_writer,
-        args=(notification_queue, stdout_lock),
-        name="claude-native-mcp-writer",
-        daemon=True,
-    )
-    writer.start()
+    close_tools: Callable[[], None] | None = None
     try:
+        tools, close_tools = _build_tools(config)
+        writer = threading.Thread(
+            target=_notification_writer,
+            args=(notification_queue, stdout_lock),
+            name="claude-native-mcp-writer",
+            daemon=True,
+        )
+        writer.start()
         _stdio_jsonrpc_loop(tools, stdout_lock, bridge_dir)
     finally:
         notification_queue.put(None)
         httpd.shutdown()
         httpd.server_close()
-        close_tools()
+        if close_tools is not None:
+            close_tools()
+
+
+def _exit_cleanly_on_termination() -> None:
+    """Turn SIGTERM and SIGHUP into :class:`SystemExit` so ``finally`` blocks run."""
+    import signal
+
+    if IS_WINDOWS:
+        return
+
+    def _exit(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, _exit)
 
 
 def _start_http_ingress(

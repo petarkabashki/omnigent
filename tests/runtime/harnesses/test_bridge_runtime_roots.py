@@ -16,7 +16,12 @@ import pytest
 from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native import bridge as claude_bridge
 from omnigent.inner import claude_sdk_executor
-from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, RUNTIME_PARENT_MAX
+from omnigent.runtime.harnesses.paths import (
+    HARNESS_TMP_PARENT_ENV_VAR,
+    RUNTIME_PARENT_MAX,
+    RuntimeParentError,
+    ensure_runtime_parent,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX runtime parent")
 
@@ -189,3 +194,37 @@ def test_harnesses_without_a_serve_mcp_child_need_no_pin(harness: str) -> None:
     # Their hook children get the concrete bridge dir, so there is no root to agree on.
     module = importlib.import_module(f"omnigent.harnesses.{harness}_native.bridge")
     assert "serve-mcp" not in Path(module.__file__).read_text()
+
+
+def test_host_refuses_a_bad_parent_as_a_configuration_error(tmp_path: Path) -> None:
+    long_parent = tmp_path / ("p" * max(1, RUNTIME_PARENT_MAX + 1 - len(os.fsencode(tmp_path))))
+    env = _child_env(
+        **{
+            HARNESS_TMP_PARENT_ENV_VAR: str(long_parent),
+            "OMNIGENT_DATA_DIR": str(tmp_path / "data"),
+            "OMNIGENT_CONFIG_HOME": str(tmp_path / "config"),
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "omnigent", "host", "--non-interactive", "--no-open"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    assert f"Error: runtime parent {long_parent} is" in proc.stderr
+    assert f"Shorten {HARNESS_TMP_PARENT_ENV_VAR}" in proc.stderr
+    output = proc.stdout + proc.stderr
+    for absent in ("ran into an issue", "Traceback", "omnigent stop", "Connected"):
+        assert absent not in output, output[-2000:]
+    assert not long_parent.exists()
+
+
+def test_parent_errors_are_configuration_errors(short_tmp_dir: Path) -> None:
+    shared = short_tmp_dir / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)  # other-writable without the sticky bit
+    with pytest.raises(RuntimeParentError, match="sticky"):
+        ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(shared / "rp")})

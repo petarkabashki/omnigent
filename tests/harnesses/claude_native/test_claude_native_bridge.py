@@ -14,6 +14,7 @@ import queue
 import select
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -16919,6 +16920,47 @@ def test_http_ingress_reaps_sockets_of_dead_owners(
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Unix control socket")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_serve_mcp_removes_its_socket_when_terminated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _short_harness_socket_root: Path,
+    signum: int,
+) -> None:
+    """Harnesses and tmux stop serve-mcp with a signal, not EOF; the socket still goes."""
+    # The child resolves its roots from the env var; give this process the same ones.
+    root = _short_harness_socket_root
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT_PARENT", root)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", root / "claude-native")
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", root.parent)
+    bridge_dir = prepare_bridge_dir("conv_serve_mcp_signal", workspace=tmp_path)
+    server_file = bridge_dir / claude_native_bridge._SERVER_FILE
+    command = [sys.executable, "-m", "omnigent.harnesses.claude_native.bridge"]
+    child = subprocess.Popen(
+        [*command, "serve-mcp", "--bridge-dir", str(bridge_dir)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env={**os.environ, HARNESS_TMP_PARENT_ENV_VAR: str(root)},
+    )
+    try:
+        socket_path = root / f"mcp-{child.pid}.sock"
+        deadline = time.monotonic() + 30
+        while not socket_path.exists() or not server_file.exists():
+            if child.poll() is not None or time.monotonic() > deadline:
+                child.kill()
+                pytest.fail(f"serve-mcp never bound: {child.communicate()[1][-2000:]!r}")
+            time.sleep(0.05)
+        child.send_signal(signum)
+        assert child.wait(timeout=30) == 128 + signum
+        assert not socket_path.exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=30)
 
 
 @pytest.mark.usefixtures("_no_ambient_bridge_network")

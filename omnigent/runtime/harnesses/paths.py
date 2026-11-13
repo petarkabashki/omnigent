@@ -122,29 +122,41 @@ def ensure_shared_dir_is_sticky(directory: Path, my_uid: int) -> None:
         )
 
 
+class RuntimeParentError(RuntimeError):
+    """The runtime parent is unusable: a configuration error, not a crash."""
+
+    # Read by ``omnigent.cli_diagnostics``: ``omnigent stop`` can't fix this.
+    omnigent_suppress_recovery_hint = True
+
+
 def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
     """
     Create or validate the per-user parent of every Omnigent runtime dir.
 
     :param env: Environment to read the override from; defaults to ``os.environ``.
     :returns: The absolute parent, e.g. ``Path("/tmp/omnigent-1000")``.
-    :raises RuntimeError: If the parent is too long to hold Unix sockets, sits
-        in a directory others can write without the sticky bit, or is a
-        symlink, a non-directory, or owned by another uid.
+    :raises RuntimeParentError: If the parent is too long to hold Unix sockets,
+        sits in a directory others can write without the sticky bit, is a
+        symlink, a non-directory, or owned by another uid, or can't be created.
     """
     parent = resolve_harness_tmp_parent(env)
     length = len(os.fsencode(parent))
     if not IS_WINDOWS and length > RUNTIME_PARENT_MAX:
-        raise RuntimeError(
+        raise RuntimeParentError(
             f"runtime parent {parent} is {length} bytes; the limit is {RUNTIME_PARENT_MAX} "
             f"bytes, so Unix sockets under it fit. Shorten {HARNESS_TMP_PARENT_ENV_VAR}"
         )
-    parent.parent.mkdir(parents=True, exist_ok=True)
-    getuid = getattr(os, "getuid", None)
-    my_uid = getuid() if getuid is not None else None
-    if my_uid is not None:
-        ensure_shared_dir_is_sticky(parent.parent, my_uid)
-    ensure_private_dir(parent, my_uid)
+    try:
+        parent.parent.mkdir(parents=True, exist_ok=True)
+        getuid = getattr(os, "getuid", None)
+        my_uid = getuid() if getuid is not None else None
+        if my_uid is not None:
+            ensure_shared_dir_is_sticky(parent.parent, my_uid)
+        ensure_private_dir(parent, my_uid)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeParentError(
+            f"{exc} (runtime parent, set by {HARNESS_TMP_PARENT_ENV_VAR})"
+        ) from exc
     return parent
 
 
