@@ -22,3 +22,9 @@ def _ignore_ambient_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     :returns: None.
     """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _ignore_ambient_claude_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exact-env tests must not see the ``CLAUDE_ENV_FILE`` Claude Code sets for its shells."""
+    monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
