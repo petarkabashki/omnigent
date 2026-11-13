@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,7 @@ def test_claude_provider_includes_bridged_agents_skills(
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
     ancestor = tmp_path / "project"
     workspace = ancestor / "ws"
+    (ancestor / ".git").mkdir(parents=True)  # the repository root bounds the walk
     for root, names in (
         (workspace, ("shared", "native")),
         (ancestor, ("shared", "ancestor")),
@@ -1787,10 +1789,10 @@ def test_claude_project_commands_stop_at_the_repository_root(
     assert names == {"service-cmd", "repo-cmd"}
 
 
-def test_claude_project_commands_outside_home_and_any_repository_read_every_ancestor(
+def test_claude_project_commands_outside_home_and_any_repository_read_only_the_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With neither a repository root nor home above it, the walk reads each ancestor."""
+    """With neither a repository root nor home above it, ancestors are out of scope."""
     home = tmp_path / "home"
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
     scratch = tmp_path / "scratch"
@@ -1799,8 +1801,8 @@ def test_claude_project_commands_outside_home_and_any_repository_read_every_ance
     _write_plugin_command(scratch / ".claude" / "commands", "above-cmd", "An ancestor.\n")
 
     names = {s.name for s in resolve_harness_skills(_ctx(workspace, home), "claude-native")}
-    # Directories above tmp_path are the test machine's own, so check only these two.
-    assert {"here-cmd", "above-cmd"} <= names
+    assert "here-cmd" in names
+    assert "above-cmd" not in names
 
 
 def test_claude_personal_commands_follow_config_dir_and_skip_home(
@@ -1860,3 +1862,69 @@ def test_claude_commands_respect_skills_filter(
 
     assert names(["team"]) == ["team"]
     assert names("none") == []
+
+
+def _planted_layout(tmp_path: Path, case: str) -> tuple[Path, Path]:
+    """Plant ``planted`` skills just outside the trust boundary; return (workspace, home)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    if case == "shared-tmp":
+        # A shared sticky directory such as /tmp, with no repository or home above.
+        shared = tmp_path / "shared"
+        workspace = shared / "ws"
+        planted_root = shared
+    elif case == "above-repository":
+        workspace = tmp_path / "outer" / "repo" / "ws"
+        (workspace.parent / ".git").mkdir(parents=True)
+        planted_root = tmp_path / "outer"
+    else:  # "world-writable-in-scope"
+        workspace = tmp_path / "repo" / "ws"
+        (workspace.parent / ".git").mkdir(parents=True)
+        planted_root = workspace.parent
+    for dotdir in (".claude", ".agents"):
+        _write_skill(planted_root / dotdir / "skills", "planted")
+        _write_skill(workspace / dotdir / "skills", f"own{dotdir.replace('.', '-')}")
+    if case == "shared-tmp":
+        planted_root.chmod(0o1777)
+    if case == "world-writable-in-scope":
+        for dotdir in (".claude", ".agents"):
+            (planted_root / dotdir / "skills").chmod(0o777)
+    return workspace, home
+
+
+_PLANTED_CASES = ["shared-tmp", "above-repository", "world-writable-in-scope"]
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership")
+@pytest.mark.parametrize("case", _PLANTED_CASES)
+def test_planted_skills_reach_no_discovery_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Menu, typed /name, load_skill, the REPL and the launch overlay all skip planted skills."""
+    from omnigent.inner.bundle_skills import claude_agents_skill_args
+    from omnigent.inner.codex_executor import codex_skill_sources
+    from omnigent.spec.parser import discover_host_skills
+
+    previous_umask = os.umask(0o022)  # no group write, whatever the host umask is
+    try:
+        workspace, home = _planted_layout(tmp_path, case)
+    finally:
+        os.umask(previous_umask)
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    native = {s.name for s in resolve_harness_skills(_ctx(workspace, home), "claude-native")}
+    assert native == {"own-claude", "own-agents"}
+    # Harnesses without their own provider, load_skill, the REPL and role
+    # instructions all resolve through discover_host_skills.
+    generic = {s.name for s in discover_host_skills(workspace, "all")}
+    assert generic == {"own-claude", "own-agents"}
+    assert {s.name for s in resolve_harness_skills(_ctx(workspace, home), None)} == generic
+
+    bridge = tmp_path / "bridge"
+    args = claude_agents_skill_args(bridge, (workspace,), "all")
+    linked = {p.name for p in (bridge / "agent-skills" / ".claude" / "skills").iterdir()}
+    assert args and linked == {"own-agents"}
+
+    codex = codex_skill_sources(None, home, workspace=workspace).native
+    assert all("planted" not in {p.name for p in d.iterdir()} for d in codex)

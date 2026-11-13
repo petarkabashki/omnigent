@@ -2429,8 +2429,9 @@ def discover_host_skills(
 ) -> list[SkillSpec]:
     """
     Discover host-scope skills from ``.claude/skills/`` and
-    ``.agents/skills/`` directories walking up from *agent_root*,
-    plus the user's global ``~/.claude/skills/``.
+    ``.agents/skills/`` in *agent_root*'s bounded scope (see
+    :func:`~omnigent.spec.repo_scope.skill_scope_dirs`), plus the
+    user's ``~/.claude/skills/`` and ``~/.agents/skills/``.
 
     Not called by :func:`parse` — host-scope skills are a REPL
     concern, not a spec concern. Callers (e.g. ``chat.py``) merge
@@ -2448,6 +2449,7 @@ def discover_host_skills(
     """
     if skills_filter == "none":
         return []
+    from omnigent.spec.repo_scope import is_trusted_dir, skill_scope_dirs
 
     seen_names: set[str] = set()
     skills: list[SkillSpec] = []
@@ -2458,6 +2460,9 @@ def discover_host_skills(
 
     def _scan_dir(d: Path) -> None:
         for spec in _discover_skills(d, skipped=skipped):
+            # A linked skill must resolve inside the trust boundary too.
+            if spec.skill_dir is not None and not is_trusted_dir(spec.skill_dir):
+                continue
             if spec.name in seen_names:
                 continue
             if filter_names is not None and not skill_matches_names(spec, filter_names):
@@ -2465,24 +2470,13 @@ def discover_host_skills(
             seen_names.add(spec.name)
             skills.append(spec)
 
-    # Walk from agent_root up to filesystem root, scanning
-    # .claude/skills/ and .agents/skills/ at each level.
-    current = agent_root.resolve()
-    while True:
+    # The bounded workspace scope first, then the user-global tier.
+    home = Path.home()
+    for directory in (*skill_scope_dirs(agent_root, home=home), home):
         for dotdir in (".claude", ".agents"):
-            candidate = current / dotdir / "skills"
-            if candidate.is_dir():
+            candidate = directory / dotdir / "skills"
+            if candidate.is_dir() and is_trusted_dir(candidate):
                 _scan_dir(candidate)
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-
-    # Also scan user-global skill directories.
-    for dotdir in (".claude", ".agents"):
-        home_skills = Path.home() / dotdir / "skills"
-        if home_skills.is_dir():
-            _scan_dir(home_skills)
 
     if skipped:
         dest = getattr(sys.stderr, "_original_stderr", sys.stderr)

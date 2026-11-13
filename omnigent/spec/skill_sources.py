@@ -36,7 +36,7 @@ from omnigent.spec.parser import (
     discover_host_skills,
     skill_matches_names,
 )
-from omnigent.spec.repo_scope import repo_scope_dirs
+from omnigent.spec.repo_scope import is_trusted_dir, skill_scope_dirs
 from omnigent.spec.types import AgentSpec, SkillSpec
 
 _log = logging.getLogger(__name__)
@@ -212,7 +212,7 @@ def _claude_code_skills(
     seen_dirs: set[Path] = set()
 
     def _add(candidate: Path) -> None:
-        if candidate in seen_dirs or not candidate.is_dir():
+        if candidate in seen_dirs or not candidate.is_dir() or not is_trusted_dir(candidate):
             return
         seen_dirs.add(candidate)
         dirs.append(candidate)
@@ -221,13 +221,13 @@ def _claude_code_skills(
     roots = ctx.roots[:1] if dotdir == ".claude" else ctx.roots
     bundle_root = ctx.bundle_dir.resolve() if dotdir == ".agents" and ctx.bundle_dir else None
     for index, root in enumerate(roots):
-        current = root.resolve()
-        while True:
-            _add(current / dotdir / "skills")
-            parent = current.parent
-            if index > 0 or parent == current or current == bundle_root:
+        if index > 0:
+            _add(root.resolve() / dotdir / "skills")
+            continue
+        for directory in skill_scope_dirs(root, home=ctx.home):
+            _add(directory / dotdir / "skills")
+            if directory == bundle_root:
                 break
-            current = parent
     # User tier last, so a workspace skill wins a name collision.
     user_dir = _claude_user_dir(ctx) if dotdir == ".claude" else ctx.home / dotdir
     _add(user_dir / "skills")
@@ -236,6 +236,9 @@ def _claude_code_skills(
     for skills_dir in dirs:
         skipped: list[str] = []
         for spec in _discover_skills(skills_dir, skipped=skipped):
+            # A linked skill must resolve inside the trust boundary too.
+            if spec.skill_dir is not None and not is_trusted_dir(spec.skill_dir):
+                continue
             # Portable command names become directory names in the launch overlay.
             if dotdir == ".agents" and not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", spec.name):
                 _log.warning(
@@ -663,15 +666,14 @@ def _claude_command_roots(ctx: SkillSourceContext) -> list[Path]:
     """
     The ``commands`` directories Claude Code reads, in its load order.
 
-    The user tier comes first, then the workspace and its ancestors up to the
-    repository root, stopping short of the home directory as Claude Code does.
-    Claude Code walks ``.claude/skills`` differently, so the two walks differ too.
+    The user tier comes first, then the workspace scope of :func:`skill_scope_dirs`.
+    Directories other users can write are skipped.
     """
     roots = [_claude_user_dir(ctx) / "commands"]
-    if not ctx.roots:
-        return roots
-    project = repo_scope_dirs(ctx.roots[0], home=ctx.home, outside_repo="ancestors")
-    return roots + [directory / ".claude" / "commands" for directory in project]
+    if ctx.roots:
+        project = skill_scope_dirs(ctx.roots[0], home=ctx.home)
+        roots += [directory / ".claude" / "commands" for directory in project]
+    return [root for root in roots if not root.is_dir() or is_trusted_dir(root)]
 
 
 def _discover_claude_commands(

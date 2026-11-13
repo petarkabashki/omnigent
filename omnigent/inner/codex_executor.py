@@ -74,7 +74,7 @@ from omnigent.models.model_fallbacks import CODEX_CATALOG_CLONE_SOURCE_SLUG, COD
 from omnigent.native import _native_forwarder_health as native_forwarder_health
 from omnigent.runtime.harnesses.paths import ensure_runtime_parent
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
-from omnigent.spec.repo_scope import repo_scope_dirs
+from omnigent.spec.repo_scope import is_trusted_dir, repo_scope_dirs
 from omnigent.spec.types import RetryPolicy
 from omnigent.telemetry.surface import harness_client_surface
 from omnigent.util.reasoning_effort import CODEX_EFFORTS, EFFORT_ALIASES, validate_effort
@@ -834,6 +834,7 @@ def codex_skill_sources(
             for directory in repo_scope_dirs(workspace, outside_repo="self")
             if (skills := directory / ".agents" / "skills").is_dir()
             and os.path.realpath(skills) != user_tier
+            and is_trusted_dir(skills)
         ]
     return CodexSkillSources(linked=linked, native=native)
 
