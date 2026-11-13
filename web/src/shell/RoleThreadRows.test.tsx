@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import { roleThreadsExpansionKey, setRoleThreadsExpanded } from "@/lib/roleThreadExpansion";
 import * as roleThreadsApi from "@/lib/roleThreads";
 import * as rolesApi from "@/lib/rolesApi";
 import * as sessionsApi from "@/lib/sessionsApi";
@@ -24,7 +25,8 @@ function holder(labels: Record<string, string>): Conversation {
   } as Conversation;
 }
 
-function renderRows(conversation: Conversation) {
+function renderRows(conversation: Conversation, { expanded = true } = {}) {
+  setRoleThreadsExpanded(roleThreadsExpansionKey(conversation), expanded);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
@@ -50,6 +52,7 @@ function renderRows(conversation: Conversation) {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  localStorage.clear();
 });
 
 describe("RoleThreadRows", () => {
@@ -73,6 +76,11 @@ describe("RoleThreadRows", () => {
       ),
     ).toEqual(["red", "neutral"]);
     expect(within(rows[0]).getByLabelText("3 not yet handled by the role")).toBeInTheDocument();
+  });
+
+  it("renders nothing while the role is collapsed", () => {
+    renderRows(holder({ "thread.aaaaaaaaaaaa.cp": "/Architect" }), { expanded: false });
+    expect(screen.queryByTestId("role-thread-rows")).not.toBeInTheDocument();
   });
 
   it("renders nothing for a session with no threads", () => {

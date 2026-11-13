@@ -14,7 +14,7 @@ import { useSyncExternalStore, type ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ServerInfo } from "@/lib/capabilities";
 import type * as IdentityModule from "@/lib/identity";
@@ -1708,5 +1708,67 @@ describe("peek mode row menu", () => {
     fireEvent.pointerLeave(aside);
     vi.advanceTimersByTime(1000);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("role thread count and toggle", () => {
+  const ROLE_ROW: Conversation = {
+    ...CONV,
+    id: "conv_role",
+    title: "Product",
+    labels: {
+      "omnigent.alias": "Product",
+      "thread.aaaaaaaaaaaa.cp": "/Architect",
+      "thread.aaaaaaaaaaaa.state": "waiting_on_owner",
+      "thread.bbbbbbbbbbbb.cp": "/Bench",
+      "thread.bbbbbbbbbbbb.state": "blocked",
+      "thread.cccccccccccc.cp": "/Comms",
+      "thread.cccccccccccc.state": "no_reply",
+      "thread.dddddddddddd.cp": "/Coordinator",
+      "thread.dddddddddddd.held": "ok 6",
+    },
+  };
+
+  function LocationProbe() {
+    return <p data-testid="location">{useLocation().pathname}</p>;
+  }
+
+  it("shows the count on the role row, with only held or owner-marked threads needing you", () => {
+    mockConversations([CONV, ROLE_ROW]);
+    renderSidebar();
+    const count = screen.getByTestId("role-thread-count");
+    expect(count).toHaveTextContent("4 · 2");
+    expect(count).toHaveAccessibleName("4 threads, 2 need you");
+    expect(count).toHaveAttribute("title", "4 threads, 2 need you");
+    expect(screen.getAllByTestId("role-thread-count")).toHaveLength(1);
+  });
+
+  it("keeps threads collapsed until the chevron opens them, without opening the role", () => {
+    mockConversations([CONV, ROLE_ROW]);
+    renderSidebar("conv_1", undefined, { header: <LocationProbe /> });
+    expect(screen.queryByTestId("role-thread-rows")).toBeNull();
+
+    const toggle = screen.getByRole("button", { name: "Show threads: 4 threads, 2 need you" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(screen.getAllByTestId("role-thread-row")).toHaveLength(4);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("location")).toHaveTextContent("/c/conv_1");
+  });
+
+  it("remembers an expanded role across a reload", () => {
+    mockConversations([CONV, ROLE_ROW]);
+    renderSidebar();
+    fireEvent.click(screen.getByTestId("role-threads-toggle"));
+    cleanup();
+
+    renderSidebar();
+    expect(screen.getAllByTestId("role-thread-row")).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: /^Hide threads/ }));
+    cleanup();
+
+    renderSidebar();
+    expect(screen.queryByTestId("role-thread-rows")).toBeNull();
   });
 });

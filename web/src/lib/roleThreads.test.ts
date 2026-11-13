@@ -3,12 +3,17 @@ import * as identity from "@/lib/identity";
 import {
   fetchRoleThreadMessages,
   roleHandlePath,
+  roleThreadCountText,
+  roleThreadCounts,
   roleThreadIsUrgent,
+  roleThreadNeedsOwner,
   roleThreadNudgeText,
+  roleThreadStateDescription,
   roleThreadStateLabels,
   roleThreadStateText,
   resolveHeldThreadMessage,
   roleThreadsFromLabels,
+  type RoleThread,
 } from "./roleThreads";
 
 const ALIAS = { "omnigent.alias": "Product" };
@@ -162,5 +167,40 @@ describe("roleThreadNudgeText", () => {
       "Reminder: 1 message from /Architect in this thread still unhandled, waiting 25 min. " +
         "Please reply or act on them, then record the thread with sys_thread_note.",
     );
+  });
+});
+
+describe("role thread counts", () => {
+  const thread = (state: string, held = false) =>
+    ({
+      key: state,
+      counterpart: `/${state}`,
+      state,
+      unread: 0,
+      messages: 0,
+      summary: "",
+      updatedAt: 0,
+      ...(held ? { held: { text: "ok", to: null, at: null } } : {}),
+    }) as RoleThread;
+
+  it("counts only held or owner-marked threads as needing you", () => {
+    const counts = roleThreadCounts([
+      thread("waiting_on_owner"),
+      thread("blocked"),
+      thread("no_reply"),
+      thread("waiting_on_us", true),
+      thread("open"),
+    ]);
+    expect(counts).toEqual({ total: 5, needsYou: 2 });
+    expect(roleThreadCountText(counts)).toBe("5 threads, 2 need you");
+    expect(roleThreadCountText({ total: 1, needsYou: 1 })).toBe("1 thread, 1 needs you");
+    expect(roleThreadCountText({ total: 3, needsYou: 0 })).toBe("3 threads");
+  });
+
+  it("shows no_reply as a visible state that is not the owner's", () => {
+    expect(roleThreadStateText("no_reply")).toBe("No reply");
+    expect(roleThreadIsUrgent("no_reply")).toBe(true);
+    expect(roleThreadNeedsOwner(thread("no_reply"))).toBe(false);
+    expect(roleThreadStateDescription("no_reply")).not.toBe("");
   });
 });

@@ -205,7 +205,8 @@ import { relativeTime } from "@/lib/relativeTime";
 import { newThreadPath } from "@/lib/groupThreads";
 import { ALIAS_LABEL_KEY, sessionRoleHandle } from "@/lib/rolesApi";
 import { OpenThreadDialog } from "./OpenThreadDialog";
-import { RoleThreadRows } from "./RoleThreadRows";
+import { RoleThreadCount, RoleThreadRows, RoleThreadsToggle } from "./RoleThreadRows";
+import { roleThreadsFromLabels } from "@/lib/roleThreads";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
 import { unpinWithUndo } from "./unpinUndoToast";
@@ -6024,6 +6025,11 @@ function ConversationRowImpl({
     roleProjectPath,
     conversation.project_id != null,
   );
+  const roleThreads = useMemo(
+    () => roleThreadsFromLabels(conversation.labels),
+    [conversation.labels],
+  );
+  const showThreadsToggle = roleThreads.length > 0 && !selectionMode;
   // Subscribed so the just-recorded optimistic label flips the row
   // immediately instead of at the next conversations poll.
   const optimisticTitle = useOptimisticTitle(conversation.id);
@@ -6400,6 +6406,7 @@ function ConversationRowImpl({
           {showMachineTag && (
             <SessionMachineTag conversation={conversation} hostsById={hostsById} />
           )}
+          {roleThreads.length > 0 && <RoleThreadCount threads={roleThreads} />}
         </span>
       </div>
       <SessionKindLine conversation={conversation} title={label} mark={harnessMark} />
@@ -6423,6 +6430,13 @@ function ConversationRowImpl({
           <ChevronRightIcon className={cn("size-3", familyExpanded && "rotate-90")} />
         </button>
       )}
+      {showThreadsToggle && (
+        <RoleThreadsToggle
+          conversation={conversation}
+          threads={roleThreads}
+          className={familyExpanded !== undefined ? "left-7" : "left-2"}
+        />
+      )}
       <Link
         to={selectionMode ? "#" : `/c/${conversation.id}`}
         componentId="sidebar.conversation_switcher"
@@ -6445,7 +6459,8 @@ function ConversationRowImpl({
           "w-full",
           // Touch reaches the row menu by long press.
           "mobile-touch-target",
-          familyExpanded !== undefined && "pl-7",
+          familyExpanded !== undefined && (showThreadsToggle ? "pl-12" : "pl-7"),
+          familyExpanded === undefined && showThreadsToggle && "pl-7",
           // Mobile drops the pin + kebab (see the trailing controls below), so it
           // reserves only what the badge needs — the same width desktop uses at
           // rest, before hover reveals the controls.
