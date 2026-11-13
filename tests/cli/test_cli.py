@@ -6203,7 +6203,9 @@ def test_config_list_ignores_project_harness_launch_overrides(
     assert "harness=codex" in result.output
     assert "per-harness overrides" not in result.output
     assert "ignored project harness launch overrides: harness.pi" in result.output
-    assert str(config_home / "config.yaml") in result.output
+    from omnigent import cli as cli_module
+
+    assert cli_module._display_config_path(config_home / "config.yaml") in result.output
     assert "project-pi" not in result.output
     assert "--project-arg" not in result.output
 
