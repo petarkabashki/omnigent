@@ -1614,9 +1614,10 @@ def register_events_routes(
             request, session_id, body, in_flight, peer_message_id=message_id
         )
         result = {**ack, "message_id": message_id}
-        if body.data.get("kind") == "fyi" and not ack.get("denied") and not ack.get("duplicate"):
+        if not ack.get("denied") and not ack.get("duplicate"):
             # Only a host-bound session has a durable inbox to hold an fyi in.
-            if result.setdefault("delivered_kind", "action") == "action":
+            delivered_kind = result.setdefault("delivered_kind", "action")
+            if body.data.get("kind") == "fyi" and delivered_kind == "action":
                 result["delivered_kind_reason"] = "no durable inbox"
         return result
 

@@ -589,7 +589,7 @@ def register_core_routes(
                     "initial_files requires initial_input", code=ErrorCode.INVALID_INPUT
                 )
             return
-        if getattr(request.app.state, "startup_inputs", None) is None:
+        if not getattr(request.app.state, "durable_initial_input", False):
             raise OmnigentError(
                 "durable initial input is not configured", code=ErrorCode.INVALID_INPUT
             )
@@ -883,7 +883,7 @@ def register_core_routes(
                 session_id,
                 managed_labels,
             )
-        if getattr(request.app.state, "startup_inputs", None) is not None:
+        if getattr(request.app.state, "durable_initial_input", False):
             from omnigent.server.startup_inputs import STARTUP_LABEL
 
             await asyncio.to_thread(

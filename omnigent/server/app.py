@@ -2338,14 +2338,13 @@ def create_app(
     app.state.host_registry = host_registry
     from omnigent.server.startup_inputs import ManagedStartupInputs
 
-    # Only managed creates accept a durable first input, and only managed hosts
-    # need their startup recovered on the replica holding the tunnel.
-    startup_inputs = (
-        ManagedStartupInputs(conversation_store, host_registry, project_store)
-        if sandbox_config is not None and sandbox_config.managed_launch_supported
-        else None
-    )
+    # The durable inbox (held peer messages, fyi, role mail) serves any
+    # host-bound session; only managed creates accept a durable first input.
+    startup_inputs = ManagedStartupInputs(conversation_store, host_registry, project_store)
     app.state.startup_inputs = startup_inputs
+    app.state.durable_initial_input = (
+        sandbox_config is not None and sandbox_config.managed_launch_supported
+    )
     app.state.permission_store = permission_store
     app.state.host_store = host_store
     app.state.mcp_gateway_backend = mcp_gateway_backend
@@ -3707,7 +3706,7 @@ def create_app(
                 "needs_setup": needs_setup,
                 "databricks_features": databricks_features,
                 "managed_sandboxes_enabled": managed_sandboxes_enabled,
-                "durable_initial_input": startup_inputs is not None,
+                "durable_initial_input": app.state.durable_initial_input,
                 "sandbox_provider": sandbox_provider,
                 "sandbox_providers": sandbox_providers,
                 "sandbox_provider_capabilities": sandbox_provider_capabilities,

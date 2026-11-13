@@ -91,7 +91,7 @@ def auth_app(
     request: pytest.FixtureRequest,
     startup_permissions: SqlAlchemyPermissionStore,
 ) -> FastAPI:
-    """The shared auth-enabled app, with managed sandboxes configured."""
+    """The shared auth-enabled app, with managed sandboxes unless marked no_managed_sandbox."""
     from omnigent.server.auth import UnifiedAuthProvider
 
     artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
@@ -107,7 +107,9 @@ def auth_app(
         ),
         host_store=HostStore(db_uri),
         project_store=SqlAlchemyProjectStore(db_uri),
-        sandbox_config=parse_sandbox_config(
+        sandbox_config=None
+        if request.node.get_closest_marker("no_managed_sandbox")
+        else parse_sandbox_config(
             {
                 "provider": "modal",
                 "server_url": "https://managed-test.example.com",

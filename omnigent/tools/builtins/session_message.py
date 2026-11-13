@@ -38,7 +38,8 @@ class SysSessionMessageTool(Tool):
             "it waits without waking the receiver and is delivered once the receiver is "
             "next busy, together with any other waiting fyi; that may add one turn. A "
             "receiver without a durable inbox gets it at once, and the result then reports "
-            "delivered_kind='action'. The default kind='action' delivers as usual."
+            "delivered_kind='action'. The default kind='action' delivers as usual. Every "
+            "accepted result reports delivered_kind."
         )
 
     def get_schema(self) -> dict[str, Any]:
