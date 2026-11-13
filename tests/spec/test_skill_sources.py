@@ -1950,5 +1950,9 @@ def test_skipped_skill_dirs_are_reported_in_the_catalog_warnings(
 
     assert resolve_harness_skills(ctx, "claude-native") == []
     real = os.path.realpath(skills)
-    assert ctx.warnings == [f"Skipped skills under {skills}: {real} is writable by other users"]
-    assert "secret body" not in ctx.warnings[0]
+    assert ctx.warnings == [
+        f"Skipped skills under {skills}: {real} is writable by other users",
+        f"Claude Code skips {os.path.realpath(workspace)}/.claude, CLAUDE.md and .mcp.json: "
+        "its .claude/skills folder is untrusted",
+    ]
+    assert all("secret body" not in warning for warning in ctx.warnings)

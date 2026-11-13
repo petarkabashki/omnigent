@@ -175,6 +175,23 @@ def claude_untrusted_ancestors(workspace: Path, *, home: Path) -> list[Path]:
     return skipped
 
 
+def claude_workspace_skip_note(workspace: Path, *, home: Path) -> str | None:
+    """
+    Explain that Claude Code will skip *workspace*'s own project files, if it will.
+
+    :param workspace: The session's working directory.
+    :param home: The real user home.
+    :returns: A user-facing note, or ``None`` when the workspace is not skipped.
+    """
+    real_workspace = Path(os.path.realpath(workspace))
+    if real_workspace not in claude_untrusted_ancestors(real_workspace, home=home):
+        return None
+    return (
+        f"Claude Code skips {real_workspace}/.claude, CLAUDE.md and .mcp.json: "
+        "its .claude/skills folder is untrusted"
+    )
+
+
 def with_claude_automount_roots(existing: str | None, folders: list[Path]) -> str | None:
     """Merge *folders* into a ``CLAUDE_CODE_AUTOMOUNT_ROOTS`` value, keeping *existing* first.
 

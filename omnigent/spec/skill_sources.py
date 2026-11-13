@@ -36,7 +36,11 @@ from omnigent.spec.parser import (
     discover_host_skills,
     skill_matches_names,
 )
-from omnigent.spec.repo_scope import is_trusted_dir, skill_scope_dirs
+from omnigent.spec.repo_scope import (
+    claude_workspace_skip_note,
+    is_trusted_dir,
+    skill_scope_dirs,
+)
 from omnigent.spec.types import AgentSpec, SkillSpec
 
 _log = logging.getLogger(__name__)
@@ -842,6 +846,10 @@ def claude_host_skills(ctx: SkillSourceContext) -> list[SkillSpec]:
             replace(ctx, skills_filter="all") if isinstance(ctx.skills_filter, list) else ctx
         )
         native = _claude_code_skills(native_ctx)
+        if ctx.warnings is not None and ctx.roots:
+            note = claude_workspace_skip_note(ctx.roots[0], home=ctx.home)
+            if note is not None and note not in ctx.warnings:
+                ctx.warnings.append(note)
         standalone = (
             [
                 skill
