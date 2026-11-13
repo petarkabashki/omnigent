@@ -162,24 +162,42 @@ def test_reuse_legacy_record_probes_its_original_lock_path(
     assert probed_paths == [cli._daemon_record_path(legacy_target)]
 
 
-_TOO_LONG_PARENT = "/tmp/" + "p" * 60
+def _recorded_parent(kind: str, base: Path) -> str | None:
+    """Build a recorded runtime parent of *kind* under the short *base*."""
+    if kind == "too-long":
+        return "/tmp/" + "p" * 60
+    if kind == "not-a-directory":
+        (base / "file").write_text("")
+        return str(base / "file")
+    if kind == "shared-unsticky-parent":
+        shared = base / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        return str(shared / "og")
+    if kind == "usable-but-different":
+        return str(base / "og-old")
+    if kind == "same":
+        return str(base / "og-now")
+    return None
 
 
 @pytest.mark.parametrize(
-    ("recorded_parent", "outcome"),
+    ("kind", "outcome"),
     [
-        # Bench's G1: the old parent can't host a session, so nothing is lost.
-        pytest.param(_TOO_LONG_PARENT, "replaced", id="unusable-parent"),
+        # A parent ensure_runtime_parent rejects can't host a session: replace it.
+        ("too-long", "replaced"),
+        ("not-a-directory", "replaced"),
+        ("shared-unsticky-parent", "replaced"),
         # Another terminal's live sessions may run on it: leave it alone.
-        pytest.param("/tmp/og-old", "refused", id="usable-but-different"),
-        pytest.param("/tmp/og-now", "reused", id="same"),
-        pytest.param(None, "reused", id="legacy-record"),
+        ("usable-but-different", "refused"),
+        ("same", "reused"),
+        ("legacy-record", "reused"),
     ],
 )
 def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
-    tmp_path: Path,
+    short_tmp_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
-    recorded_parent: str | None,
+    kind: str,
     outcome: str,
 ) -> None:
     from omnigent import cli
@@ -188,8 +206,10 @@ def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
         RuntimeParentError,
     )
 
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
-    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, "/tmp/og-now")
+    current = str(short_tmp_dir / "og-now")
+    recorded = _recorded_parent(kind, short_tmp_dir)
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", short_tmp_dir / "host.pid")
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, current)
     target = normalize_daemon_target("https://x.example.com")
     cli._write_daemon_record(
         cli._HostDaemonRecord(
@@ -199,7 +219,7 @@ def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
             server_url=target,
             log_path="daemon.log",
             started_at=100,
-            runtime_parent=recorded_parent,
+            runtime_parent=recorded,
         )
     )
     monkeypatch.setattr(cli, "_record_flock_is_held", lambda path: True)
@@ -213,9 +233,9 @@ def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
         with pytest.raises(RuntimeParentError) as excinfo:
             cli._reuse_existing_daemon_record(target)
         message = str(excinfo.value)
-        assert "runs under runtime parent /tmp/og-old" in message
-        assert "this shell resolves /tmp/og-now" in message
-        assert f"{HARNESS_TMP_PARENT_ENV_VAR}=/tmp/og-old" in message
+        assert f"runs under runtime parent {recorded}" in message
+        assert f"this shell resolves {current}" in message
+        assert f"{HARNESS_TMP_PARENT_ENV_VAR}={recorded}" in message
         assert f"`omnigent host stop --server {target}`" in message
         assert terminated == []
         assert cli._find_daemon_record(target) is not None
@@ -225,7 +245,7 @@ def test_reuse_under_another_runtime_parent_replaces_only_a_broken_daemon(
 
     assert decision.reuse is (outcome == "reused")
     if outcome == "replaced":
-        assert terminated == [f"runtime parent changed: {_TOO_LONG_PARENT} -> /tmp/og-now"]
+        assert terminated == [f"runtime parent changed: {recorded} -> {current}"]
     else:
         assert terminated == []
 

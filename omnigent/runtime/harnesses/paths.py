@@ -169,6 +169,21 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
     return parent
 
 
+def runtime_parent_is_usable(parent: str | Path) -> bool:
+    """
+    Whether :func:`ensure_runtime_parent` accepts *parent*.
+
+    Like any use of the parent, the check creates it if it is missing.
+
+    :param parent: Absolute runtime parent, e.g. ``"/tmp/omnigent-1000"``.
+    """
+    try:
+        ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(parent)})
+    except RuntimeParentError:
+        return False
+    return True
+
+
 def _describe_parent_failure(exc: BaseException) -> str:
     """Describe *exc* for an operator, e.g. ``"cannot use /srv/x: Permission denied"``."""
     if isinstance(exc, OSError) and exc.strerror:

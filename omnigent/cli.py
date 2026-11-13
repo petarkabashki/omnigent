@@ -135,7 +135,7 @@ from omnigent.runtime.harnesses.paths import (
     ensure_runtime_parent,
     resolve_harness_tmp_parent,
     runtime_mkdtemp,
-    runtime_parent_too_long,
+    runtime_parent_is_usable,
 )
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
@@ -3232,11 +3232,12 @@ def _replace_or_refuse_daemon_under_other_parent(record: _HostDaemonRecord) -> N
     serving live sessions from other terminals, so only a broken one is stopped.
 
     :param record: Background daemon record whose parent differs from this CLI's.
-    :raises RuntimeParentError: If the daemon's parent is usable.
+    :raises RuntimeParentError: If the daemon's parent passes
+        ``ensure_runtime_parent``, so the refusal never suggests a rejected parent.
     """
     recorded = record.runtime_parent
     current = str(resolve_harness_tmp_parent())
-    if recorded is not None and runtime_parent_too_long(recorded):
+    if recorded is not None and not runtime_parent_is_usable(recorded):
         _terminate_host_unit(record, reason=f"runtime parent changed: {recorded} -> {current}")
         return
     stop_command = "omnigent host stop"
