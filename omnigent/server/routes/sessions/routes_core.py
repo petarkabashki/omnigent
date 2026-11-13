@@ -314,12 +314,23 @@ _SESSION_LIST_BATCH_SIZE = 1000
 _ROLE_ASK_MARGIN_S = 600.0
 
 
+def _changes_project(body: UpdateSessionRequest, set_project: bool, current: Conversation) -> bool:
+    """Whether the PATCH files the session somewhere other than where it is."""
+    if set_project and normalize_uuid(body.project_id or None) != current.project_id:
+        return True
+    labels = body.labels or {}
+    return PROJECT_LABEL_KEY in labels and (labels[PROJECT_LABEL_KEY] or None) != (
+        current.labels.get(PROJECT_LABEL_KEY) or None
+    )
+
+
 async def _refuse_agent_role_release(
     request: Request,
     body: UpdateSessionRequest,
     set_project: bool,
     session_id: str,
     project_store: ProjectStore | None,
+    conversation_store: ConversationStore,
 ) -> None:
     """Refuse an agent PATCH that would release a role its session holds.
 
@@ -332,15 +343,18 @@ async def _refuse_agent_role_release(
         or ORCHESTRATION_SOURCE_HEADER in request.headers
     )
     labels = body.labels or {}
-    releases = (
+    closes = (
         body.archived is not None
         or labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
         or has_closed_title_marker(body.title)
-        or set_project
-        or PROJECT_LABEL_KEY in labels
     )
-    if not (agent_call and releases):
+    may_move = set_project or PROJECT_LABEL_KEY in labels
+    if not agent_call or not (closes or may_move):
         return
+    if not closes:
+        current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if current is not None and not _changes_project(body, set_project, current):
+            return
     held = await asyncio.to_thread(held_role_names, project_store, session_id)
     if held:
         raise OmnigentError(
@@ -4386,7 +4400,9 @@ def register_core_routes(
         await _require_access(
             user_id, session_id, required_level, permission_store, conversation_store
         )
-        await _refuse_agent_role_release(request, body, set_project, session_id, project_store)
+        await _refuse_agent_role_release(
+            request, body, set_project, session_id, project_store, conversation_store
+        )
         if body.runner_id is not None and permission_store is not None:
             if not check_session_access(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store

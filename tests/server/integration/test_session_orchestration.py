@@ -3901,20 +3901,45 @@ async def test_deleting_a_session_moves_or_drops_its_role_mail(
 
 @pytest.mark.parametrize(
     "patch",
-    [{"title": "done :closed: here"}, {"archived": True}],
-    ids=["closed_title", "archive"],
+    [
+        {"title": "done :closed: here"},
+        {"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}},
+        {"archived": True},
+        {"archived": False},
+        {"project_id": "new"},
+    ],
+    ids=["closed_title", "closed_label", "archive", "unarchive", "project_move"],
 )
 async def test_an_agent_cannot_release_its_role_by_closing_its_session(
     auth_client, peers, db_uri, patch
 ):
     source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
     await _hold(auth_client, source, "Keeper")
+    if patch.get("archived") is False:
+        store.update_conversation_with_changes(source["id"], archived=True)
+    if patch.get("project_id") == "new":
+        created = await auth_client.post("/v1/projects", json={"name": "elsewhere"})
+        patch = {"project_id": created.json()["id"]}
+    before = store.get_conversation(source["id"])
     response = await auth_client.patch(f"/v1/sessions/{source['id']}", json=patch)
     assert response.status_code == 409, response.text
     assert "sys_role_release" in response.text
     assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
-    session = SqlAlchemyConversationStore(db_uri).get_conversation(source["id"])
-    assert "omnigent.closed" not in session.labels and not session.archived
+    after = store.get_conversation(source["id"])
+    assert (after.labels, after.archived, after.project_id) == (
+        before.labels,
+        before.archived,
+        before.project_id,
+    )
+
+
+async def test_an_agent_may_refile_its_session_where_it_already_is(auth_client, peers, db_uri):
+    source, _, _ = peers
+    await _hold(auth_client, source, "Keeper")
+    response = await auth_client.patch(f"/v1/sessions/{source['id']}", json={"project_id": ""})
+    assert response.status_code == 200, response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
 
 
 async def test_an_owner_close_still_releases_the_role(auth_client, peers, db_uri):
