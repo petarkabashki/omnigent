@@ -71,6 +71,7 @@ from omnigent.models.claude_model_vocabulary import (
 )
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.models.model_override import is_databricks_model_id
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, ensure_runtime_parent
 from omnigent.runtime.mcp_tool_result import decode_mcp_image_result
 from omnigent.spec.types import RetryPolicy
 from omnigent.telemetry.surface import harness_client_surface
@@ -1611,6 +1612,18 @@ def _parse_optional_int(value: str | None) -> int | None:
         return None
 
 
+def _claude_cli_tmpdir() -> pathlib.Path:
+    """
+    Where the Claude CLI keeps its ``claude-<uid>`` dir.
+
+    With the runtime parent configured the executor points ``CLAUDE_CODE_TMPDIR``
+    there; otherwise the CLI falls back to the system temp dir.
+    """
+    if os.environ.get(HARNESS_TMP_PARENT_ENV_VAR):
+        return ensure_runtime_parent()
+    return pathlib.Path(tempfile.gettempdir())
+
+
 def _claude_internal_write_roots() -> list[pathlib.Path]:
     """Writable roots the Claude CLI needs for its own local session state."""
 
@@ -1620,7 +1633,7 @@ def _claude_internal_write_roots() -> list[pathlib.Path]:
         pathlib.Path.home() / ".claude" / "session-env",
         pathlib.Path.home() / ".claude" / "sessions",
         pathlib.Path.home() / ".npm" / "_logs",
-        pathlib.Path(tempfile.gettempdir()) / f"claude-{stable_user_id()}",
+        _claude_cli_tmpdir() / f"claude-{stable_user_id()}",
     ]
     for root in roots:
         root.mkdir(parents=True, exist_ok=True)
@@ -3105,6 +3118,8 @@ class ClaudeSDKExecutor(Executor):
         # ``""`` here would still leave an empty key in the child env.
         env = dict(self._extra_env)
         env["CLAUDE_AGENT_SDK_CLIENT_APP"] = "omnigent"
+        if os.environ.get(HARNESS_TMP_PARENT_ENV_VAR):
+            env.setdefault("CLAUDE_CODE_TMPDIR", str(_claude_cli_tmpdir()))
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
         # Teach Claude Code this gateway's spellings so no model surface routes
         # to an id the gateway rejects: pins for the family aliases, rewrites

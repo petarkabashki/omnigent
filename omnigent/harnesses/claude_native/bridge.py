@@ -68,7 +68,7 @@ from urllib import request
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
-from omnigent._platform import IS_WINDOWS, is_wsl, stable_user_id
+from omnigent._platform import IS_WINDOWS, is_wsl
 from omnigent.harnesses.claude_native import (
     PEER_MESSAGE_WAKE_KIND,
     PEER_MESSAGE_WAKE_TEXT,
@@ -95,7 +95,12 @@ from omnigent.host.identity_env import in_managed_sandbox
 from omnigent.models.claude_model_vocabulary import MODEL_VOCABULARY_ENV_VARS
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.native.failure_telemetry import FailureContext
-from omnigent.runtime.harnesses.paths import ensure_private_dir, ensure_runtime_parent
+from omnigent.runtime.harnesses.paths import (
+    HARNESS_TMP_PARENT_ENV_VAR,
+    ensure_private_dir,
+    ensure_runtime_parent,
+    resolve_harness_tmp_parent,
+)
 from omnigent.runtime.tool_call_deadline import ToolCallDeadline, bind_tool_call_deadline
 from omnigent.util.json_types import JsonObject as _JsonObject
 
@@ -263,14 +268,13 @@ BRIDGE_PORT_POOL_ENV_VAR = "OMNIGENT_BRIDGE_PORT_POOL"
 # ingress plus one tool relay per session), hence a pool rather than one port.
 DEFAULT_BRIDGE_PORT_POOL: tuple[int, ...] = tuple(range(28700, 28716))
 
-# Root for the per-process Claude bridge tree. Namespaced by uid so
-# other Unix users on the same host cannot read the bearer token or
-# pre-create the parent as a symlink to redirect the bridge tree. The
-# trusted parent (`/tmp`) is shared; everything under
+# Root for the per-process Claude bridge tree, under the per-user runtime
+# parent so other Unix users cannot read the bearer token or pre-create the
+# parent as a symlink. The trusted parent above it is shared; everything under
 # `_BRIDGE_ROOT_PARENT` must be owned by the current uid and not be a
 # symlink — see :func:`_ensure_secure_dir`.
-_TRUSTED_PARENT = Path(tempfile.gettempdir())
-_BRIDGE_ROOT_PARENT = _TRUSTED_PARENT / f"omnigent-{stable_user_id()}"
+_BRIDGE_ROOT_PARENT = resolve_harness_tmp_parent()
+_TRUSTED_PARENT = _BRIDGE_ROOT_PARENT.parent
 _BRIDGE_ROOT = _BRIDGE_ROOT_PARENT / "claude-native"
 # Markers for permission hooks parked on a verdict, keyed by SESSION id: the
 # idle pane reaper's busy check holds a pane's conversation id, and resolving
@@ -1594,6 +1598,10 @@ def _ensure_secure_dir(target: Path) -> None:
     :raises RuntimeError: If validation fails for any ancestor.
     """
     target = _absolute_syntactic_path(target)
+    runtime_parent = resolve_harness_tmp_parent()
+    if target.is_relative_to(runtime_parent):
+        # Fails fast on a parent too long for its sockets and creates its own parent.
+        ensure_runtime_parent()
     trusted_parent = _trusted_parent_for_bridge_dir(target)
     ancestors: list[Path] = []
     cur = target
@@ -1626,7 +1634,7 @@ def subagent_router_bridge_root() -> Path:
     """Root for the subagent router's own advertisement directories.
 
     Shares the uid-scoped temp parent with claude-native
-    (``$TMPDIR/omnigent-<uid>/subagent-router``) so per-session router dirs
+    (``<runtime parent>/subagent-router``) so per-session router dirs
     pass the :func:`_trusted_parent_for_bridge_dir` secure-root check.
 
     :returns: The subagent-router root directory (not created here).
@@ -1638,7 +1646,7 @@ def acp_mcp_bridge_root() -> Path:
     """Bridge root for the headless ACP harnesses' Omnigent-MCP relay.
 
     Shares the uid-scoped temp parent with claude-native
-    (``$TMPDIR/omnigent-<uid>/acp-mcp``). Used by the acp / goose / qwen
+    (``<runtime parent>/acp-mcp``). Used by the acp / goose / qwen
     executors' ``OmnigentAcpMcp`` relay so ``serve-mcp``'s bridge dir passes the
     :func:`_trusted_parent_for_bridge_dir` secure-root check.
 
@@ -2442,10 +2450,9 @@ def build_mcp_config(bridge_dir: Path, *, python_executable: str | None = None) 
                 ],
                 "env": {
                     "PYTHONUNBUFFERED": "1",
-                    # The bridge root is derived from tempfile at import time.
-                    # Keep it aligned with the runner when Claude inherits a
-                    # different TMPDIR from the user's shell.
-                    "TMPDIR": str(_TRUSTED_PARENT),
+                    # The bridge root is derived from this at import time; keep it
+                    # aligned with the runner whatever env Claude inherits.
+                    HARNESS_TMP_PARENT_ENV_VAR: str(_BRIDGE_ROOT_PARENT),
                 },
             }
         }
@@ -2453,8 +2460,9 @@ def build_mcp_config(bridge_dir: Path, *, python_executable: str | None = None) 
 
 
 def _pin_runner_tmpdir(command: str) -> str:
-    """Run a generated command with the runner's temp root."""
-    return f"env TMPDIR={shlex.quote(str(_TRUSTED_PARENT))} {command}"
+    """Run a generated command with the runner's bridge root parent."""
+    pin = shlex.quote(str(_BRIDGE_ROOT_PARENT))
+    return f"env {HARNESS_TMP_PARENT_ENV_VAR}={pin} {command}"
 
 
 def _python_hook_command(parts: list[str]) -> str:

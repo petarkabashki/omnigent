@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import omnigent.harnesses.claude_native.bridge as bridge_mod
+from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native.bridge import prepare_bridge_dir
 
 
@@ -25,7 +26,7 @@ def isolated_bridge_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     monkeypatch.setattr(
         bridge_mod,
         "_BRIDGE_ROOT",
-        temp_root / f"omnigent-{bridge_mod.stable_user_id()}" / "claude-native",
+        temp_root / f"omnigent-{stable_user_id()}" / "claude-native",
     )
     monkeypatch.setattr(bridge_mod, "post_tools_changed", lambda *a, **k: None)
     return temp_root

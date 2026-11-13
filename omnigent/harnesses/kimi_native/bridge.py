@@ -26,7 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from omnigent._platform import stable_user_id
+from omnigent.runtime.harnesses.paths import harness_bridge_root
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_KIMI_NATIVE_BRIDGE_DIR"
 
-_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "kimi-native"
+_BRIDGE_ROOT = harness_bridge_root("kimi-native")
 _TMUX_FILE = "tmux.json"
 # Omnigent routing details the kimi hook subprocess reads to reach the server.
 # Mirrors claude-native's ``permission_hook.json`` (server URL + auth headers +

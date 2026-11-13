@@ -36,6 +36,16 @@ def resolve_harness_tmp_parent(env: Mapping[str, str] | None = None) -> Path:
     return absolute_harness_tmp_parent(harness_tmp_parent(env))
 
 
+def harness_bridge_root(name: str, env: Mapping[str, str] | None = None) -> Path:
+    """
+    Return a native bridge's root under the runtime parent, without creating it.
+
+    :param name: Bridge root name, e.g. ``"kimi-native"``.
+    :returns: e.g. ``Path("/tmp/omnigent-1000/kimi-native")``.
+    """
+    return resolve_harness_tmp_parent(env) / name
+
+
 # AF_UNIX ``sun_path`` holds 108 bytes on Linux and 104 on macOS, NUL included.
 UNIX_SOCKET_PATH_MAX = 103
 # Room for the deepest sockets under the parent: "/model-signer-private-xxxxxxxx/relay.sock"

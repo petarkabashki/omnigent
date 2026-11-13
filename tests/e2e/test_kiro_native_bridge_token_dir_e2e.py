@@ -52,6 +52,7 @@ def _run_token_write(tmpdir: Path, session_id: str) -> dict:
     """Run the kiro-native token write in a fresh process with ``TMPDIR=tmpdir``."""
     env = os.environ.copy()
     env["TMPDIR"] = str(tmpdir)
+    env["OMNIGENT_HARNESS_TMP_PARENT"] = str(tmpdir / _uid_scoped_dirname())
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD_SCRIPT, session_id],
         env=env,

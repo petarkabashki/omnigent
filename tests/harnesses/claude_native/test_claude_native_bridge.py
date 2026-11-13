@@ -85,6 +85,12 @@ from omnigent.inner.datamodel import (
 )
 from omnigent.inner.native_attachments import materialize_attachment
 from omnigent.native import native_cost_popup, policy_allow_cache
+from omnigent.runtime.harnesses.paths import (
+    HARNESS_TMP_PARENT_ENV_VAR,
+    ensure_runtime_parent,
+    harness_bridge_root,
+    resolve_harness_tmp_parent,
+)
 from omnigent.util.reasoning_effort import CLAUDE_EFFORTS
 
 
@@ -140,11 +146,8 @@ def subprocess_bridge_root() -> Iterator[Path]:
         ``python -m omnigent.harnesses.claude_native.bridge`` accepts bridge
         writes without inheriting pytest monkeypatches.
     """
-    production_root = (
-        Path(tempfile.gettempdir())
-        / f"omnigent-{claude_native_bridge.stable_user_id()}"
-        / "claude-native"
-    )
+    production_root = harness_bridge_root("claude-native")
+    ensure_runtime_parent()
     production_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(production_root.parent, 0o700)
     os.chmod(production_root, 0o700)
@@ -4099,22 +4102,15 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MCP and Python hooks use the temp root that created the bridge."""
-    runner_tmpdir = tmp_path / "runner-tmp"
-    bridge_dir = (
-        runner_tmpdir
-        / f"omnigent-{claude_native_bridge.stable_user_id()}"
-        / "claude-native"
-        / "session"
-    )
+    """MCP and Python hooks resolve the bridge root from the runner's parent."""
+    runner_parent = tmp_path / "runner-parent"
+    bridge_dir = runner_parent / "claude-native" / "session"
     bridge_dir.mkdir(parents=True)
-    inherited_tmpdir = tmp_path / "shell-tmp"
-    inherited_tmpdir.mkdir()
     monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT",
-        runner_tmpdir,
+        "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT_PARENT",
+        runner_parent,
     )
-    monkeypatch.setenv("TMPDIR", str(inherited_tmpdir))
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, str(tmp_path / "inherited"))
 
     args = augment_claude_args(
         (),
@@ -4128,7 +4124,7 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
     settings = _load_invocation_settings(args)
 
     server_env = mcp_config["mcpServers"]["omnigent"]["env"]
-    assert server_env["TMPDIR"] == str(runner_tmpdir)
+    assert server_env[HARNESS_TMP_PARENT_ENV_VAR] == str(runner_parent)
     python_commands = [
         hook["command"]
         for entries in settings["hooks"].values()
@@ -4137,8 +4133,8 @@ def test_generated_claude_subprocesses_pin_runner_tmpdir(
         if "/venv/bin/python" in hook["command"]
     ]
     assert len(python_commands) == 21
-    expected_tmpdir = f"env TMPDIR={shlex.quote(str(runner_tmpdir))}"
-    assert all(expected_tmpdir in command for command in python_commands)
+    expected_pin = f"env {HARNESS_TMP_PARENT_ENV_VAR}={shlex.quote(str(runner_parent))}"
+    assert all(expected_pin in command for command in python_commands)
 
 
 def test_augment_claude_args_observes_worktree_moves(tmp_path: Path) -> None:
@@ -4868,7 +4864,7 @@ def test_mcp_server_initialize_omits_blocked_channel_capability(
     """
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT",
-        Path(tempfile.gettempdir()),
+        resolve_harness_tmp_parent().parent,
     )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", subprocess_bridge_root
@@ -7535,7 +7531,7 @@ async def test_channel_server_relays_active_omnigent_tools(
     """
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT",
-        Path(tempfile.gettempdir()),
+        resolve_harness_tmp_parent().parent,
     )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", subprocess_bridge_root
@@ -7815,7 +7811,7 @@ async def test_serve_mcp_survives_handler_exception_and_keeps_serving(
     """
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT",
-        Path(tempfile.gettempdir()),
+        resolve_harness_tmp_parent().parent,
     )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", subprocess_bridge_root
@@ -8490,10 +8486,10 @@ async def test_relay_close_keeps_advertisement_owned_by_newer_relay(
     and leave it in place. Unconditional unlinking here would erase the
     still-active newer session's ``list_comments`` / ``update_comment``.
     """
-    # gettempdir(), not a literal /tmp: the fixture root lives under the
-    # platform temp dir (/var/folders/… on macOS), which /tmp never contains.
+    # The fixture root lives under the runtime parent, so trust that parent's parent.
     monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT", Path(tempfile.gettempdir())
+        "omnigent.harnesses.claude_native.bridge._TRUSTED_PARENT",
+        resolve_harness_tmp_parent().parent,
     )
     monkeypatch.setattr(
         "omnigent.harnesses.claude_native.bridge._BRIDGE_ROOT", subprocess_bridge_root
@@ -17407,7 +17403,9 @@ async def test_relay_mcp_cancellation_releases_pending_approval(
     """A real stdio bridge releases the approval when its caller cancels or leaves."""
     from omnigent.runner import pending_approvals
 
-    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", Path(tempfile.gettempdir()))
+    monkeypatch.setattr(
+        claude_native_bridge, "_TRUSTED_PARENT", resolve_harness_tmp_parent().parent
+    )
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", subprocess_bridge_root)
     monkeypatch.setattr(claude_native_bridge, "_TOOL_RELAY_HEARTBEAT_S", 0.02)
     bridge_dir = prepare_bridge_dir("conv_cancel_relay", workspace=tmp_path)

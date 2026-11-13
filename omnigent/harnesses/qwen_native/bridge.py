@@ -35,14 +35,13 @@ import secrets
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from omnigent._platform import stable_user_id
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, harness_bridge_root
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -56,7 +55,7 @@ BRIDGE_DIR_ENV_VAR = "HARNESS_QWEN_NATIVE_BRIDGE_DIR"
 #: qwen recording (resume would mint a new id and lose history).
 _QWEN_SESSION_NAMESPACE = uuid.UUID("6b6f3d2e-9a1c-5e84-bf0a-1d7c5a2e9f43")
 
-_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "qwen-native"
+_BRIDGE_ROOT = harness_bridge_root("qwen-native")
 _TMUX_FILE = "tmux.json"
 #: JSONL command file qwen watches (``--input-file``); we append to it.
 _INPUT_FILE = "qwen_in.jsonl"
@@ -526,6 +525,8 @@ def build_mcp_server_entry(
         "env": {
             "PYTHONUNBUFFERED": "1",
             "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            # serve-mcp must resolve the same bridge root as this runner.
+            HARNESS_TMP_PARENT_ENV_VAR: str(_BRIDGE_ROOT.parent),
         },
         "trust": True,
     }

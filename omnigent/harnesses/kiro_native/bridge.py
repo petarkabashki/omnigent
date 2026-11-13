@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native import bridge as claude_bridge
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, harness_bridge_root
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ class _KiroMcpConfig(TypedDict):
 KIRO_NATIVE_BRIDGE_DIR_ENV_VAR = "HARNESS_KIRO_NATIVE_BRIDGE_DIR"
 KIRO_ACP_RECORD_PATH_ENV_VAR = "KIRO_ACP_RECORD_PATH"
 
-_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "kiro-native"
+_BRIDGE_ROOT = harness_bridge_root("kiro-native")
 _TMUX_FILE = "tmux.json"
 _FORWARDER_READY_FILE = "kiro_session_forwarder_ready.json"
 _ACP_RECORD_FILE = "kiro_acp_record.jsonl"
@@ -181,7 +181,11 @@ def build_kiro_mcp_config(
                     "--bridge-dir",
                     str(bridge_dir),
                 ],
-                "env": {"TMPDIR": os.environ.get("TMPDIR", "/tmp")},
+                "env": {
+                    "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+                    # serve-mcp must resolve the same bridge root as this runner.
+                    HARNESS_TMP_PARENT_ENV_VAR: str(_BRIDGE_ROOT.parent),
+                },
             }
         }
     }

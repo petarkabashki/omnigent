@@ -41,7 +41,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from omnigent._platform import stable_user_id
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, harness_bridge_root
 from omnigent.util.json_types import JsonObject as _JsonObject
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 DEVIN_NATIVE_BRIDGE_DIR_ENV_VAR = "HARNESS_DEVIN_NATIVE_BRIDGE_DIR"
 DEVIN_NATIVE_REQUEST_SESSION_ID_ENV_VAR = "HARNESS_DEVIN_NATIVE_REQUEST_SESSION_ID"
 
-_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "devin-native"
+_BRIDGE_ROOT = harness_bridge_root("devin-native")
 
 _TMUX_FILE = "tmux.json"
 _HOOKS_FILE = "hooks.jsonl"
@@ -464,7 +464,11 @@ def build_devin_mcp_server(
             str(bridge_dir),
         ],
         "transport": "stdio",
-        "env": {"TMPDIR": os.environ.get("TMPDIR", "/tmp")},
+        "env": {
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+            # serve-mcp must resolve the same bridge root as this runner.
+            HARNESS_TMP_PARENT_ENV_VAR: str(_BRIDGE_ROOT.parent),
+        },
     }
 
 
