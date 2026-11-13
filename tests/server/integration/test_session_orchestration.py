@@ -1143,12 +1143,11 @@ async def test_peer_message_to_a_busy_session_waits_in_the_durable_queue(
 async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
     auth_client, auth_app, peers, db_uri, monkeypatch
 ):
+    import asyncio
     from unittest.mock import AsyncMock
 
     from omnigent.host.frames import HostHelloFrame
     from omnigent.server import session_live_state
-    import asyncio
-
     from omnigent.server.routes._sessions.helpers import _publish_status
     from omnigent.server.startup_inputs import STARTUP_LABEL
 
