@@ -1026,3 +1026,61 @@ def test_plain_delete_still_leaves_members_for_the_caller(
     stored = SqlAlchemyConversationStore(db_uri).get_conversation(member)
     assert (stored.archived, stored.project_id) == (False, project["id"])
     assert archive_effects == {"pruned": [], "stopped": []}
+
+
+def test_owner_sets_and_clears_project_private(db_uri: str) -> None:
+    """The owner's PATCH sets and clears the flag; project payloads carry it."""
+    client = TestClient(_single_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "Vault"}).json()
+    assert project["private"] is False
+
+    resp = client.patch(f"/v1/projects/{project['id']}", json={"private": True})
+    assert resp.status_code == 200
+    assert resp.json()["private"] is True
+    assert client.get(f"/v1/projects/{project['id']}").json()["private"] is True
+
+    resp = client.patch(f"/v1/projects/{project['id']}", json={"private": False})
+    assert resp.json()["private"] is False
+
+
+def test_agent_call_cannot_change_project_private(db_uri: str) -> None:
+    """A call carrying the orchestration header is refused and changes nothing."""
+    from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
+
+    client = TestClient(_single_user_app(db_uri))
+    project = client.post("/v1/projects", json={"name": "Vault"}).json()
+
+    resp = client.patch(
+        f"/v1/projects/{project['id']}",
+        json={"private": True, "name": "Renamed"},
+        headers={ORCHESTRATION_SOURCE_HEADER: "conv_agent"},
+    )
+    assert resp.status_code == 403
+    after = client.get(f"/v1/projects/{project['id']}").json()
+    assert after["private"] is False
+    assert after["name"] == "Vault"
+
+
+def test_session_payloads_report_inherited_project_private(db_uri: str) -> None:
+    """Sessions in a private project or below it report project_private."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    in_child = conversations.create_conversation(title="child", agent_id=AGENT_ID)
+    in_other = conversations.create_conversation(title="other", agent_id=AGENT_ID)
+    unfiled = conversations.create_conversation(title="unfiled", agent_id=AGENT_ID)
+    client = TestClient(_single_user_app(db_uri))
+    root = client.post("/v1/projects", json={"name": "Vault"}).json()
+    child = client.post("/v1/projects", json={"name": "inner", "parent_id": root["id"]}).json()
+    other = client.post("/v1/projects", json={"name": "Open"}).json()
+    client.patch(f"/v1/sessions/{in_child.id}", json={"project_id": child["id"]})
+    client.patch(f"/v1/sessions/{in_other.id}", json={"project_id": other["id"]})
+    client.patch(f"/v1/projects/{root['id']}", json={"private": True})
+
+    assert client.get(f"/v1/sessions/{in_child.id}").json()["project_private"] is True
+    assert client.get(f"/v1/sessions/{in_other.id}").json()["project_private"] is False
+    assert client.get(f"/v1/sessions/{unfiled.id}").json().get("project_private") is None
+
+    rows = {row["id"]: row for row in client.get("/v1/sessions").json()["data"]}
+    assert rows[in_child.id]["project_private"] is True
+    assert rows[in_other.id]["project_private"] is False
+    assert "project_private" not in rows[unfiled.id]

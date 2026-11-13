@@ -1351,3 +1351,47 @@ def test_filing_during_a_delete_waits_and_never_dangles(
         assert conversations.get_conversation(late.id).project_id is None
     else:
         assert conversations.get_conversation(filed).project_id is None
+
+
+# ── private flag ──────────────────────────────────────────────────────────
+
+
+def test_private_defaults_to_false(store: SqlAlchemyProjectStore) -> None:
+    project = store.create(_uid("priv-default"), "Plain", "alice@example.com")
+    assert project.private is False
+    assert store.get(project.id, user_id="alice@example.com").private is False
+
+
+def test_set_private_sets_and_clears_for_the_owner_only(store: SqlAlchemyProjectStore) -> None:
+    project = store.create(_uid("priv-set"), "Secret", "alice@example.com")
+
+    assert store.set_private(project.id, user_id="bob@example.com", private=True) is None
+    assert store.get(project.id, user_id="alice@example.com").private is False
+
+    assert store.set_private(project.id, user_id="alice@example.com", private=True).private
+    assert store.get(project.id, user_id="alice@example.com").private is True
+    cleared = store.set_private(project.id, user_id="alice@example.com", private=False)
+    assert cleared.private is False
+
+
+def test_private_project_ids_include_descendants(store: SqlAlchemyProjectStore) -> None:
+    owner = "alice@example.com"
+    root = store.create(_uid("priv-root"), "root", owner)
+    child = store.create(_uid("priv-child"), "child", owner, parent_id=root.id)
+    grandchild = store.create(_uid("priv-grand"), "grand", owner, parent_id=child.id)
+    other = store.create(_uid("priv-other"), "other", owner)
+
+    store.set_private(child.id, user_id=owner, private=True)
+
+    assert store.private_project_ids(user_id=owner) == {child.id, grandchild.id}
+    assert root.id not in store.private_project_ids(user_id=owner)
+    assert other.id not in store.private_project_ids(user_id=owner)
+    assert store.private_project_ids(user_id="bob@example.com") == set()
+
+
+def test_effective_private_ids_stops_at_cycles() -> None:
+    from omnigent.stores.project_store import effective_private_ids
+
+    parents = {"a": "b", "b": "a", "c": "d", "d": None}
+    assert effective_private_ids(parents, {"d"}) == {"c", "d"}
+    assert effective_private_ids(parents, set()) == set()

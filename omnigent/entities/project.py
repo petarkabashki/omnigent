@@ -34,6 +34,8 @@ class Project:
         new-chat dialog pre-fills, not enforced requirements.
     :param parent_id: Parent project id, or ``None`` for a root. The namespace
         path is computed by walking parents (see ``project_path``).
+    :param private: Owner-set private-namespace flag on this record. Sessions
+        in it or any descendant report it as ``project_private``.
     """
 
     id: str
@@ -43,3 +45,4 @@ class Project:
     updated_at: int | None = None
     config: dict[str, Any] = field(default_factory=dict)
     parent_id: str | None = None
+    private: bool = False

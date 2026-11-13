@@ -522,6 +522,20 @@ async def _fill_agent_id_from_executor(payload: dict[str, Any]) -> dict[str, Any
     return {**payload, "agent_id": profile.agent_id} if profile.agent_id else payload
 
 
+async def _apply_project_private(
+    items: Sequence[SessionListItem | SessionResponse],
+    project_store: ProjectStore | None,
+    user_id: str | None,
+) -> None:
+    """Set ``project_private`` on filed sessions, inherited through project parents."""
+    if project_store is None or not any(item.project_id for item in items):
+        return
+    private_ids = await asyncio.to_thread(project_store.private_project_ids, user_id=user_id)
+    for item in items:
+        if item.project_id:
+            item.project_private = item.project_id in private_ids
+
+
 def register_core_routes(
     router: APIRouter,
     *,
@@ -2888,6 +2902,7 @@ def register_core_routes(
         snapshot.side_chat_allowed = await side_chat_allowed(
             user_id, session_id, access.conversation
         )
+        await _apply_project_private([snapshot], project_store, user_id)
         return snapshot
 
     @router.get(
@@ -3277,6 +3292,7 @@ def register_core_routes(
             item.family = family_info.get(item.id)
             if item.family and item.family.pinned and item.family.representative_id == item.id:
                 item.labels[PINNED_LABEL_KEY] = item.family.pinned_at or "1"
+        await _apply_project_private(items, project_store, user_id)
         # Apart from the bounded orphan-suspect probe above, the list does not
         # compute per-item liveness
         # (runner_online / host_online). No list consumer reads it: the
@@ -3467,6 +3483,7 @@ def register_core_routes(
             item.family = family_info.get(item.id)
             if item.family and item.family.pinned and item.family.representative_id == item.id:
                 item.labels[PINNED_LABEL_KEY] = item.family.pinned_at or "1"
+        await _apply_project_private(items, project_store, user_id)
         await _apply_liveness_to_items(items, liveness_lookup)
         # Full-row dumps (every field, nulls included) — NOT exclude_none. The
         # stream is a diff source: the client overlays these onto its cached
