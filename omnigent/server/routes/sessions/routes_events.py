@@ -1793,7 +1793,13 @@ def register_events_routes(
         peer_message = body.type == "session_message"
         # The address the sending agent used (role or session), kept on a queued message.
         sent_address: str | None = None
+        # An fyi peer message waits in the durable queue for the receiver's next turn.
+        fyi_message = False
         if peer_message:
+            kind = body.data.get("kind", "action")
+            if kind not in ("action", "fyi"):
+                raise OmnigentError("kind must be 'action' or 'fyi'", code=ErrorCode.INVALID_INPUT)
+            fyi_message = kind == "fyi"
             raw_address = body.data.get("address")
             sent_address = (
                 raw_address
@@ -2225,6 +2231,7 @@ def register_events_routes(
                 or _holds_agent_message_for_busy_session(
                     request, conv, startup, peer_message=peer_message
                 )
+                or (fyi_message and conv.host_id is not None)
             )
         ):
             if peer_message:
@@ -2259,6 +2266,7 @@ def register_events_routes(
                     if peer_message and holds_role(speaker)
                     else None
                 ),
+                deliver_at_turn=fyi_message,
             )
             if conv.host_id is not None:
                 startup.host_changed(request.app, conv.host_id)

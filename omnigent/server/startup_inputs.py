@@ -199,6 +199,36 @@ StartupDispatch = Callable[
 _services: weakref.WeakSet[ManagedStartupInputs] = weakref.WeakSet()
 
 
+def awaits_turn(item: ConversationItem) -> bool:
+    """Whether queued ``item`` is an fyi message held until its session's next turn."""
+    options = (
+        item.data.startup_options
+        if isinstance(item.data, (MessageData, SlashCommandData))
+        else None
+    )
+    return item.status == "in_progress" and options is not None and options.deliver_at_turn
+
+
+def release_turn_inputs(store: ConversationStore, session_id: str) -> None:
+    """Queue the session's held fyi messages now that it has started a turn."""
+    released = False
+    for item in store.list_pending_inputs(session_id):
+        if not awaits_turn(item) or not isinstance(item.data, (MessageData, SlashCommandData)):
+            continue
+        options = item.data.startup_options
+        assert options is not None
+        data = item.data.model_copy(
+            update={"startup_options": options.model_copy(update={"deliver_at_turn": False})}
+        )
+        released |= store.transition_pending_input(
+            session_id, item.id, expected="in_progress", status="in_progress", data=data
+        )
+    if released:
+        conv = store.get_conversation(session_id)
+        if conv is not None and conv.host_id is not None:
+            wake_startup_worker(conv.host_id)
+
+
 def wake_startup_worker(host_id: str) -> None:
     """Prompt a running host worker to look for the next saved input now."""
     key = (current_workspace_id(), host_id)
@@ -248,6 +278,7 @@ class ManagedStartupInputs:
         role_id: str | None = None,
         sender_id: str | None = None,
         sender_thread: str | None = None,
+        deliver_at_turn: bool = False,
     ) -> ConversationItem:
         from omnigent.server.background_session_titles import background_session_titles_enabled
         from omnigent.server.routes._sessions.helpers import (
@@ -287,6 +318,7 @@ class ManagedStartupInputs:
                     role_id=role_id,
                     sender_id=sender_id if role_id else None,
                     sender_thread=sender_thread if role_id else None,
+                    deliver_at_turn=deliver_at_turn,
                 )
             }
         )
@@ -389,7 +421,9 @@ class ManagedStartupInputs:
 
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
         return conv is not None and any(
-            item.status in ("in_progress", "incomplete") and not is_parked(item, conv)
+            item.status in ("in_progress", "incomplete")
+            and not is_parked(item, conv)
+            and not awaits_turn(item)
             for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         )
 
@@ -501,7 +535,11 @@ class ManagedStartupInputs:
         # transcript receipt still does: it may already have run. A parked input
         # waits for its role's next holder without blocking this session's own.
         head = next(
-            (item for item in items if item.status != "failed" and not is_parked(item, conv)),
+            (
+                item
+                for item in items
+                if item.status != "failed" and not is_parked(item, conv) and not awaits_turn(item)
+            ),
             None,
         )
         if head is not None:

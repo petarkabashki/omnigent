@@ -139,3 +139,57 @@ async def test_managed_hosts_keep_an_uncertain_input_unsent_after_restart(
     restarted.dispatch = dispatch
     await _recover(restarted, env, session_id, host)
     assert len(sent) == 1
+
+
+async def test_an_fyi_waits_for_the_next_turn_across_a_restart_without_blocking_others(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    session_id = await _create(env, name=CODEX_NATIVE_CODING_AGENT.agent_name)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/inbox-workspace")
+    host = env.app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="local", runners=[]),
+        owner=None,
+    )
+    sent: list[SessionEventInput] = []
+
+    async def dispatch(context: StartupInputContext, session_id: str, event: SessionEventInput):
+        assert await context.claim(env.conv_store, session_id)
+        sent.append(event)
+        return {"queued": True, "pending_id": "pending"}
+
+    service = env.app.state.startup_inputs
+    service.dispatch = dispatch
+    await _recover(service, env, session_id, host)
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _TEXT)
+    fyi_text = "[Message from omnigent/Bench] measured, nothing to do"
+    for text, at_turn in ((fyi_text, True), (_PEER_TEXT, False)):
+        event = SessionEventInput(
+            type="message",
+            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+        )
+        await service.enqueue(
+            session_id,
+            event,
+            user_id=None,
+            headers=Headers({}),
+            first=False,
+            deliver_at_turn=at_turn,
+        )
+
+    # Still held after a restart, and the action queued behind it goes first.
+    monkeypatch.setattr(startup_inputs, "_claimed_here", set())
+    restarted = ManagedStartupInputs(env.conv_store, service.hosts)
+    restarted.dispatch = dispatch
+    await _recover(restarted, env, session_id, host)
+    assert [_text(event) for event in sent[1:]] == [_PEER_TEXT]
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _PEER_TEXT)
+    await _recover(restarted, env, session_id, host)
+    assert len(sent) == 2
+
+    startup_inputs.release_turn_inputs(env.conv_store, session_id)
+    await _recover(restarted, env, session_id, host)
+    assert [_text(event) for event in sent[2:]] == [fyi_text]

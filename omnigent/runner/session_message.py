@@ -39,13 +39,19 @@ async def execute_message_tool(
         target = resolved["session_id"]
     if not isinstance(message, str) or not message.strip() or len(message) > 8000:
         return json.dumps({"error": "Provide a non-blank message of 1–8000 characters"})
+    kind = args.get("kind", "action")
+    if kind not in ("action", "fyi"):
+        return json.dumps({"error": "kind must be 'action' or 'fyi'"})
     if client is None or source_id is None:
         return json.dumps({"error": "Session messaging requires an authenticated runner"})
     if not peer_session_messaging_enabled():
         return json.dumps({"error": "Messaging other sessions is disabled on this runner"})
     try:
         path = f"/v1/sessions/{target}/events"
-        payload = {"type": "session_message", "data": {"message": message, "address": address}}
+        data: dict[str, Any] = {"message": message, "address": address}
+        if kind == "fyi":
+            data["kind"] = "fyi"
+        payload = {"type": "session_message", "data": data}
         headers = {ORCHESTRATION_SOURCE_HEADER: source_id}
         response = await client.post(path, headers=headers, json=payload, timeout=60)
         if is_wrong_replica(response):
