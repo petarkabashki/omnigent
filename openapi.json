@@ -10089,7 +10089,7 @@
         "type": "object"
       },
       "SessionProjectSummary": {
-        "description": "One entry of `GET /v1/sessions/projects` \u2014 a sidebar project folder.\n\nDual-read union of first-class projects and legacy `omni_project`\nlabel-projects. First-class entries are keyed by id (two nested projects may\nshare a leaf name); a label-project merges only into a root of the same name.\n\n**Parameters**\n\n- `private` \u2014 Owner-set private-namespace flag on this project record.",
+        "description": "One entry of `GET /v1/sessions/projects` \u2014 a sidebar project folder.\n\nDual-read union of first-class projects and legacy `omni_project`\nlabel-projects. First-class entries are keyed by id (two nested projects may\nshare a leaf name); a label-project merges only into a root of the same name.",
         "properties": {
           "icon": {
             "anyOf": [
@@ -17439,7 +17439,7 @@
         ]
       },
       "patch": {
-        "description": "Update one of the caller's projects (e.g. rename).\n\n**Parameters**\n\n- `body` \u2014 Fields to change; `None` fields are left unchanged.\n\n**Returns:** The updated project as a serialized dict.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if not found / not owned, 409 if the new name collides with another of the caller's projects, 403 if an agent call tries to change `private`.",
+        "description": "Update one of the caller's projects (e.g. rename).\n\n**Parameters**\n\n- `body` \u2014 Fields to change; `None` fields are left unchanged.\n\n**Returns:** The updated project as a serialized dict.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if not found / not owned, 409 if the new name collides with another of the caller's projects, 403 if an agent call tries to change `private`. Agents are recognised by the orchestration header; a headerless call counts as the owner.",
         "operationId": "update_project_v1_projects__project_id__patch",
         "parameters": [
           {

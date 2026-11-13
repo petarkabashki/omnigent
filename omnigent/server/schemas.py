@@ -2666,7 +2666,7 @@ class SessionResponse(BaseModel):
     # ``GET /v1/sessions?project=``.
     project_id: str | None = None
     # Whether the project or any ancestor is flagged private by the owner;
-    # ``None`` for unfiled sessions or where the response does not compute it.
+    # ``None`` when unfiled, in a project the viewer doesn't own, or not computed.
     project_private: bool | None = None
     # The session whose Workspace rail lists this one as a side chat; ``None``
     # otherwise, including side chats from before the rail was server-listed.
@@ -3497,7 +3497,7 @@ class SessionListItem(BaseModel):
     # GET. Distinct from the legacy ``omni_project`` label in ``labels``.
     project_id: str | None = None
     # Whether the project or any ancestor is flagged private by the owner;
-    # ``None`` for unfiled sessions or where the response does not compute it.
+    # ``None`` when unfiled, in a project the viewer doesn't own, or not computed.
     project_private: bool | None = None
     pull_request: SessionPullRequestSummary | None = None
     pull_requests_synced: bool | None = None
@@ -6025,6 +6025,7 @@ class ProjectObject(BaseModel):
         when the project stores no defaults. The key vocabulary is owned by the
         client; the server persists and returns it whole. Values are hints the
         new-chat dialog pre-fills, not enforced requirements.
+    :param private: Owner-set private-namespace flag on this project record.
     """
 
     id: str
@@ -6061,7 +6062,6 @@ class SessionProjectSummary(BaseModel):
     :param name: Project name (the folder's display name; one path segment).
     :param parent_id: Parent project id for a nested first-class project, else ``None``.
     :param path: Namespace path (``a/b``); the name for roots and label-projects.
-    :param private: Owner-set private-namespace flag on this project record.
     :param icon: The project's chosen emoji icon (a unicode grapheme), read
         from its ``config``; ``None`` when unset or for a label-only folder,
         so the sidebar falls back to the default folder glyph.

@@ -301,9 +301,13 @@ class ProjectStore(ABC):
         ...
 
     @abstractmethod
+    def project_privacy(self, *, user_id: str | None) -> dict[str, bool]:
+        """Map every owned project id to its effective (inherited) private flag."""
+        ...
+
     def private_project_ids(self, *, user_id: str | None) -> set[str]:
         """Return owned project ids that are private themselves or through an ancestor."""
-        ...
+        return {pid for pid, private in self.project_privacy(user_id=user_id).items() if private}
 
     @abstractmethod
     def get_path(self, project_id: str, *, user_id: str | None) -> str | None:

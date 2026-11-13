@@ -320,7 +320,8 @@ def create_projects_router(
         :returns: The updated project as a serialized dict.
         :raises OmnigentError: 401 if unauthenticated, 404 if not found / not
             owned, 409 if the new name collides with another of the caller's
-            projects, 403 if an agent call tries to change ``private``.
+            projects, 403 if an agent call tries to change ``private``. Agents
+            are recognised by the orchestration header; a headerless call counts as the owner.
         """
         user_id = require_user(request, auth_provider)
         if body.private is not None and request.headers.get(ORCHESTRATION_SOURCE_HEADER):

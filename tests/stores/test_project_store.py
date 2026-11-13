@@ -1395,3 +1395,13 @@ def test_effective_private_ids_stops_at_cycles() -> None:
     parents = {"a": "b", "b": "a", "c": "d", "d": None}
     assert effective_private_ids(parents, {"d"}) == {"c", "d"}
     assert effective_private_ids(parents, set()) == set()
+
+
+def test_project_privacy_maps_only_owned_projects(store: SqlAlchemyProjectStore) -> None:
+    owner = "alice@example.com"
+    root = store.create(_uid("privacy-root"), "root", owner)
+    child = store.create(_uid("privacy-child"), "child", owner, parent_id=root.id)
+    store.set_private(root.id, user_id=owner, private=True)
+
+    assert store.project_privacy(user_id=owner) == {root.id: True, child.id: True}
+    assert store.project_privacy(user_id="bob@example.com") == {}
