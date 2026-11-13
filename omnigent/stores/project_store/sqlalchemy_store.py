@@ -603,13 +603,14 @@ class SqlAlchemyProjectStore(ProjectStore):
 
         return run_write_transaction(self._session_immediate, "set_project_private", write)
 
-    def private_project_ids(self, *, user_id: str | None) -> set[str]:
-        """Return ids of owned projects that are private themselves or under a private ancestor."""
-        with self._session("select_private_projects") as session:
+    def project_privacy(self, *, user_id: str | None) -> dict[str, bool]:
+        """Map every owned project id to its effective (inherited) private flag."""
+        with self._session("select_project_privacy") as session:
             rows = self._owner_rows(session, user_id)
             parents = {pid: row.parent_id for pid, row in rows.items()}
             flagged = {pid for pid, row in rows.items() if row.private}
-        return effective_private_ids(parents, flagged)
+        private_ids = effective_private_ids(parents, flagged)
+        return {pid: pid in private_ids for pid in parents}
 
     def get_path(self, project_id: str, *, user_id: str | None) -> str | None:
         """Return the owned project's namespace path (names joined by ``/``)."""

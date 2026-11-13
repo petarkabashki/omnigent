@@ -527,13 +527,16 @@ async def _apply_project_private(
     project_store: ProjectStore | None,
     user_id: str | None,
 ) -> None:
-    """Set ``project_private`` on filed sessions, inherited through project parents."""
+    """Set ``project_private`` on sessions filed in the viewer's own projects.
+
+    Inherited through project parents; left ``None`` for another owner's project.
+    """
     if project_store is None or not any(item.project_id for item in items):
         return
-    private_ids = await asyncio.to_thread(project_store.private_project_ids, user_id=user_id)
+    privacy = await asyncio.to_thread(project_store.project_privacy, user_id=user_id)
     for item in items:
         if item.project_id:
-            item.project_private = item.project_id in private_ids
+            item.project_private = privacy.get(item.project_id)
 
 
 def register_core_routes(
