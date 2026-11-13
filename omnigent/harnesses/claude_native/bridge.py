@@ -298,6 +298,7 @@ _SERVER_FILE = "server.json"
 # named by owner pid so a socket left behind by a dead process can be reaped.
 _MCP_SOCKET_PREFIX = "mcp-"
 _MCP_SOCKET_SUFFIX = ".sock"
+_CONTROL_SERVER_POLL_INTERVAL_S = 0.05
 _STATE_FILE = "state.json"
 #: Holds the session's context epoch at the last runner launch.
 _LAUNCH_EPOCH_FILE = "launch_epoch"
@@ -8317,6 +8318,10 @@ def _serve_mcp(bridge_dir: Path) -> None:
         writer.start()
         _stdio_jsonrpc_loop(tools, stdout_lock, bridge_dir)
     finally:
+        # Harnesses follow SIGINT with SIGTERM within ~100 ms: remove the socket
+        # before anything slow, with further stop signals ignored.
+        _ignore_termination_signals()
+        _remove_control_socket(httpd)
         notification_queue.put(None)
         httpd.shutdown()
         httpd.server_close()
@@ -8324,18 +8329,40 @@ def _serve_mcp(bridge_dir: Path) -> None:
             close_tools()
 
 
+_TERMINATION_SIGNAL_NAMES = ("SIGINT", "SIGTERM", "SIGHUP")
+
+
 def _exit_cleanly_on_termination() -> None:
-    """Turn SIGTERM and SIGHUP into :class:`SystemExit` so ``finally`` blocks run."""
+    """Turn the first SIGINT, SIGTERM or SIGHUP into :class:`SystemExit` so ``finally`` runs."""
     import signal
 
     if IS_WINDOWS:
         return
 
     def _exit(signum: int, _frame: object) -> None:
+        _ignore_termination_signals()  # a follow-up signal must not cut cleanup short
         raise SystemExit(128 + signum)
 
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, _exit)
+    for name in _TERMINATION_SIGNAL_NAMES:
+        signal.signal(getattr(signal, name), _exit)
+
+
+def _ignore_termination_signals() -> None:
+    """Ignore further stop signals while serve-mcp cleans up."""
+    import signal
+
+    if IS_WINDOWS:
+        return
+    for name in _TERMINATION_SIGNAL_NAMES:
+        signal.signal(getattr(signal, name), signal.SIG_IGN)
+
+
+def _remove_control_socket(httpd: socketserver.BaseServer) -> None:
+    """Unlink the control server's Unix socket, if it has one."""
+    socket_path = getattr(httpd, "socket_path", None)
+    if isinstance(socket_path, Path):
+        with contextlib.suppress(OSError):
+            socket_path.unlink()
 
 
 def _start_http_ingress(
@@ -8376,6 +8403,8 @@ def _start_http_ingress(
     _write_json_file(bridge_dir / _SERVER_FILE, server_info)
     thread = threading.Thread(
         target=httpd.serve_forever,
+        # A short poll keeps ``shutdown`` well inside a harness's stop deadline.
+        kwargs={"poll_interval": _CONTROL_SERVER_POLL_INTERVAL_S},
         name="claude-native-mcp-http",
         daemon=True,
     )
@@ -8419,13 +8448,14 @@ def _start_unix_control_server(
         """Threaded HTTP server on a Unix socket; removes the socket file on close."""
 
         daemon_threads = True
+        socket_path: Path | None = None
 
         def server_close(self) -> None:
             super().server_close()
-            with contextlib.suppress(OSError):
-                socket_path.unlink()
+            _remove_control_socket(self)
 
     httpd = _UnixControlServer(str(socket_path), handler_cls)
+    httpd.socket_path = socket_path
     os.chmod(socket_path, 0o600)
     return httpd, socket_path
 

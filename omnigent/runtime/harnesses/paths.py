@@ -118,7 +118,7 @@ def ensure_shared_dir_is_sticky(directory: Path, my_uid: int) -> None:
         raise RuntimeError(
             f"refusing to use {directory!s} for the runtime parent: other users can write "
             f"to it and it lacks the sticky bit. Run `chmod +t {directory!s}` or `chmod go-w "
-            f"{directory!s}`, or point {HARNESS_TMP_PARENT_ENV_VAR} elsewhere"
+            f"{directory!s}`, or choose another parent"
         )
 
 
@@ -158,8 +158,17 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
             origin = f"set by {HARNESS_TMP_PARENT_ENV_VAR}"
         else:
             origin = f"{parent}; set {HARNESS_TMP_PARENT_ENV_VAR} to move it"
-        raise RuntimeParentError(f"{exc} (runtime parent {origin})") from exc
+        raise RuntimeParentError(
+            f"{_describe_parent_failure(exc)} (runtime parent {origin})"
+        ) from exc
     return parent
+
+
+def _describe_parent_failure(exc: BaseException) -> str:
+    """Describe *exc* for an operator, e.g. ``"cannot use /srv/x: Permission denied"``."""
+    if isinstance(exc, OSError) and exc.strerror:
+        return f"cannot use {exc.filename}: {exc.strerror}" if exc.filename else exc.strerror
+    return str(exc)
 
 
 def runtime_mkdtemp(prefix: str, env: Mapping[str, str] | None = None) -> Path:

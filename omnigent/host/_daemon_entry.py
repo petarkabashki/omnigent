@@ -83,6 +83,7 @@ def main() -> None:
         normalize_daemon_target,
         write_daemon_record,
     )
+    from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
     from omnigent.util.server_url import is_workspace_hosted_url
 
     workspace_hosted = not args.local and is_workspace_hosted_url(args.server)
@@ -131,6 +132,7 @@ def main() -> None:
             config_sig=os.environ.get(DAEMON_CONFIG_SIG_ENV_VAR),
             workspace_id=workspace_id,
             org_pin=os.environ.get(PINNED_DATABRICKS_ORG_ENV_VAR) if workspace_hosted else None,
+            runtime_parent=str(resolve_harness_tmp_parent()),
         )
         write_daemon_record(record, update_legacy_pidfile=True)
 

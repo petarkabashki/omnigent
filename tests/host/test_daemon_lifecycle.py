@@ -162,6 +162,50 @@ def test_reuse_legacy_record_probes_its_original_lock_path(
     assert probed_paths == [cli._daemon_record_path(legacy_target)]
 
 
+@pytest.mark.parametrize(
+    ("recorded_parent", "replaced"),
+    [
+        pytest.param("/tmp/og-old", True, id="changed"),
+        pytest.param("/tmp/og-now", False, id="same"),
+        pytest.param(None, False, id="legacy-record"),
+    ],
+)
+def test_reuse_replaces_a_daemon_under_another_runtime_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recorded_parent: str | None,
+    replaced: bool,
+) -> None:
+    from omnigent import cli
+    from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR
+
+    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, "/tmp/og-now")
+    target = normalize_daemon_target("https://x.example.com")
+    cli._write_daemon_record(
+        cli._HostDaemonRecord(
+            pid=4242,
+            target=target,
+            mode="server",
+            server_url=target,
+            log_path="daemon.log",
+            started_at=100,
+            runtime_parent=recorded_parent,
+        )
+    )
+    monkeypatch.setattr(cli, "_record_flock_is_held", lambda path: True)
+    monkeypatch.setattr(cli, "_daemon_host_identity_changed", lambda record: False)
+    terminated: list[str] = []
+    monkeypatch.setattr(
+        cli, "_terminate_host_unit", lambda record, *, reason: terminated.append(reason)
+    )
+
+    decision = cli._reuse_existing_daemon_record(target)
+
+    assert decision.reuse is not replaced
+    assert terminated == (["runtime parent changed"] if replaced else [])
+
+
 def test_record_path_uses_digest(tmp_path: Path) -> None:
     record = daemon_record_path("local", base_dir=tmp_path)
     assert record.parent == tmp_path / "daemons"

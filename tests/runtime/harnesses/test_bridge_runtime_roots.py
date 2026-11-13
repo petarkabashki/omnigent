@@ -227,8 +227,9 @@ def test_parent_errors_are_configuration_errors(short_tmp_dir: Path) -> None:
     shared = short_tmp_dir / "shared"
     shared.mkdir()
     shared.chmod(0o777)  # other-writable without the sticky bit
-    with pytest.raises(RuntimeParentError, match="sticky"):
+    with pytest.raises(RuntimeParentError, match="sticky") as excinfo:
         ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(shared / "rp")})
+    assert str(excinfo.value).count(HARNESS_TMP_PARENT_ENV_VAR) == 1
 
 
 def test_parent_error_names_the_variable_only_when_it_is_set(
@@ -236,8 +237,10 @@ def test_parent_error_names_the_variable_only_when_it_is_set(
 ) -> None:
     blocker = short_tmp_dir / "file"
     blocker.write_text("")  # mkdir under a regular file fails
-    with pytest.raises(RuntimeParentError, match="set by OMNIGENT_HARNESS_TMP_PARENT"):
+    with pytest.raises(RuntimeParentError, match="set by OMNIGENT_HARNESS_TMP_PARENT") as excinfo:
         ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(blocker / "a" / "rp")})
+    assert f"cannot use {blocker / 'a'}: Not a directory" in str(excinfo.value)
+    assert "[Errno" not in str(excinfo.value)
     monkeypatch.setattr(
         paths_module, "resolve_harness_tmp_parent", lambda env=None: blocker / "a" / "rp"
     )
@@ -256,3 +259,22 @@ def test_only_an_explicitly_chained_parent_error_is_a_configuration_error() -> N
     unrelated = KeyError("crash while handling it")
     unrelated.__context__ = parent_error
     assert _runtime_parent_error(unrelated) is None
+
+
+@pytest.mark.parametrize("server", [None, "https://server.example.com"])
+def test_a_bad_parent_fails_before_any_daemon_spawns(
+    monkeypatch: pytest.MonkeyPatch, server: str | None
+) -> None:
+    from omnigent import cli
+
+    def _must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("ran despite a bad runtime parent")
+
+    monkeypatch.setenv(HARNESS_TMP_PARENT_ENV_VAR, "/tmp/" + "p" * 60)
+    monkeypatch.setattr(cli, "_spawn_host_daemon_process", _must_not_run)
+    monkeypatch.setattr(cli, "_ensure_databricks_server_auth", _must_not_run)
+    monkeypatch.setattr(cli, "_reuse_existing_daemon_record", _must_not_run)
+    with pytest.raises(RuntimeParentError, match="Shorten OMNIGENT_HARNESS_TMP_PARENT"):
+        cli._ensure_backend(server)
+    with pytest.raises(RuntimeParentError, match="Shorten OMNIGENT_HARNESS_TMP_PARENT"):
+        cli._ensure_host_daemon(server)

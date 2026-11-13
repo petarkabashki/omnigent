@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import errno
 import io
 import itertools
@@ -16923,14 +16924,22 @@ def test_http_ingress_reaps_sockets_of_dead_owners(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix control socket")
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize(
+    "signals",
+    [
+        pytest.param([signal.SIGTERM], id="SIGTERM"),
+        pytest.param([signal.SIGHUP], id="SIGHUP"),
+        # Claude's MCP shutdown: SIGINT, SIGTERM ~100 ms later, SIGKILL at ~0.5 s.
+        pytest.param([signal.SIGINT, signal.SIGTERM], id="SIGINT-then-SIGTERM"),
+    ],
+)
 def test_serve_mcp_removes_its_socket_when_terminated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _short_harness_socket_root: Path,
-    signum: int,
+    signals: list[int],
 ) -> None:
-    """Harnesses and tmux stop serve-mcp with a signal, not EOF; the socket still goes."""
+    """Harnesses and tmux stop serve-mcp with signals, not EOF; the socket still goes."""
     # The child resolves its roots from the env var; give this process the same ones.
     root = _short_harness_socket_root
     monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT_PARENT", root)
@@ -16954,8 +16963,17 @@ def test_serve_mcp_removes_its_socket_when_terminated(
                 child.kill()
                 pytest.fail(f"serve-mcp never bound: {child.communicate()[1][-2000:]!r}")
             time.sleep(0.05)
-        child.send_signal(signum)
-        assert child.wait(timeout=30) == 128 + signum
+        for index, signum in enumerate(signals):
+            if index:
+                time.sleep(0.05)
+            child.send_signal(signum)
+        if len(signals) == 1:
+            assert child.wait(timeout=30) == 128 + signals[0]
+        else:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(timeout=0.5)
+            child.kill()  # Claude's deadline: the socket must be gone by now
+            child.wait(timeout=30)
         assert not socket_path.exists()
     finally:
         if child.poll() is None:

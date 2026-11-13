@@ -129,7 +129,11 @@ from omnigent.process_logging import (
     env_truthy,
     process_log_dir_reference,
 )
-from omnigent.runtime.harnesses.paths import runtime_mkdtemp
+from omnigent.runtime.harnesses.paths import (
+    ensure_runtime_parent,
+    resolve_harness_tmp_parent,
+    runtime_mkdtemp,
+)
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.server_url import ServerUrl
 from omnigent.util.server_url import org_id_from_url as _org_id_from_url
@@ -3169,6 +3173,10 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
     if background and _daemon_host_identity_changed(existing):
         _terminate_host_unit(existing, reason="host identity changed")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
+    if background and _daemon_runtime_parent_changed(existing):
+        # Its sessions would keep sockets under the old parent.
+        _terminate_host_unit(existing, reason="runtime parent changed")
+        return _DaemonReuseDecision(reuse=False, config_changed=False)
 
     if target != _LOCAL_DAEMON_MARKER:
         _require_compatible_daemon(existing, target)
@@ -3200,6 +3208,18 @@ def _reuse_existing_daemon_record(target: str) -> _DaemonReuseDecision:
         _terminate_host_unit(existing, reason="host tunnel is offline")
         return _DaemonReuseDecision(reuse=False, config_changed=False)
     return _DaemonReuseDecision(reuse=True, config_changed=False)
+
+
+def _daemon_runtime_parent_changed(record: _HostDaemonRecord) -> bool:
+    """
+    Whether *record*'s daemon runs under a different runtime parent than this CLI.
+
+    :param record: Live daemon record; legacy records (no parent) never count.
+    :returns: ``True`` when both parents are known and differ.
+    """
+    if record.runtime_parent is None:
+        return False
+    return record.runtime_parent != str(resolve_harness_tmp_parent())
 
 
 def _same_workspace_daemon(
@@ -3509,6 +3529,7 @@ def _foreground_daemon_record(
         resolved_server_url=server_url.rstrip("/") if mode == "local" else None,
         config_sig=server_config_signature(include_features=mode == "local"),
         org_pin=_host_databricks_org_pin(server_url) if mode == "server" else None,
+        runtime_parent=str(resolve_harness_tmp_parent()),
     )
 
 
@@ -3800,6 +3821,8 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
         rather than continue this command mid-restart. ``False`` for a plain
         reuse, a transparent tunnel-health heal, or a first spawn.
     """
+    # Refuse a bad runtime parent before a daemon spawns under it.
+    ensure_runtime_parent()
     ensure_started_at = time.monotonic()
     target = _normalize_daemon_target(server_url)
     existing_before = _find_daemon_record(target)
@@ -4248,6 +4271,8 @@ def _ensure_backend(server: str | None) -> str:
         runner_startup_progress,
     )
 
+    # Before any sign-in prompt or daemon spawn: a bad parent fails every session.
+    ensure_runtime_parent()
     if server:
         # Remote / explicit-server mode: the server isn't ours to restart, so
         # there's no auth-mode-flip "re-run" to surface (config_changed is
@@ -10197,8 +10222,6 @@ def host(
     if ctx.invoked_subcommand is not None:
         return
     # Every session needs the runtime parent: refuse here, not after "Connected".
-    from omnigent.runtime.harnesses.paths import ensure_runtime_parent
-
     ensure_runtime_parent()
     # Kept before the config fallback below: `--background` echoes a `host
     # stop` command that mirrors how this command was invoked.
