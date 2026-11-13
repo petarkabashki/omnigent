@@ -216,8 +216,10 @@ def _write_discovery_skill(root: Path, name: str, *, visible: bool = True) -> No
     ],
 )
 async def test_host_discovers_harness_skills_without_a_runner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: str, expected: set[str]
+    outside_home_tmp_dir: Path, monkeypatch: pytest.MonkeyPatch, harness: str, expected: set[str]
 ) -> None:
+    # Outside home: Claude's skill walk climbs to /, past any real ~/.claude.
+    tmp_path = outside_home_tmp_dir
     home = tmp_path / "home"
     workspace = tmp_path / "project with spaces"
     home.mkdir()

@@ -110,6 +110,21 @@ def _real_env_supports_chdir() -> bool:
 
 
 @functools.cache
+def _real_env_is_uutils() -> bool:
+    """Return whether ``/usr/bin/env`` is uutils (Ubuntu 26.04), which departs from GNU."""
+    probe = subprocess.run(
+        ["/usr/bin/env", "--version"], capture_output=True, text=True, check=False
+    )
+    return "uutils" in probe.stdout.lower()
+
+
+# Rows where uutils env 0.10 departs from GNU, which the model follows.
+_GNU_ENV_ONLY = pytest.mark.skipif(
+    "_real_env_is_uutils()", reason="uutils env differs from GNU here"
+)
+
+
+@functools.cache
 def _real_env_supports_long_split_string() -> bool:
     """Return whether ``/usr/bin/env`` accepts GNU's ``--split-string`` spelling."""
     probe = subprocess.run(
@@ -131,7 +146,7 @@ def _real_env_supports_long_split_string() -> bool:
         ["-S", "A=1 /usr/bin/printenv"],
         ["-S", "- A='x y' /usr/bin/printenv"],
         ["-S", "-u KEEP A=1 /usr/bin/printenv"],
-        ["-iS", "A=1 /usr/bin/printenv"],
+        pytest.param(["-iS", "A=1 /usr/bin/printenv"], marks=_GNU_ENV_ONLY),
         ["--split-string=-u KEEP A=1 /usr/bin/printenv"],
         ["--split-string", "-u KEEP A=1 /usr/bin/printenv"],
         ["-C", "/", "A=1", "/usr/bin/printenv"],
@@ -139,8 +154,10 @@ def _real_env_supports_long_split_string() -> bool:
         ["-S", 'A="${KEEP} x" /usr/bin/printenv'],
         ["-S", "A='${KEEP}' /usr/bin/printenv"],
         ["-S", "A=${UNSET_NAME}z /usr/bin/printenv"],
-        ["-S", "${UNSET_NAME} A=1 /usr/bin/printenv"],
-        ["-S", "A=1 ${UNSET_NAME}${UNSET_NAME} B=2 /usr/bin/printenv"],
+        pytest.param(["-S", "${UNSET_NAME} A=1 /usr/bin/printenv"], marks=_GNU_ENV_ONLY),
+        pytest.param(
+            ["-S", "A=1 ${UNSET_NAME}${UNSET_NAME} B=2 /usr/bin/printenv"], marks=_GNU_ENV_ONLY
+        ),
         ["-S", "A=x\tB=y\nC=z /usr/bin/printenv"],
         ["-S", "A=/tmp/a\u00a0b /usr/bin/printenv"],
         ["-S", "A=x\u00a0#y /usr/bin/printenv"],
@@ -188,6 +205,14 @@ def test_nested_env_wrapper_is_not_modeled():
     assert startup.env_wrapper_chdir("/usr/bin/env", args) is None
 
 
+def test_env_wrapper_model_follows_gnu_where_uutils_differs():
+    """GNU semantics the real-env rows check only on a GNU host."""
+    bundled = startup.env_wrapper_environment("/usr/bin/env", ["-iS", "A=1 claude"], {})
+    assert bundled is not None
+    assert (bundled.inherit, bundled.variables) == (False, {"A": "1"})
+    assert startup.env_wrapper_chdir("/usr/bin/env", ["-C", "a", "-C", "b", "claude"]) == "b"
+
+
 def test_env_split_string_keeps_a_word_only_for_set_variables():
     """
     A word made only of unset ``${NAME}`` references is dropped, as in ``env``.
@@ -213,7 +238,7 @@ def test_env_split_string_keeps_a_word_only_for_set_variables():
         ["-iC", "sub", "/bin/pwd"],
         ["-S", "-C sub /bin/pwd"],
         # env applies only the last -C, relative to the starting directory.
-        ["-C", "link", "-C", "sub", "/bin/pwd"],
+        pytest.param(["-C", "link", "-C", "sub", "/bin/pwd"], marks=_GNU_ENV_ONLY),
     ],
 )
 def test_env_wrapper_chdir_matches_real_env(tmp_path, args):

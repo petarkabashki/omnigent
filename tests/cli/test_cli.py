@@ -6203,7 +6203,9 @@ def test_config_list_ignores_project_harness_launch_overrides(
     assert "harness=codex" in result.output
     assert "per-harness overrides" not in result.output
     assert "ignored project harness launch overrides: harness.pi" in result.output
-    assert str(config_home / "config.yaml") in result.output
+    from omnigent import cli as cli_module
+
+    assert cli_module._display_config_path(config_home / "config.yaml") in result.output
     assert "project-pi" not in result.output
     assert "--project-arg" not in result.output
 
@@ -6843,7 +6845,8 @@ def test_setup_invalid_provider_is_a_user_error_not_a_crash(
 
     assert exc_info.value.code == 1
     terminal = capsys.readouterr()
-    assert f"Invalid provider configuration in {tmp_path / 'config.yaml'}" in terminal.err
+    shown = cli_module._display_config_path(tmp_path / "config.yaml")
+    assert f"Invalid provider configuration in {shown}" in terminal.err
     assert message in terminal.err
     configure_flow.assert_not_called()
     assert crashes == []
