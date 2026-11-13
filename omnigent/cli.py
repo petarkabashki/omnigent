@@ -2157,6 +2157,7 @@ _CLICK_SUBCOMMANDS: frozenset[str] = frozenset(
         "pane-split",
         "pi",
         "polly",
+        "projects",
         "qwen",
         "resume",
         "run",

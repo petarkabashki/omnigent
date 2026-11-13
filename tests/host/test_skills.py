@@ -64,6 +64,12 @@ def _response(bundle: bytes, version: str = "1") -> httpx.Response:
     )
 
 
+@pytest.fixture
+def tmp_path(short_tmp_dir: Path) -> Path:
+    """A workspace under /tmp: Claude's skill walk climbs to /, past any real ~/.claude."""
+    return short_tmp_dir
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")

@@ -6843,7 +6843,8 @@ def test_setup_invalid_provider_is_a_user_error_not_a_crash(
 
     assert exc_info.value.code == 1
     terminal = capsys.readouterr()
-    assert f"Invalid provider configuration in {tmp_path / 'config.yaml'}" in terminal.err
+    shown = cli_module._display_config_path(tmp_path / "config.yaml")
+    assert f"Invalid provider configuration in {shown}" in terminal.err
     assert message in terminal.err
     configure_flow.assert_not_called()
     assert crashes == []

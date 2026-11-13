@@ -3379,19 +3379,18 @@ def test_materialize_override_bundle_cleans_tempdir_when_directory_invalid(
     (source / "tool.py").write_text("print('copied')\n")
     tempdir = tmp_path / "materialized"
 
-    def fake_mkdtemp(*, prefix: str) -> str:
+    def fake_runtime_mkdtemp(prefix: str) -> Path:
         """
         Return a deterministic tempdir path for cleanup assertions.
 
-        :param prefix: Requested tempdir prefix, e.g.
-            ``"omnigent-override-"``.
-        :returns: Filesystem path to the deterministic tempdir.
+        :param prefix: Requested tempdir prefix, e.g. ``"override-"``.
+        :returns: The deterministic tempdir.
         """
-        assert prefix == "omnigent-override-"
+        assert prefix == "override-"
         tempdir.mkdir()
-        return str(tempdir)
+        return tempdir
 
-    monkeypatch.setattr(chat_module.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(chat_module, "runtime_mkdtemp", fake_runtime_mkdtemp)
 
     with pytest.raises(click.ClickException, match=r"directory has no config\.yaml"):
         _materialize_override_bundle(
