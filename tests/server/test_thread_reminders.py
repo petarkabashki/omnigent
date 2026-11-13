@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from omnigent.entities.conversation import MessageData, NewConversationItem
+from omnigent.errors import OmnigentError
 from omnigent.server import role_threads
 from omnigent.server.thread_reminders import (
     ReminderSettings,
@@ -24,6 +25,7 @@ class Harness:
         self.store = SqlAlchemyConversationStore(db_uri)
         self.sent: list[tuple[str, str]] = []
         self.online = True
+        self.offline_since: dict[str, int] = {}
         self.holder_id = self.store.create_conversation(kind="default").id
         self.store.set_session_live_status(self.holder_id, "idle")
         self.store.set_labels(
@@ -61,6 +63,7 @@ class Harness:
             deliver=self.deliver,
             runner_online=lambda _sid: self.online,
             clock=lambda: now,
+            offline_since=self.offline_since,
         )
 
 
@@ -115,21 +118,93 @@ async def test_busy_holder_is_not_interrupted(harness: Harness) -> None:
     assert harness.sent == [] and "nudges" not in harness.row()
 
 
-async def test_after_max_nudges_thread_escalates_to_owner(harness: Harness) -> None:
+async def test_after_max_nudges_thread_shows_no_reply_not_the_owner(harness: Harness) -> None:
     harness.thread(nudges="2", nudged_at=str(OLD))
     assert await harness.check() == 1
     assert harness.sent == []
-    assert harness.row()["state"] == "waiting_on_owner"
+    assert harness.row()["state"] == role_threads.NO_REPLY_STATE
     assert await harness.check(NOW + 3600) == 0  # escalated threads aren't revisited
 
 
-async def test_offline_runner_escalates_without_sending(harness: Harness) -> None:
+async def test_offline_runner_escalates_only_after_the_reminder_window(harness: Harness) -> None:
     harness.thread(sum="please review")
     harness.online = False
-    assert await harness.check() == 1
+    assert await harness.check() == 0  # first seen offline now
+    assert await harness.check(NOW + 19 * 60) == 0
+    assert harness.row()["state"] == "waiting_on_us"
+    assert await harness.check(NOW + 20 * 60) == 1
     assert harness.sent == []
-    assert harness.row()["state"] == "waiting_on_owner"
+    assert harness.row()["state"] == role_threads.NO_REPLY_STATE
     assert harness.row()["sum"] == "please review"
+
+
+async def test_a_hub_restart_alone_never_escalates(harness: Harness) -> None:
+    harness.thread()
+    harness.online = False
+    await harness.check()
+    harness.offline_since = {}  # a restarted hub has no memory of when the runner left
+    assert await harness.check(NOW + 30 * 60) == 0
+    assert harness.row()["state"] == "waiting_on_us"
+
+
+async def test_a_runner_back_online_restarts_its_offline_clock(harness: Harness) -> None:
+    harness.thread()
+    harness.online = False
+    await harness.check()
+    harness.online = True
+    harness.store.set_session_live_status(harness.holder_id, "running")
+    await harness.check(NOW + 10 * 60)
+    harness.online = False
+    assert await harness.check(NOW + 25 * 60) == 0
+    assert harness.row()["state"] == "waiting_on_us"
+
+
+@pytest.mark.parametrize("state", ["waiting_on_owner", role_threads.NO_REPLY_STATE])
+async def test_an_owner_post_takes_the_thread_off_the_owner(harness: Harness, state: str) -> None:
+    harness.thread(state=state)
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    role_threads.settle_owner_wait(harness.store, holder, "Product")
+    assert harness.row()["state"] == "open"
+
+
+async def test_a_new_state_from_the_role_replaces_no_reply(harness: Harness) -> None:
+    harness.thread(state=role_threads.NO_REPLY_STATE)
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    role_threads.note_thread(harness.store, holder, "Product", state="blocked", summary=None)
+    assert harness.row()["state"] == "blocked"
+
+
+def test_roles_cannot_set_no_reply(harness: Harness) -> None:
+    harness.thread()
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    with pytest.raises(OmnigentError, match="state must be one of"):
+        role_threads.note_thread(
+            harness.store, holder, "Product", state=role_threads.NO_REPLY_STATE, summary=None
+        )
+
+
+async def test_a_held_thread_stays_on_the_owner_through_new_messages(harness: Harness) -> None:
+    harness.thread(state="open", unread=0)
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    role_threads.hold_message(
+        harness.store,
+        holder,
+        "Product",
+        text="ok 6",
+        target_id="target",
+        source_id=holder.id,
+        message_id=None,
+        sender_handle="Architect",
+    )
+    role_threads.record_inbound(harness.store, holder, "Product", "Architect", "m1", "hi", 1)
+    assert harness.row()["state"] == "waiting_on_owner"
+    assert harness.row()["unread"] == "1"
+    role_threads.settle_owner_wait(harness.store, holder, "Product")  # held still unresolved
+    assert harness.row()["state"] == "waiting_on_owner"
 
 
 async def test_delivery_failure_does_not_count_a_nudge(harness: Harness) -> None:
@@ -166,3 +241,28 @@ def test_settings_read_env_and_zero_disables() -> None:
     )
     assert (settings.minutes, settings.max_nudges, settings.interval_seconds) == (0, 5, 120)
     assert ReminderSettings.from_env({}) == ReminderSettings()
+
+
+@pytest.mark.parametrize("state", ["waiting_on_owner", role_threads.NO_REPLY_STATE])
+async def test_a_new_message_restarts_the_reminder_sequence(harness: Harness, state: str) -> None:
+    harness.thread(state=state, nudges="2", nudged_at=str(OLD))
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    role_threads.record_inbound(
+        harness.store, holder, "Product", "Architect", "m1", "again", 1, now=OLD
+    )
+    assert harness.row()["state"] == "waiting_on_us"
+    assert harness.row()["nudges"] == "0" and harness.row()["nudged_at"] == "0"
+    assert await harness.check() == 1
+    assert len(harness.sent) == 1  # reminded, not escalated
+    assert harness.row()["state"] == "waiting_on_us"
+
+
+@pytest.mark.parametrize("nudges", ["0", "2"])
+async def test_a_blocked_thread_is_neither_nudged_nor_escalated(
+    harness: Harness, nudges: str
+) -> None:
+    harness.thread(state="blocked", nudges=nudges, nudged_at=str(OLD))
+    assert await harness.check() == 0
+    assert harness.sent == []
+    assert harness.row()["state"] == "blocked"

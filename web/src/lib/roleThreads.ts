@@ -34,11 +34,29 @@ const URGENT_STATES: Record<string, number> = {
   waiting_on_owner: 0,
   blocked: 0,
   waiting_on_us: 1,
+  no_reply: 1,
 };
 
 /** States that call for attention in the sidebar: the state word is shown, not just its dot. */
 export function roleThreadIsUrgent(state: string): boolean {
   return state in URGENT_STATES;
+}
+
+/** Mirrors `thread_needs_owner` on the server: only a held message or an explicit mark. */
+export function roleThreadNeedsOwner(thread: RoleThread): boolean {
+  return thread.state === "waiting_on_owner" || thread.held !== undefined;
+}
+
+/** How many threads a role has, and how many of them need the owner. */
+export function roleThreadCounts(threads: RoleThread[]): { total: number; needsYou: number } {
+  return { total: threads.length, needsYou: threads.filter(roleThreadNeedsOwner).length };
+}
+
+/** The tooltip and accessible text for a role's thread count: "7 threads, 2 need you". */
+export function roleThreadCountText({ total, needsYou }: { total: number; needsYou: number }) {
+  const threads = total === 1 ? "1 thread" : `${total} threads`;
+  if (needsYou === 0) return threads;
+  return `${threads}, ${needsYou} ${needsYou === 1 ? "needs" : "need"} you`;
 }
 
 function toInt(value: string | undefined): number {
@@ -93,6 +111,7 @@ const STATE_TEXT: Record<string, string> = {
   waiting_on_us: "Our turn",
   waiting_on_owner: "Needs you",
   blocked: "Blocked",
+  no_reply: "No reply",
   done: "Done",
 };
 
@@ -102,6 +121,7 @@ const STATE_TONE: Record<string, StateTone> = {
   waiting_on_us: "amber",
   waiting_on_owner: "yellow",
   blocked: "red",
+  no_reply: "amber",
   done: "green",
 };
 
@@ -116,6 +136,7 @@ const STATE_DESCRIPTION: Record<string, string> = {
   open: "Nobody owes a reply; the thread stays available.",
   waiting_on_owner: "The roles are waiting for your answer or decision.",
   blocked: "Work can't continue until something outside this thread changes.",
+  no_reply: "The role left this thread unhandled through its reminders, or stayed offline.",
   done: "The thread is finished; nothing further is expected.",
 };
 

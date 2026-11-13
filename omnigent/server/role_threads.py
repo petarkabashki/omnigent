@@ -33,6 +33,8 @@ THREAD_ROLE_LABEL = "thread.role"  # handle of the role a session held
 THREAD_OF_LABEL = "thread.of"  # on an owner-started side chat: its counterpart
 PROMOTION_MESSAGE_THRESHOLD = 20  # messages after which a thread is a promotion candidate
 THREAD_STATES = ("open", "waiting_on_them", "waiting_on_us", "waiting_on_owner", "blocked", "done")
+# Set by the hub's reminder checker only: the role didn't answer. Not a decision for the owner.
+NO_REPLY_STATE = "no_reply"
 OWNER_SENDER = "owner"  # sender name on a message the owner posted into a thread
 HUB_SENDER = "hub"  # sender name on a hub reminder about an unhandled thread
 COUNTERPART_MAX_LEN = 200
@@ -40,7 +42,7 @@ COUNTERPART_MAX_LEN = 200
 _SCAN_PAGES = 100  # newest 10,000 messages per session
 _INDEX_LABEL = re.compile(r"thread\.([0-9a-f]{12})\.([a-z0-9_]+)")
 _THREAD_TAG = re.compile(r"^\[Message from [^\n]*?\] \[thread ([^\]\n]+)\]\n", re.ASCII)
-_URGENT_STATES = {"waiting_on_owner": 0, "blocked": 0, "waiting_on_us": 1}
+_URGENT_STATES = {"waiting_on_owner": 0, "blocked": 0, "waiting_on_us": 1, NO_REPLY_STATE: 1}
 
 
 def thread_hash(counterpart: str) -> str:
@@ -122,6 +124,11 @@ def thread_index(labels: Mapping[str, str]) -> list[dict[str, Any]]:
     rows.sort(key=lambda row: -row["updated_at"])
     rows.sort(key=lambda row: _URGENT_STATES.get(row["state"], 2))
     return rows
+
+
+def thread_needs_owner(row: Mapping[str, Any]) -> bool:
+    """Only a held message or an explicit mark puts a thread on the owner."""
+    return row["state"] == "waiting_on_owner" or row["held"] is not None
 
 
 def _to_int(value: str | None) -> int:
@@ -321,9 +328,16 @@ def record_inbound(
         _label(counterpart, "at"): str(now if now is not None else int(time.time())),
     }
     updates.update(_guard_labels(counterpart, verdict, recent=False))
+    if "held_to" in fields:
+        # A held message keeps the thread on the owner until it is resolved.
+        del updates[_label(counterpart, "state")]
     if keep_state:
-        del updates[_label(counterpart, "state")], updates[_label(counterpart, "sum")]
-    if not count:
+        updates.pop(_label(counterpart, "state"), None)
+        del updates[_label(counterpart, "sum")]
+    if count:
+        # A new message earns the full reminder sequence again.
+        updates.update(_reset_nudges(counterpart))
+    else:
         del updates[_label(counterpart, "unread")], updates[_label(counterpart, "n")]
     if message_id:
         updates[_label(counterpart, "last")] = message_id
@@ -465,9 +479,9 @@ def owner_thread_message(message: object, thread: str | None, message_id: str) -
 
 
 def settle_owner_wait(store: ConversationStore, holder: Conversation, counterpart: str) -> None:
-    """The owner answered in this thread, so it no longer waits on them."""
+    """The owner answered in this thread, so it no longer waits on them or shows no reply."""
     fields = _row_fields(holder.labels, counterpart)
-    if fields.get("state") == "waiting_on_owner":
+    if fields.get("state") in ("waiting_on_owner", NO_REPLY_STATE) and "held_to" not in fields:
         store.set_labels(holder.id, {_label(counterpart, "state"): "open"})
 
 

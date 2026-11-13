@@ -48,10 +48,14 @@ STALE_MINUTES: dict[str, int] = {
     "runner_offline": 0,
     "waiting_holder": 10,
 }
-_THREAD_WAITING_STATES = ("waiting_on_us", "waiting_on_owner", "blocked")
+_THREAD_WAITING_STATES = (
+    "waiting_on_us",
+    "waiting_on_owner",
+    "blocked",
+    role_threads.NO_REPLY_STATE,
+)
 # Only these need the owner and count toward the Waiting badge.
 _OWNER_KINDS = ("approval", "runner_offline", "waiting_holder")
-_OWNER_THREAD_STATES = ("waiting_on_owner", "blocked")
 
 
 class WaitingItem(TypedDict):
@@ -251,7 +255,8 @@ def thread_items(conv: Conversation, *, now: int) -> list[WaitingItem]:
     for row in role_threads.thread_index(conv.labels):
         state = row["state"]
         since = row["updated_at"] or None
-        if state not in _THREAD_WAITING_STATES:
+        needs_owner = role_threads.thread_needs_owner(row)
+        if state not in _THREAD_WAITING_STATES and not needs_owner:
             if state != "waiting_on_them" or not _is_stale("thread", since, now):
                 continue
         digest = role_threads.thread_hash(row["counterpart"])
@@ -272,7 +277,7 @@ def thread_items(conv: Conversation, *, now: int) -> list[WaitingItem]:
                 detail=" · ".join(parts),
                 ref=row["counterpart"],
                 actions=("open", "nudge"),
-                needs_owner=state in _OWNER_THREAD_STATES,
+                needs_owner=needs_owner,
             )
         )
     return items

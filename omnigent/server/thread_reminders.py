@@ -1,8 +1,9 @@
 """Hub-side checker that keeps role threads from going stale.
 
 A thread with unhandled messages on an idle role holder gets up to a few
-reminder messages; after that, or when the holder's runner is offline, it is
-marked ``waiting_on_owner`` so the owner sees it.
+reminder messages. After that, or once the holder's runner has been offline for
+longer than the reminder window, it is marked ``no_reply``: visible, but not a
+decision for the owner.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ _logger = logging.getLogger(__name__)
 NUDGES_FIELD = "nudges"
 NUDGED_AT_FIELD = "nudged_at"
 HUB_SENDER = role_threads.HUB_SENDER
+NO_REPLY = role_threads.NO_REPLY_STATE
 _PAGE_LIMIT = 100
 _MAX_PAGES = 20
 
@@ -69,7 +71,8 @@ def reminder_text(counterpart: str, unread: int, age_minutes: int, now: int) -> 
 def _is_due(
     row: Mapping[str, Any], fields: Mapping[str, str], now: int, limit_seconds: int
 ) -> bool:
-    if row["unread"] <= 0 or row["state"] in ("done", "waiting_on_owner"):
+    # A blocked thread waits on something outside the conversation; keep it as marked.
+    if row["unread"] <= 0 or row["state"] in ("done", "blocked", "waiting_on_owner", NO_REPLY):
         return False
     if now - row["updated_at"] < limit_seconds:
         return False
@@ -84,9 +87,20 @@ async def check_holder(
     now: int,
     deliver: Deliver,
     runner_online: Callable[[str], bool],
+    offline_since: dict[str, int] | None = None,
 ) -> int:
-    """Remind or escalate the holder's due threads; returns how many were touched."""
+    """Remind or escalate the holder's due threads; returns how many were touched.
+
+    ``offline_since`` maps holder id to when this checker first saw its runner
+    offline. It lives in memory, so a hub restart starts every holder's clock over.
+    """
     limit_seconds = settings.minutes * 60
+    offline_since = {} if offline_since is None else offline_since
+    if runner_online(holder.id):
+        offline_since.pop(holder.id, None)
+        offline_for = None
+    else:
+        offline_for = now - offline_since.setdefault(holder.id, now)
     touched = 0
     for row in role_threads.thread_index(holder.labels):
         counterpart = row["counterpart"]
@@ -95,8 +109,12 @@ async def check_holder(
             continue
         label = lambda field, cp=counterpart: role_threads._label(cp, field)  # noqa: E731
         nudges = role_threads._to_int(fields.get(NUDGES_FIELD))
-        if not runner_online(holder.id) or nudges >= settings.max_nudges:
-            store.set_labels(holder.id, {label("state"): "waiting_on_owner"})
+        if offline_for is not None:
+            if offline_for < limit_seconds:
+                continue
+            store.set_labels(holder.id, {label("state"): NO_REPLY})
+        elif nudges >= settings.max_nudges:
+            store.set_labels(holder.id, {label("state"): NO_REPLY})
         elif holder.live_status == "idle":
             age = (now - row["updated_at"]) // 60
             await deliver(holder, reminder_text(counterpart, row["unread"], age, now))
@@ -135,10 +153,16 @@ async def check_all(
     deliver: Deliver,
     runner_online: Callable[[str], bool],
     clock: Callable[[], float] = time.time,
+    offline_since: dict[str, int] | None = None,
 ) -> int:
     """One pass over every role holder; a failure on one holder doesn't stop the rest."""
     touched = 0
-    for holder in await asyncio.to_thread(_holders, store):
+    holders = await asyncio.to_thread(_holders, store)
+    if offline_since is not None:
+        current = {holder.id for holder in holders}
+        for stale_id in set(offline_since) - current:
+            del offline_since[stale_id]
+    for holder in holders:
         try:
             touched += await check_holder(
                 store,
@@ -147,6 +171,7 @@ async def check_all(
                 now=int(clock()),
                 deliver=deliver,
                 runner_online=runner_online,
+                offline_since=offline_since,
             )
         except Exception:
             _logger.warning("thread reminder failed for %s", holder.id, exc_info=True)
@@ -161,10 +186,17 @@ async def run_checker(
     runner_online: Callable[[str], bool],
 ) -> None:
     """Loop until cancelled."""
+    offline_since: dict[str, int] = {}
     while True:
         await asyncio.sleep(settings.interval_seconds)
         with suppress(Exception):
-            await check_all(store, settings=settings, deliver=deliver, runner_online=runner_online)
+            await check_all(
+                store,
+                settings=settings,
+                deliver=deliver,
+                runner_online=runner_online,
+                offline_since=offline_since,
+            )
 
 
 def start_checker(

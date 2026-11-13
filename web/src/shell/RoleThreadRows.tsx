@@ -5,6 +5,7 @@ import {
   ArrowUpRightIcon,
   BellRingIcon,
   CheckIcon,
+  ChevronRightIcon,
   ClockIcon,
   MailOpenIcon,
   MessageSquareTextIcon,
@@ -22,9 +23,16 @@ import { cn } from "@/lib/utils";
 import { HeldThreadMessage } from "@/components/chat/HeldThreadMessage";
 import { StateDot } from "@/components/StateDot";
 import {
+  roleThreadsExpansionKey,
+  setRoleThreadsExpanded,
+  useRoleThreadsExpanded,
+} from "@/lib/roleThreadExpansion";
+import {
   nudgeRoleThread,
   requestRoleThreadPostFocus,
   roleHandlePath,
+  roleThreadCountText,
+  roleThreadCounts,
   roleThreadIsUrgent,
   roleThreadStateDescription,
   roleThreadStateLabels,
@@ -37,13 +45,70 @@ import { createSideChat, updateSession } from "@/lib/sessionsApi";
 import { useChatStore } from "@/store/chatStore";
 import { SIDEBAR_HOVER_HIGHLIGHT, SIDEBAR_ROW } from "./sidebarStyles";
 
+/** Shows or hides a role's threads; sits outside the row link so it never opens the role. */
+export function RoleThreadsToggle({
+  conversation,
+  threads,
+  className,
+}: {
+  conversation: Conversation;
+  threads: RoleThread[];
+  className?: string;
+}) {
+  const key = roleThreadsExpansionKey(conversation);
+  const expanded = useRoleThreadsExpanded(key);
+  return (
+    <button
+      type="button"
+      data-testid="role-threads-toggle"
+      aria-label={`${expanded ? "Hide" : "Show"} threads: ${roleThreadCountText(roleThreadCounts(threads))}`}
+      aria-expanded={expanded}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setRoleThreadsExpanded(key, !expanded);
+      }}
+      className={cn(
+        "absolute top-1/2 z-10 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground",
+        className,
+      )}
+    >
+      <ChevronRightIcon className={cn("size-3", expanded && "rotate-90")} />
+    </button>
+  );
+}
+
+/** A role's thread count on its row, "7 · 2": threads, then those that need you. */
+export function RoleThreadCount({ threads }: { threads: RoleThread[] }) {
+  const counts = roleThreadCounts(threads);
+  const text = roleThreadCountText(counts);
+  return (
+    <span
+      role="img"
+      data-testid="role-thread-count"
+      aria-label={text}
+      title={text}
+      className="shrink-0 text-xs text-muted-foreground tabular-nums"
+    >
+      {counts.total}
+      {counts.needsYou > 0 && (
+        <>
+          {" · "}
+          <span className="font-medium text-foreground">{counts.needsYou}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
 /**
- * The threads of a role-holding session, listed under its sidebar row.
+ * The threads of a role-holding session, listed under its sidebar row while expanded.
  * Opening one shows the thread in its side chat beside the holder, ready to reply.
  */
 export function RoleThreadRows({ conversation }: { conversation: Conversation }) {
   const threads = roleThreadsFromLabels(conversation.labels);
-  if (threads.length === 0) return null;
+  const expanded = useRoleThreadsExpanded(roleThreadsExpansionKey(conversation));
+  if (threads.length === 0 || !expanded) return null;
   return (
     <li data-testid="role-thread-rows">
       <ul
