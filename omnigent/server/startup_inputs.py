@@ -201,11 +201,7 @@ _services: weakref.WeakSet[ManagedStartupInputs] = weakref.WeakSet()
 
 def awaits_turn(item: ConversationItem) -> bool:
     """Whether queued ``item`` is an fyi message held until its session's next turn."""
-    options = (
-        item.data.startup_options
-        if isinstance(item.data, (MessageData, SlashCommandData))
-        else None
-    )
+    options = item.data.startup_options if isinstance(item.data, MessageData) else None
     return item.status == "in_progress" and options is not None and options.deliver_at_turn
 
 
@@ -225,8 +221,10 @@ def release_turn_inputs(store: ConversationStore, session_id: str) -> None:
     """
     groups: dict[str | None, list[ConversationItem]] = {}
     for item in store.list_pending_inputs(session_id):
-        if awaits_turn(item) and isinstance(item.data, MessageData):
-            groups.setdefault(item.data.startup_options.role_id, []).append(item)  # type: ignore[union-attr]
+        if awaits_turn(item):
+            groups.setdefault(cast("MessageData", item.data).startup_options.role_id, []).append(  # type: ignore[union-attr]
+                item
+            )
     released = False
     for items in groups.values():
         head = cast("MessageData", items[0].data)
@@ -235,6 +233,8 @@ def release_turn_inputs(store: ConversationStore, session_id: str) -> None:
             "startup_options": options.model_copy(update={"deliver_at_turn": False})
         }
         if len(items) > 1:
+            # Only the head's sender fields survive, so a merged row later parked
+            # by a role move reports just that sender as waiting or dropped.
             update["content"] = _merged_content(items)
         if not store.transition_pending_input(
             session_id,
