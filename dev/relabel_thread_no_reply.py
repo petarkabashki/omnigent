@@ -9,6 +9,8 @@ rows are counted and left alone.
 
 Prints counts only. Dry run by default; ``--apply`` writes a backup first and
 ``--revert BACKUP`` restores rows still marked no_reply. Never run at startup.
+Opening the store migrates the DB to this checkout's head, so run it only from
+a checkout at the live hub's revision, and --apply only with the owner's OK.
 
     uv run python dev/relabel_thread_no_reply.py --database-uri sqlite:///$HOME/.omnigent/chat.db
 """
