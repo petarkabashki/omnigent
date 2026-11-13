@@ -152,18 +152,22 @@ def test_threads_waiting_on_us_listed_and_waiting_on_them_only_when_old(store) -
     assert [i["needs_owner"] for i in payload["items"]] == [False, False]
 
 
-def test_only_owner_and_blocked_threads_need_the_owner(store) -> None:
+def test_only_held_or_owner_marked_threads_need_the_owner(store) -> None:
     labels = {
         **_thread_labels("proj/Owner", "waiting_on_owner", NOW - 60),
+        **_thread_labels("proj/Held", "waiting_on_us", NOW - 90, held="ok 6", held_to="s"),
         **_thread_labels("proj/Blocked", "blocked", NOW - 120),
+        **_thread_labels("proj/Silent", role_threads.NO_REPLY_STATE, NOW - 150),
         **_thread_labels("proj/Them", "waiting_on_them", NOW - 3600),
     }
     conv = store.create_conversation(kind="default", labels=labels)
     items = _build(store, conv, status="idle")["items"]
-    assert [(i["ref"], i["needs_owner"]) for i in items] == [
-        ("proj/Them", False),
-        ("proj/Blocked", True),
+    assert sorted((i["ref"], i["needs_owner"]) for i in items) == [
+        ("proj/Blocked", False),
+        ("proj/Held", True),
         ("proj/Owner", True),
+        ("proj/Silent", False),
+        ("proj/Them", False),
     ]
 
 
