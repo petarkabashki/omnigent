@@ -442,7 +442,7 @@ def test_racing_takes_of_a_vacant_role_leave_one_holder_and_one_mirror(
     assert current.generation == 1
     labelled = [s for s in (first, second) if ALIAS_LABEL_KEY in _labels(stores, s)]
     assert labelled == [current.holder_session_id]
-    assert errors[0].message.endswith(current.holder_session_id)
+    assert f"held by session {current.holder_session_id}" in errors[0].message
     assert _kinds(stores, role.id) == [("take", 1)]
 
 
@@ -709,7 +709,9 @@ def test_resolve_never_adopts_after_a_release(stores: SimpleNamespace) -> None:
 
     assert caught.value.code == ErrorCode.NOT_FOUND
     assert caught.value.message == (
-        "Role 'Bench' in namespace '/' is vacant. Use sys_role_list to see the roles here."
+        f"Role 'Bench' in namespace '/' is vacant. It was last held by session {session}. "
+        "A session in that namespace can take it with sys_role_take(role='Bench'); "
+        "sys_role_list shows the roles here."
     )
     assert ALIAS_LABEL_KEY not in _labels(stores, session)
     assert stores.roles.get(role.id, user_id=OWNER).holder_session_id is None

@@ -28,4 +28,7 @@ def test_role_change_tools_sit_beside_role_list(registered) -> None:
 def test_role_take_schema_requires_only_a_role_never_a_session_id() -> None:
     parameters = SysRoleTakeTool().get_schema()["function"]["parameters"]
     assert parameters["required"] == ["role"] and set(parameters["properties"]) == {"role"}
-    assert SysRoleReleaseTool().get_schema()["function"]["parameters"]["properties"] == {}
+    release = SysRoleReleaseTool().get_schema()["function"]["parameters"]
+    # The caller is always the session itself; only a forced release names a role.
+    assert set(release["properties"]) == {"role", "force", "give_to"}
+    assert "required" not in release

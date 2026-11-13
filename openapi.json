@@ -18817,6 +18817,51 @@
         ]
       }
     },
+    "/v1/sessions/aliases/roles/{name}/release": {
+      "post": {
+        "description": "Force-release a role whoever holds it, optionally handing it to `give_to`.\n\nBody: `{\"force\": true, \"give_to\": <session id or role>?, \"namespace\": <path>?}`.\nAn agent call (orchestration header) acts in its own namespace and always\nparks on the owner's approval; a direct owner call is its own approval.\nThe write is a CAS on the generation shown in the question.",
+        "operationId": "force_release_role_v1_sessions_aliases_roles__name__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Force Release Role V1 Sessions Aliases Roles  Name  Release Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Force Release Role",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/group-threads": {
       "get": {
         "description": "The owner's threads, or the threads the calling agent is a member of.",

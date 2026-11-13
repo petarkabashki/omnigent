@@ -339,3 +339,22 @@ def test_a_fork_is_told_it_does_not_hold_its_parents_role(
     assert legacy.instructions.endswith(
         "This session is a fork of session abc; it is not that session."
     )
+
+
+def test_a_force_released_holder_is_told_it_no_longer_holds_the_role(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    labels = {
+        "omnigent.role_released": "lab/Keeper",
+        "omnigent.role_released.at": "2026-11-13T10:00:00Z",
+        "omnigent.role_released.by": "",
+        "omnigent.role_released.to": "def",
+    }
+    marked = apply_session_role(_spec(), labels, None)
+    assert marked.instructions is not None
+    assert "role lab/Keeper" in marked.instructions
+    assert "at 2026-11-13T10:00:00Z by the owner; session def holds it now" in (
+        marked.instructions
+    )
+    assert apply_session_role(marked, labels, None) is marked  # not added twice

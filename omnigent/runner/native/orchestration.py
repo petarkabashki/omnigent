@@ -8011,7 +8011,7 @@ def _native_startup_raw_instructions_from_spec(
     :returns: The author instructions followed by any role instructions, or
         ``None`` when both are absent/whitespace-only.
     """
-    from omnigent.runtime.prompt import fork_identity_instruction, raw_author_instructions
+    from omnigent.runtime.prompt import raw_author_instructions, session_identity_instructions
     from omnigent.runtime.role_instructions import load_session_role_overlay
 
     spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
@@ -8024,14 +8024,16 @@ def _native_startup_raw_instructions_from_spec(
     # A spec the runner already overlaid carries the role text itself.
     if role and author and role in author:
         role = None
-    fork_line = (
-        fork_identity_instruction(session_init.snapshot.labels)
-        if session_init is not None
-        else None
-    )
-    if fork_line and author and fork_line in author:
-        fork_line = None
-    return "\n\n".join(part for part in (author, role, fork_line) if part) or None
+    identity = [
+        line
+        for line in (
+            session_identity_instructions(session_init.snapshot.labels)
+            if session_init is not None
+            else []
+        )
+        if not (author and line in author)
+    ]
+    return "\n\n".join(part for part in (author, role, *identity) if part) or None
 
 
 def _cursor_native_model_from_spec(agent_spec: AgentSpec | ResolvedSpec | None) -> str | None:

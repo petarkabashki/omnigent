@@ -12,8 +12,9 @@ Legacy label-projects have no rows at all, so their aliases stay plain labels.
 
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,11 @@ from omnigent.stores.conversation_store import (
     PROJECT_LABEL_KEY,
     ROLE_ID_LABEL_KEY,
     ROLE_OVERLAY_LABEL_KEY,
+    ROLE_RELEASED_AT_LABEL_KEY,
+    ROLE_RELEASED_BY_LABEL_KEY,
+    ROLE_RELEASED_LABEL_KEY,
+    ROLE_RELEASED_LABEL_KEYS,
+    ROLE_RELEASED_TO_LABEL_KEY,
     ConversationStore,
 )
 from omnigent.stores.project_store import ProjectStore, lookup_project_path
@@ -261,6 +267,24 @@ def find_aliased_sessions(
     return found
 
 
+@dataclass(frozen=True)
+class HolderStatus:
+    """What the server knows about a role holder's runner.
+
+    :param runner_online: Whether a runner tunnel is registered now; ``None``
+        when unknown.
+    :param runner_last_seen: Epoch seconds the runner was last seen alive.
+    :param last_activity_at: Epoch seconds of the session's last update.
+    """
+
+    runner_online: bool | None = None
+    runner_last_seen: int | None = None
+    last_activity_at: int | None = None
+
+
+HolderStatusLookup = Callable[[list[str]], dict[str, HolderStatus]]
+
+
 def _role_store(projects: ProjectStore | None) -> RoleStore | None:
     roles = getattr(projects, "roles", None)
     return roles if isinstance(roles, RoleStore) else None
@@ -314,6 +338,9 @@ def _write_mirror(conversations: ConversationStore, session: Conversation, role:
     conversations.set_labels(session.id, _mirror_labels(role))
     if not role.overlay_ref and ROLE_OVERLAY_LABEL_KEY in session.labels:
         conversations.delete_label(session.id, ROLE_OVERLAY_LABEL_KEY)
+    for key in ROLE_RELEASED_LABEL_KEYS:
+        if key in session.labels:
+            conversations.delete_label(session.id, key)
 
 
 def _clear_mirror(conversations: ConversationStore, session_id: str) -> None:
@@ -327,11 +354,65 @@ def _role_path(projects: ProjectStore | None, role: Role) -> str:
     return projects.get_path(role.project_id, user_id=role.user_id) or ""
 
 
-def _held_error(name: str, path: str, holder_id: str | None) -> OmnigentError:
+def _ago(epoch: int | None, now: float) -> str | None:
+    if epoch is None:
+        return None
+    seconds = max(0, int(now - epoch))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit} ago"
+    return f"{seconds}s ago"
+
+
+def _holder_state_text(status: HolderStatus | None, now: float) -> str | None:
+    """``runner online`` / ``runner offline, last seen 3h ago``; ``None`` when unknown."""
+    if status is None:
+        return None
+    if status.runner_online:
+        return "runner online"
+    seen = _ago(status.runner_last_seen, now)
+    active = _ago(status.last_activity_at, now)
+    text = "runner offline" if status.runner_online is False else "runner state unknown"
+    if seen:
+        text += f", runner last seen {seen}"
+    if active:
+        text += f", last active {active}"
+    return text
+
+
+def _held_error(
+    name: str,
+    path: str,
+    holder_id: str | None,
+    *,
+    holder: Conversation | None = None,
+    status: HolderStatus | None = None,
+) -> OmnigentError:
+    """Name the holder, its runner state and both ways to free the role."""
+    who = f"session {holder_id}"
+    if holder is not None and holder.title:
+        who += f" ({holder.title!r})"
+    state = _holder_state_text(status, time.time())
+    if state:
+        who += f", {state}"
     return OmnigentError(
-        f"Role {name!r} in {_where(path)} is held by session {holder_id}",
+        f"Role {name!r} in {_where(path)} is held by {who}. To free it, revive that "
+        f"session (message or reopen it so its runner restarts), or ask the owner to "
+        f"force-release it: sys_role_release(role={name!r}, force=true).",
         code=ErrorCode.CONFLICT,
     )
+
+
+def _held_error_for(
+    conversations: ConversationStore,
+    role_name: str,
+    path: str,
+    holder_id: str | None,
+    holder_status: HolderStatusLookup | None,
+) -> OmnigentError:
+    holder = conversations.get_conversation(holder_id) if holder_id else None
+    status = holder_status([holder_id]).get(holder_id) if holder_status and holder_id else None
+    return _held_error(role_name, path, holder_id, holder=holder, status=status)
 
 
 def _require_in_namespace(
@@ -366,6 +447,7 @@ def take_role(
     name: str,
     overlay_ref: str | None = None,
     actor: str = "owner",
+    holder_status: HolderStatusLookup | None = None,
 ) -> Role:
     """Make ``session`` hold ``name`` in ``namespace``, creating the row if needed.
 
@@ -382,6 +464,7 @@ def take_role(
     :param name: Validated role name, in any case.
     :param overlay_ref: Validated role-file name, or ``None`` to keep the row's.
     :param actor: ``owner`` or ``agent``, recorded on the event.
+    :param holder_status: Runner state lookup that a ``CONFLICT`` names.
     :returns: The role as written.
     :raises OmnigentError: ``INVALID_INPUT`` for a child, a closed or archived
         session or one filed elsewhere; ``CONFLICT`` when a live session holds
@@ -413,7 +496,7 @@ def take_role(
         return role
     stale_holder = role.holder_session_id
     if stale_holder is not None and _live_holder(conversations, role) is not None:
-        raise _held_error(role.name, path, stale_holder)
+        raise _held_error_for(conversations, role.name, path, stale_holder, holder_status)
     taken = roles.take(
         role,
         session.id,
@@ -425,7 +508,13 @@ def take_role(
     )
     if taken is None:
         current = roles.get(role.id, user_id=user_id)
-        raise _held_error(role.name, path, current.holder_session_id if current else None)
+        raise _held_error_for(
+            conversations,
+            role.name,
+            path,
+            current.holder_session_id if current else None,
+            holder_status,
+        )
     _write_mirror(conversations, session, taken)
     if stale_holder is not None:
         _clear_mirror(conversations, stale_holder)
@@ -501,6 +590,7 @@ def set_session_alias(
     session: Conversation,
     user_id: str | None,
     alias: object,
+    holder_status: HolderStatusLookup | None = None,
 ) -> str:
     """Take or create a role in the session's own namespace; returns the role name."""
     value = validate_alias(alias)
@@ -522,6 +612,7 @@ def set_session_alias(
         namespace=namespace,
         user_id=user_id,
         name=value,
+        holder_status=holder_status,
     ).name
 
 
@@ -765,6 +856,215 @@ def release_project_roles(
         )
 
 
+@dataclass(frozen=True)
+class ForceRelease:
+    """A force-release decided before the owner's approval, applied after it.
+
+    :param role: The row as read; the write is a CAS on its generation.
+    :param namespace: The role's namespace.
+    :param holder: The holder being removed, if its session still exists.
+    :param target: The session that takes the role, or ``None`` to leave it vacant.
+    """
+
+    role: Role
+    namespace: Namespace
+    holder: Conversation | None
+    target: Conversation | None
+
+    @property
+    def path(self) -> str:
+        """The role's namespace path."""
+        return self.namespace.path
+
+    @property
+    def handle(self) -> str:
+        """The role's ``path/Role`` handle."""
+        return role_handle(self.path, self.role.name)
+
+
+def plan_force_release(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    namespace: Namespace,
+    user_id: str | None,
+    name: object,
+    give_to: object = None,
+    default_namespace: Namespace | None = None,
+) -> ForceRelease:
+    """Check a force-release of ``name`` and snapshot the row it will CAS on.
+
+    :param conversations: Store holding the sessions.
+    :param projects: Project store.
+    :param namespace: The role's namespace.
+    :param user_id: The owner.
+    :param name: The role name.
+    :param give_to: A session id or role address to hand the role to, or ``None``.
+    :param default_namespace: Namespace a bare ``give_to`` role is relative to.
+    :returns: The plan to apply after approval.
+    :raises OmnigentError: ``NOT_FOUND`` for an unknown role or target;
+        ``INVALID_INPUT`` for a vacant role or an unfit target.
+    """
+    value = validate_alias(name)
+    roles = _role_store(projects)
+    role = _namespace_role(roles, namespace, value, user_id)
+    if role is None:
+        raise OmnigentError(
+            f"No role {value!r} with a record in namespace {_namespace_text(namespace.path)!r}; "
+            "use sys_role_list to see the roles here",
+            code=ErrorCode.NOT_FOUND,
+        )
+    if role.holder_session_id is None:
+        raise OmnigentError(
+            f"Role {role.name!r} in {_where(namespace.path)} is already vacant; "
+            f"take it with sys_role_take(role={role.name!r})",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    holder = conversations.get_conversation(role.holder_session_id)
+    target = None
+    if give_to is not None:
+        target_id = resolve_session_address(
+            conversations,
+            projects,
+            address=give_to,
+            user_id=user_id,
+            source=None,
+            default_namespace=default_namespace or namespace,
+        )
+        target = conversations.get_conversation(target_id)
+        _require_fit_target(roles, projects, role, target, target_id, namespace, user_id)
+    return ForceRelease(role=role, namespace=namespace, holder=holder, target=target)
+
+
+def _require_fit_target(
+    roles: RoleStore | None,
+    projects: ProjectStore | None,
+    role: Role,
+    target: Conversation | None,
+    target_id: str,
+    namespace: Namespace,
+    user_id: str | None,
+) -> None:
+    """A target must be a live top-level session in the namespace holding no role."""
+    if target is None:
+        raise OmnigentError(f"Session {target_id} not found", code=ErrorCode.NOT_FOUND)
+    if target.id == role.holder_session_id:
+        raise OmnigentError(
+            f"Session {target.id} already holds {role.name!r}", code=ErrorCode.INVALID_INPUT
+        )
+    if target.parent_conversation_id is not None or not _is_live(target):
+        raise OmnigentError(
+            f"Session {target.id} must be a live top-level session to take a role",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if namespace_for_session(target, projects, user_id).path != namespace.path:
+        raise OmnigentError(
+            f"Session {target.id} is not in {_where(namespace.path)}",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    held = roles.held_by([target.id]) if roles is not None else []
+    if held:
+        raise OmnigentError(
+            f"Session {target.id} already holds role {held[0].name!r}; release it first",
+            code=ErrorCode.INVALID_INPUT,
+        )
+
+
+def apply_force_release(
+    conversations: ConversationStore,
+    projects: ProjectStore,
+    plan: ForceRelease,
+    *,
+    requester_id: str | None,
+    user_id: str | None,
+) -> Role:
+    """Apply an approved force-release as one CAS on the planned generation.
+
+    The record's actor is ``owner`` and its reason ``forced:<requesting session id>``
+    (empty for the owner's own call). The old holder loses its labels and gets a
+    release notice; mail queued for the role follows it to the new holder.
+
+    :raises OmnigentError: ``CONFLICT`` when the role changed since the plan;
+        nothing is changed then.
+    """
+    roles = _role_store(projects)
+    if roles is None:
+        raise OmnigentError("Roles are not available here", code=ErrorCode.INVALID_INPUT)
+    role = plan.role
+    old_holder = role.holder_session_id
+    reason = f"forced:{requester_id or ''}"
+    target = None
+    if plan.target is not None:
+        target = conversations.get_conversation(plan.target.id)
+        _require_fit_target(
+            roles,
+            projects,
+            role,
+            target,
+            plan.target.id,
+            plan.namespace,
+            user_id,
+        )
+    if target is not None:
+        written = roles.take(
+            role,
+            target.id,
+            kind="takeover",
+            actor="owner",
+            reason=reason,
+            role_path=plan.path,
+            overlay_ref=role.overlay_ref,
+        )
+    else:
+        # Labels first, as for any release; restored below if the CAS loses.
+        if old_holder is not None:
+            _clear_mirror(conversations, old_holder)
+        written = roles.release(role, actor="owner", reason=reason, role_path=plan.path)
+    if written is None:
+        current = roles.get(role.id, user_id=user_id)
+        if target is None and plan.holder is not None and current is not None:
+            if current.holder_session_id == old_holder:
+                _write_mirror(conversations, plan.holder, current)
+        now_generation = current.generation if current is not None else "deleted"
+        raise OmnigentError(
+            f"Role {role.name!r} changed while the owner was asked (generation "
+            f"{role.generation} is now {now_generation}); nothing was changed. "
+            "Check sys_role_list and ask again.",
+            code=ErrorCode.CONFLICT,
+        )
+    if target is not None:
+        _write_mirror(conversations, target, written)
+    if old_holder is not None:
+        if target is not None:
+            _clear_mirror(conversations, old_holder)
+        _mark_released(conversations, old_holder, plan.handle, requester_id, target)
+    if target is not None:
+        _bring_role_mail(conversations, projects, {old_holder})
+    return written
+
+
+def _mark_released(
+    conversations: ConversationStore,
+    session_id: str,
+    handle: str,
+    requester_id: str | None,
+    target: Conversation | None,
+) -> None:
+    """Leave the old holder its release notice; best effort, the row already moved."""
+    try:
+        conversations.set_labels(
+            session_id,
+            {
+                ROLE_RELEASED_LABEL_KEY: handle,
+                ROLE_RELEASED_AT_LABEL_KEY: datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ROLE_RELEASED_BY_LABEL_KEY: requester_id or "",
+                ROLE_RELEASED_TO_LABEL_KEY: target.id if target is not None else "",
+            },
+        )
+    except Exception:
+        _logger.exception("Unable to record the role release notice on session %s", session_id)
+
+
 def _reconcile_labels(
     conversations: ConversationStore,
     role: Role,
@@ -929,9 +1229,12 @@ def resolve_session_address(
         holder = _live_holder(conversations, row)
         _reconcile_labels(conversations, row, holder, matches)
         if holder is None:
+            last = row.holder_session_id or row.previous_session_id
+            last_text = f" It was last held by session {last}." if last else ""
             raise OmnigentError(
-                f"Role {row.name!r} in namespace {_namespace_text(project_name)!r} is vacant. "
-                "Use sys_role_list to see the roles here.",
+                f"Role {row.name!r} in namespace {_namespace_text(project_name)!r} is vacant."
+                f"{last_text} A session in that namespace can take it with "
+                f"sys_role_take(role={row.name!r}); sys_role_list shows the roles here.",
                 code=ErrorCode.NOT_FOUND,
             )
         return holder.id
@@ -982,8 +1285,13 @@ def list_namespace_roles(
     *,
     namespace: Namespace,
     user_id: str | None,
+    holder_status: HolderStatusLookup | None = None,
 ) -> list[dict[str, Any]]:
-    """Roles of one namespace, held and vacant, plus aliases that have no row yet."""
+    """Roles of one namespace, held and vacant, plus aliases that have no row yet.
+
+    Held rows carry the holder's ``runner_online``, ``runner_last_seen`` and
+    ``last_activity_at`` from ``holder_status``; vacant rows carry ``None``.
+    """
     path = namespace.path
     roles = _role_store(projects)
     rows = (
@@ -1022,6 +1330,13 @@ def list_namespace_roles(
                     "holder_session_id": session.id,
                 }
             )
+    held_ids = sorted({e["holder_session_id"] for e in entries if e["holder_session_id"]})
+    statuses = holder_status(held_ids) if holder_status is not None and held_ids else {}
+    for entry in entries:
+        status = statuses.get(entry["holder_session_id"]) or HolderStatus()
+        entry["runner_online"] = status.runner_online
+        entry["runner_last_seen"] = status.runner_last_seen
+        entry["last_activity_at"] = status.last_activity_at
     return sorted(entries, key=lambda entry: entry["name"].casefold())
 
 

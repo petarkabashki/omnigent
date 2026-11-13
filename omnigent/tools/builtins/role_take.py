@@ -48,7 +48,7 @@ class SysRoleTakeTool(Tool):
 
 
 class SysRoleReleaseTool(Tool):
-    """Schema-only tool the runner forwards to ``DELETE /v1/sessions/{id}/alias``."""
+    """Schema-only tool the runner forwards to the alias DELETE or the role release POST."""
 
     @classmethod
     def name(cls) -> str:
@@ -59,7 +59,9 @@ class SysRoleReleaseTool(Tool):
     def description(cls) -> str:
         """Return the LLM-facing description."""
         return (
-            "Release the role handle this session holds, leaving the role vacant. The owner is "
+            "With no arguments, release the role handle this session holds, leaving the role "
+            "vacant. With role and force=true, free a role another session holds (for example "
+            "one whose runner is offline), optionally handing it to give_to. The owner is "
             "asked to approve every call; nothing changes unless they approve."
         )
 
@@ -72,7 +74,22 @@ class SysRoleReleaseTool(Tool):
                 "description": self.description(),
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "description": "Role to force-release in this session's "
+                            "namespace; needs force=true.",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Required to release a role another session holds.",
+                        },
+                        "give_to": {
+                            "type": "string",
+                            "description": "Optional session id or role address to hand "
+                            "the role to; it must be live, here, and hold no other role.",
+                        },
+                    },
                     "additionalProperties": False,
                 },
             },

@@ -521,15 +521,22 @@ def apply_library_skills(
 def apply_session_role(
     spec: AgentSpec, labels: Mapping[str, str] | None, workspace: str | None
 ) -> AgentSpec:
-    """Overlay the role the session's labels name, if any, and mark a fork as one."""
-    from omnigent.runtime.prompt import append_framework_instructions, fork_identity_instruction
+    """Overlay the role the session's labels name; mark a fork and a force-released holder."""
+    from omnigent.runtime.prompt import (
+        append_framework_instructions,
+        session_identity_instructions,
+    )
 
     overlay = load_session_role_overlay(labels, workspace)
     spec = apply_role_overlay(spec, overlay) if overlay is not None else spec
     spec = apply_library_skills(spec, labels, workspace)
-    fork_line = fork_identity_instruction(labels)
-    if fork_line is None or fork_line in (spec.instructions or ""):
+    lines = [
+        line
+        for line in session_identity_instructions(labels)
+        if line not in (spec.instructions or "")
+    ]
+    if not lines:
         return spec
     return dataclasses.replace(
-        spec, instructions=append_framework_instructions(spec.instructions, [fork_line])
+        spec, instructions=append_framework_instructions(spec.instructions, lines)
     )

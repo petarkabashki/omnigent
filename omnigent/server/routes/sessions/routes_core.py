@@ -2260,7 +2260,11 @@ def register_core_routes(
             return {
                 "namespace": resolved.path or "/",
                 "data": list_namespace_roles(
-                    conversation_store, project_store, namespace=resolved, user_id=user_id
+                    conversation_store,
+                    project_store,
+                    namespace=resolved,
+                    user_id=user_id,
+                    holder_status=_holder_status,
                 ),
             }
 
@@ -2642,6 +2646,27 @@ def register_core_routes(
         entries = alias_entries([fresh], project_store, user_id)
         return entries[0] if entries else {"session_id": session.id, "alias": None}
 
+    def _holder_status(session_ids: list[str]) -> dict[str, Any]:
+        """Runner state of role holders, for the held-role error and ``sys_role_list``."""
+        from omnigent.server.session_aliases import HolderStatus
+
+        if not session_ids:
+            return {}
+        liveness = liveness_lookup(session_ids) if liveness_lookup is not None else {}
+        connectivity = conversation_store.get_session_connectivity(session_ids)
+        activity = conversation_store.get_session_activity(session_ids)
+        statuses: dict[str, Any] = {}
+        for session_id in session_ids:
+            live = liveness.get(session_id)
+            seen = connectivity.get(session_id)
+            active = activity.get(session_id)
+            statuses[session_id] = HolderStatus(
+                runner_online=live.runner_online if live is not None else None,
+                runner_last_seen=seen.runner_last_seen if seen is not None else None,
+                last_activity_at=active.updated_at if active is not None else None,
+            )
+        return statuses
+
     async def _approve_agent_alias_change(
         request: Request, user_id: str | None, session_id: str, question: str
     ) -> Conversation:
@@ -2655,6 +2680,15 @@ def register_core_routes(
         )
         if source.id != session_id:
             raise OmnigentError("A session can only change its own role", code=ErrorCode.FORBIDDEN)
+        await _ask_owner_on(request, source, question)
+        return source
+
+    async def _ask_owner_on(request: Request, source: Conversation, question: str) -> None:
+        """Park on the owner's answer in ``source``; raises unless they accept.
+
+        Never consults the messaging policy: only the owner can approve.
+        """
+        session_id = source.id
         verdict = await _publish_and_wait_for_harness_elicitation(
             request,
             session_id=session_id,
@@ -2674,7 +2708,6 @@ def register_core_routes(
                 "The owner did not approve the role change; nothing was changed",
                 code=ErrorCode.FORBIDDEN,
             )
-        return source
 
     @router.put("/sessions/{session_id}/alias")
     async def put_session_alias(request: Request, session_id: str) -> dict[str, Any]:
@@ -2718,7 +2751,12 @@ def register_core_routes(
             if session is None:
                 raise _session_not_found()
             set_session_alias(
-                conversation_store, project_store, session=session, user_id=user_id, alias=alias
+                conversation_store,
+                project_store,
+                session=session,
+                user_id=user_id,
+                alias=alias,
+                holder_status=_holder_status,
             )
             fresh = conversation_store.get_conversation(session_id) or session
             handle = session_handle(fresh, project_store, user_id)
@@ -2760,6 +2798,105 @@ def register_core_routes(
 
         await asyncio.to_thread(clear_session_alias, conversation_store, project_store, session_id)
         return Response(status_code=204)
+
+    @router.post("/sessions/aliases/roles/{name}/release")
+    async def force_release_role(request: Request, name: str) -> dict[str, Any]:
+        """Force-release a role whoever holds it, optionally handing it to ``give_to``.
+
+        Body: ``{"force": true, "give_to": <session id or role>?, "namespace": <path>?}``.
+        An agent call (orchestration header) acts in its own namespace and always
+        parks on the owner's approval; a direct owner call is its own approval.
+        The write is a CAS on the generation shown in the question.
+        """
+        from omnigent.server.session_aliases import (
+            apply_force_release,
+            namespace_for_session,
+            plan_force_release,
+            source_namespace,
+        )
+
+        user_id = _require_user(request, auth_provider)
+        payload = await request.json() if await request.body() else {}
+        if not isinstance(payload, dict) or payload.get("force") is not True:
+            raise OmnigentError(
+                "Releasing another session's role needs force=true", code=ErrorCode.INVALID_INPUT
+            )
+        give_to = payload.get("give_to") or None
+        source = _alias_resolution_source(request, user_id)
+
+        def _plan() -> Any:
+            if source is not None:
+                namespace = namespace_for_session(source, project_store, user_id)
+            else:
+                view = payload.get("namespace")
+                namespace = source_namespace(
+                    conversation_store,
+                    project_store,
+                    user_id=user_id,
+                    view=view if isinstance(view, str) else "/",
+                )
+            return plan_force_release(
+                conversation_store,
+                project_store,
+                namespace=namespace,
+                user_id=user_id,
+                name=name,
+                give_to=give_to,
+            )
+
+        plan = await asyncio.to_thread(_plan)
+        if plan.target is not None:
+            await _require_access_and_level(
+                user_id, plan.target.id, LEVEL_OWNER, permission_store, conversation_store
+            )
+        if source is not None:
+            holder = plan.holder
+            holder_text = (
+                f"session '{holder.title or holder.id}' ({holder.id})"
+                if holder is not None
+                else f"session {plan.role.holder_session_id}"
+            )
+            status = (await asyncio.to_thread(_holder_status, [plan.role.holder_session_id])).get(
+                plan.role.holder_session_id
+            )
+            state = (
+                ""
+                if status is None
+                else " (runner online)"
+                if status.runner_online
+                else " (runner offline)"
+            )
+            then = (
+                f" and give it to session '{plan.target.title or plan.target.id}' "
+                f"({plan.target.id})"
+                if plan.target is not None
+                else ", leaving it vacant"
+            )
+            await _ask_owner_on(
+                request,
+                source,
+                f"Session '{source.title or source.id}' ({source.id}) asks to FORCE-RELEASE "
+                f"the role '{plan.handle}' (generation {plan.role.generation}) from "
+                f"{holder_text}{state}{then}. Approve?",
+            )
+
+        def _apply() -> dict[str, Any]:
+            role = apply_force_release(
+                conversation_store,
+                project_store,
+                plan,
+                requester_id=source.id if source is not None else None,
+                user_id=user_id,
+            )
+            return {
+                "released": True,
+                "role": plan.handle,
+                "previous_holder_session_id": plan.role.holder_session_id,
+                "holder_session_id": role.holder_session_id,
+                "generation": role.generation,
+            }
+
+        return await asyncio.to_thread(_apply)
 
     # ── PUT /sessions/{session_id}/read-state ─────────────────────
     #

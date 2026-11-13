@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
+from urllib.parse import quote
 
 from omnigent.stores.conversation_store import ALIAS_LABEL_KEY, CREATED_BY_SESSION_LABEL_KEY
 from omnigent.util.json_serialization import json_dumps_transport_safe
@@ -5556,6 +5557,8 @@ async def _role_change_via_rest(
     """Take or release the calling session's own role; the server asks the owner first."""
     url = f"{_session_url(conversation_id)}/alias"
     headers = {ORCHESTRATION_SOURCE_HEADER: conversation_id}
+    if tool_name == "sys_role_release" and (args.get("force") or args.get("role")):
+        return await _role_force_release_via_rest(args, headers, server_client)
     try:
         if tool_name == "sys_role_take":
             role = args.get("role")
@@ -5572,11 +5575,45 @@ async def _role_change_via_rest(
         return json.dumps({"error": f"{tool_name} failed: {exc}"})
     if resp.status_code not in (200, 204):
         return json.dumps(
-            {"error": f"{tool_name} returned {resp.status_code}", "detail": resp.text[:300]}
+            {"error": f"{tool_name} returned {resp.status_code}", "detail": resp.text[:600]}
         )
     if tool_name == "sys_role_release":
         return json.dumps({"released": True})
     return json.dumps({"taken": True, "role": resp.json().get("alias")})
+
+
+async def _role_force_release_via_rest(
+    args: _JsonObject, headers: dict[str, str], server_client: httpx.AsyncClient
+) -> str:
+    """Force-release a role in the caller's namespace; the server asks the owner first."""
+    role = args.get("role")
+    if not isinstance(role, str) or not role.strip():
+        return json.dumps({"error": "sys_role_release: force needs role, a non-empty string"})
+    if args.get("force") is not True:
+        return json.dumps(
+            {
+                "error": "sys_role_release: to free a role another session holds, pass "
+                "force=true; to release this session's own role, pass no arguments"
+            }
+        )
+    body: _JsonObject = {"force": True}
+    give_to = args.get("give_to")
+    if isinstance(give_to, str) and give_to.strip():
+        body["give_to"] = give_to.strip()
+    try:
+        resp = await server_client.post(
+            f"/v1/sessions/aliases/roles/{quote(role.strip(), safe='')}/release",
+            json=body,
+            headers=headers,
+            timeout=_ASK_GATE_DELIVERY_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"sys_role_release failed: {exc}"})
+    if resp.status_code != 200:
+        return json.dumps(
+            {"error": f"sys_role_release returned {resp.status_code}", "detail": resp.text[:600]}
+        )
+    return json.dumps(resp.json())
 
 
 async def _runner_online_or_none(

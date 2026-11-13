@@ -98,6 +98,37 @@ def fork_identity_instruction(labels: Mapping[str, str] | None) -> str | None:
     return text
 
 
+def role_release_instruction(labels: Mapping[str, str] | None) -> str | None:
+    """Tell a session that the owner force-released the role it held."""
+    from omnigent.stores.conversation_store import (
+        ROLE_RELEASED_AT_LABEL_KEY,
+        ROLE_RELEASED_BY_LABEL_KEY,
+        ROLE_RELEASED_LABEL_KEY,
+        ROLE_RELEASED_TO_LABEL_KEY,
+    )
+
+    labels = labels or {}
+    handle = labels.get(ROLE_RELEASED_LABEL_KEY)
+    if not handle:
+        return None
+    when = labels.get(ROLE_RELEASED_AT_LABEL_KEY) or "an unrecorded time"
+    requester = labels.get(ROLE_RELEASED_BY_LABEL_KEY)
+    by = f"the owner, at the request of session {requester}" if requester else "the owner"
+    new_holder = labels.get(ROLE_RELEASED_TO_LABEL_KEY)
+    now = f"session {new_holder} holds it now" if new_holder else "it is vacant now"
+    return (
+        f"Notice: the role {handle} that this session held was force-released at {when}"
+        f" by {by}; {now}. This session no longer holds it: do not act as that role or"
+        " message others on its behalf."
+    )
+
+
+def session_identity_instructions(labels: Mapping[str, str] | None) -> list[str]:
+    """The label-driven identity lines: fork identity, then any role release notice."""
+    lines = (fork_identity_instruction(labels), role_release_instruction(labels))
+    return [line for line in lines if line]
+
+
 def _framework_instructions_for(spec: AgentSpec) -> list[str]:
     """
     Framework instructions that apply to every turn of ``spec``.

@@ -1,6 +1,7 @@
 """Runner dispatch through authenticated routes and real ownership/sharing stores."""
 
 import json
+import time
 from contextvars import ContextVar
 from uuid import uuid4
 
@@ -8,6 +9,7 @@ import pytest
 
 from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER, RUNNER_TUNNEL_TOKEN_HEADER
 from omnigent.runner.tool_dispatch import execute_tool
+from omnigent.runtime.prompt import role_release_instruction
 from omnigent.server import session_aliases
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.server.feature_flags import (
@@ -25,6 +27,9 @@ from omnigent.stores.conversation_store import (
     PROJECT_LABEL_KEY,
     ROLE_ID_LABEL_KEY,
     ROLE_OVERLAY_LABEL_KEY,
+    ROLE_RELEASED_BY_LABEL_KEY,
+    ROLE_RELEASED_LABEL_KEY,
+    ROLE_RELEASED_TO_LABEL_KEY,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_SOURCE_LABEL_KEY,
 )
@@ -2018,6 +2023,213 @@ async def test_forged_agent_call_cannot_skip_approval_or_touch_another_session(
     assert (own.status_code, other.status_code) == (403, 403)
     assert _alias_of(db_uri, source) is None and _alias_of(db_uri, target) is None
     assert [asked[0] for asked in owner_verdicts["asked"]] == [source["id"]]
+
+
+# ── sys_role_release(force=true): freeing a role another session holds ──
+
+
+def _role_row(db_uri, name):
+    roles = SqlAlchemyRoleStore(db_uri)
+    role = roles.find(name, user_id="alice", project_id=None)
+    return role, roles.events(role.id)
+
+
+def _labels_of(db_uri, session):
+    return SqlAlchemyConversationStore(db_uri).get_conversation(session["id"]).labels
+
+
+def _mark_runner_online(db_uri, session):
+    store = SqlAlchemyConversationStore(db_uri)
+    runner_id = store.get_session_connectivity([session["id"]])[session["id"]].runner_id
+    store.touch_runner_liveness([runner_id], int(time.time()))
+
+
+async def _hold(client, session, alias):
+    response = await client.put(f"/v1/sessions/{session['id']}/alias", json={"alias": alias})
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("holder_online", [False, True])
+async def test_force_release_asks_the_owner_then_frees_the_role(
+    auth_client, peers, db_uri, owner_verdicts, holder_online
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    _bind_runner(db_uri, holder["id"])  # bound but never seen: its runner is offline
+    if holder_online:
+        _mark_runner_online(db_uri, holder)
+    before, _ = _role_row(db_uri, "Keeper")
+
+    result = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert result["released"] is True and result["holder_session_id"] is None
+    assert result["previous_holder_session_id"] == holder["id"]
+    [(asked_session, question)] = owner_verdicts["asked"]
+    assert asked_session == source["id"]
+    assert "FORCE-RELEASE" in question and holder["id"] in question
+    assert f"generation {before.generation}" in question
+    assert ("runner online" if holder_online else "runner offline") in question
+
+    after, events = _role_row(db_uri, "Keeper")
+    assert after.holder_session_id is None
+    assert (events[-1].kind, events[-1].actor, events[-1].reason) == (
+        "release",
+        "owner",
+        f"forced:{source['id']}",
+    )
+    labels = _labels_of(db_uri, holder)
+    assert ALIAS_LABEL_KEY not in labels and ROLE_ID_LABEL_KEY not in labels
+    assert labels[ROLE_RELEASED_LABEL_KEY] == "/Keeper"
+    assert labels[ROLE_RELEASED_BY_LABEL_KEY] == source["id"]
+    assert labels[ROLE_RELEASED_TO_LABEL_KEY] == ""
+    notice = role_release_instruction(labels)
+    assert "/Keeper" in notice and source["id"] in notice and "vacant" in notice
+
+    # Sends to the role fail clearly, naming the last holder and how to take it.
+    vacant = await _send(auth_client, source, {"id": "Keeper"})
+    assert holder["id"] in json.dumps(vacant) and "sys_role_take" in json.dumps(vacant)
+
+
+@pytest.mark.parametrize("action", ["decline", "timeout"])
+async def test_force_release_without_approval_changes_nothing(
+    auth_client, peers, db_uri, owner_verdicts, action
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    before, before_events = _role_row(db_uri, "Keeper")
+    labels_before = _labels_of(db_uri, holder)
+    owner_verdicts["action"] = action
+
+    refused = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert refused["error"].endswith("returned 403")
+    after, after_events = _role_row(db_uri, "Keeper")
+    assert (after.holder_session_id, after.generation) == (holder["id"], before.generation)
+    assert len(after_events) == len(before_events)
+    assert _labels_of(db_uri, holder) == labels_before
+
+
+async def test_force_release_loses_to_a_change_made_while_asking(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    answer = routes_core._publish_and_wait_for_harness_elicitation
+
+    async def retake_while_asking(request, **kwargs):
+        # The holder releases and takes the role back before the owner answers.
+        assert (await auth_client.delete(f"/v1/sessions/{holder['id']}/alias")).status_code == 204
+        await _hold(auth_client, holder, "Keeper")
+        return await answer(request, **kwargs)
+
+    monkeypatch.setattr(
+        routes_core, "_publish_and_wait_for_harness_elicitation", retake_while_asking
+    )
+    lost = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert lost["error"].endswith("returned 409") and "nothing was changed" in lost["detail"]
+    after, _ = _role_row(db_uri, "Keeper")
+    assert after.holder_session_id == holder["id"]
+    labels = _labels_of(db_uri, holder)
+    assert labels[ALIAS_LABEL_KEY] == "Keeper" and ROLE_RELEASED_LABEL_KEY not in labels
+
+
+async def test_force_release_can_hand_the_role_to_another_session(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    successor = await _create_session_as(auth_client, "", "alice")
+    await _hold(auth_client, holder, "Keeper")
+    await _hold(auth_client, source, "Other")
+
+    busy = await _role_tool(
+        auth_client, source, "sys_role_release", role="Keeper", force=True, give_to=source["id"]
+    )
+    assert busy["error"].endswith("returned 400") and "already holds" in busy["detail"]
+    result = await _role_tool(
+        auth_client, source, "sys_role_release", role="Keeper", force=True, give_to=successor["id"]
+    )
+    assert result["holder_session_id"] == successor["id"]
+    assert "give it to session" in owner_verdicts["asked"][-1][1]
+
+    after, events = _role_row(db_uri, "Keeper")
+    assert after.holder_session_id == successor["id"]
+    assert (events[-1].kind, events[-1].prev_session_id, events[-1].reason) == (
+        "takeover",
+        holder["id"],
+        f"forced:{source['id']}",
+    )
+    assert _alias_of(db_uri, successor) == "Keeper" and _alias_of(db_uri, holder) is None
+    assert _labels_of(db_uri, holder)[ROLE_RELEASED_TO_LABEL_KEY] == successor["id"]
+    # Taking a role again clears the old notice.
+    await _hold(auth_client, holder, "Fresh")
+    assert ROLE_RELEASED_LABEL_KEY not in _labels_of(db_uri, holder)
+
+
+async def test_owner_force_release_is_its_own_approval(auth_client, peers, db_uri, owner_verdicts):
+    _, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    unforced = await auth_client.post("/v1/sessions/aliases/roles/Keeper/release", json={})
+    assert unforced.status_code == 400
+    response = await auth_client.post(
+        "/v1/sessions/aliases/roles/Keeper/release", json={"force": True}
+    )
+    assert response.status_code == 200, response.text
+    assert owner_verdicts["asked"] == []
+    _, events = _role_row(db_uri, "Keeper")
+    assert (events[-1].actor, events[-1].reason) == ("owner", "forced:")
+    assert _labels_of(db_uri, holder)[ROLE_RELEASED_BY_LABEL_KEY] == ""
+
+
+async def test_force_release_never_consults_the_messaging_policy(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.policies.builtins import messaging
+    from omnigent.server.routes.sessions import routes_events
+
+    consulted = []
+
+    def allow_all(*args, **kwargs):
+        consulted.append(args)
+
+    monkeypatch.setattr(routes_events, "_evaluate_input_policy", allow_all)
+    monkeypatch.setattr(messaging.MessagingRules, "decide", allow_all)
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    owner_verdicts["action"] = "decline"
+    refused = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert refused["error"].endswith("returned 403")
+    assert len(owner_verdicts["asked"]) == 1 and consulted == []
+
+
+async def test_held_role_conflict_names_the_holder_and_ways_out(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    _bind_runner(db_uri, holder["id"])
+    conflict = await auth_client.put(
+        f"/v1/sessions/{source['id']}/alias", json={"alias": "Keeper"}
+    )
+    assert conflict.status_code == 409
+    for part in (holder["id"], "runner offline", "revive", "force=true"):
+        assert part in conflict.text
+    via_tool = await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    assert "sys_role_release(role='Keeper', force=true)" in via_tool["detail"]
+
+
+async def test_sys_role_list_reports_holder_runner_state(auth_client, peers, db_uri):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    await _hold(auth_client, source, "Gone")
+    assert (await auth_client.delete(f"/v1/sessions/{source['id']}/alias")).status_code == 204
+    _bind_runner(db_uri, holder["id"])
+    _mark_runner_online(db_uri, holder)
+    listed = await _role_tool(auth_client, source, "sys_role_list")
+    rows = {row["name"]: row for row in listed["roles"]}
+    assert rows["Keeper"]["runner_online"] is True
+    assert isinstance(rows["Keeper"]["runner_last_seen"], int)
+    assert isinstance(rows["Keeper"]["last_activity_at"], int)
+    assert (rows["Gone"]["runner_online"], rows["Gone"]["last_activity_at"]) == (None, None)
 
 
 async def _tool(client, session, name, **arguments):
