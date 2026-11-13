@@ -1148,6 +1148,7 @@ async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
     from omnigent.host.frames import HostHelloFrame
     from omnigent.server import session_live_state
     from omnigent.server.routes._sessions.helpers import _publish_status
+    from omnigent.server.startup_inputs import STARTUP_LABEL
 
     source, target, captured = peers
     assert auth_app.state.sandbox_config is None
@@ -1169,6 +1170,15 @@ async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
     assert len(store.list_pending_inputs(target["id"])) == 2
     info = (await auth_client.get("/v1/info")).json()
     assert info["durable_initial_input"] is False
+    # Held fyi neither block a reset nor fall to an interrupt.
+    assert await startup.has_droppable(target["id"]) is False
+    interrupted = await auth_client.post(
+        f"/v1/sessions/{target['id']}/events", json={"type": "interrupt"}
+    )
+    assert interrupted.status_code < 300, interrupted.text
+    assert len(store.list_pending_inputs(target["id"])) == 2
+    assert store.get_conversation(target["id"]).labels.get(STARTUP_LABEL) != "cancelled"
+    captured.get("posts", []).clear()
 
     submit = session_live_state.submit
     monkeypatch.setattr(session_live_state, "conversation_store", lambda: store)

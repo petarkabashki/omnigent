@@ -847,9 +847,27 @@ class ManagedStartupInputs:
                 )
         return changed
 
-    async def cancel(self, session_id: str) -> None:
-        items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
+    async def _droppable(
+        self, session_id: str
+    ) -> tuple[Conversation | None, list[ConversationItem]]:
+        """Queued inputs an interrupt or reset may drop: not held fyi, not parked role mail."""
+        from omnigent.server.role_mail import is_parked
+
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
+        items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
+        if conv is None:
+            return None, items
+        return conv, [
+            item for item in items if not awaits_turn(item) and not is_parked(item, conv)
+        ]
+
+    async def has_droppable(self, session_id: str) -> bool:
+        """Whether a reset has queued input to wait for or drop."""
+        return bool((await self._droppable(session_id))[1])
+
+    async def cancel(self, session_id: str) -> None:
+        """Drop queued input; held fyi and parked role mail outlive the interrupt."""
+        conv, items = await self._droppable(session_id)
         if not items and (conv is None or conv.labels.get(STARTUP_LABEL) != "pending"):
             return
         await asyncio.to_thread(

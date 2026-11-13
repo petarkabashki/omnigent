@@ -2884,6 +2884,8 @@ def register_events_routes(
             startup_inputs = getattr(request.app.state, "startup_inputs", None)
 
             async def _has_server_pending() -> bool:
+                if startup_inputs is not None:
+                    return await startup_inputs.has_droppable(session_id)
                 return bool(
                     await asyncio.to_thread(conversation_store.list_pending_inputs, session_id)
                 )
