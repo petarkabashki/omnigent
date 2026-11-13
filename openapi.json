@@ -18574,6 +18574,74 @@
               "title": "Visibility",
               "type": "string"
             }
+          },
+          {
+            "description": "Only sessions whose title is exactly this.",
+            "in": "query",
+            "name": "title",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          {
+            "description": "Only sessions whose display title contains this, case-insensitively.",
+            "in": "query",
+            "name": "title_contains",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title Contains"
+            }
+          },
+          {
+            "description": "Only sessions whose working directory is exactly this path.",
+            "in": "query",
+            "name": "workspace",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace"
+            }
+          },
+          {
+            "description": "Only the session holding this role, e.g. `\"Architect\"` or `\"omnigent/Architect\"`; a bare role is relative to the orchestration source's project. An unknown or vacant role lists nothing.",
+            "in": "query",
+            "name": "handle",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Handle"
+            }
           }
         ],
         "responses": {

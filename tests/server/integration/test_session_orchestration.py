@@ -1417,6 +1417,20 @@ async def test_role_aliases_address_peers_by_name(auth_client, peers, db_uri):
     assert handles[target["id"]] == "py-qwant/Product"
     assert handles[other["id"]] is None
 
+    # A bare handle filter resolves in the caller's project; an unknown one lists nothing.
+    found = json.loads(
+        await execute_tool(
+            tool_name="sys_session_list",
+            arguments=json.dumps({"handle": "Product", "compact": True}),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert [row["session_id"] for row in found["sessions"]] == [target["id"]]
+    assert found["sessions"][0]["handle"] == "py-qwant/Product"
+    unknown = await auth_client.get("/v1/sessions", params={"handle": "py-qwant/Nobody"})
+    assert unknown.status_code == 200 and unknown.json()["data"] == []
+
     listed = (await auth_client.get("/v1/sessions/aliases", params={"project": "py-qwant"})).json()
     assert {entry["handle"] for entry in listed["data"]} == {
         "py-qwant/Architect",

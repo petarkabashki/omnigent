@@ -2022,6 +2022,25 @@ def test_list_conversations_search_query_matches_role_handle(
 
 
 @pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
+def test_list_conversations_filters_by_workspace_and_ids(
+    store_fixture: str, request: pytest.FixtureRequest
+) -> None:
+    """``workspace`` matches the exact working directory; ``conversation_ids`` pins the set."""
+    store: SqlAlchemyConversationStore = request.getfixturevalue(store_fixture)
+    in_repo = store.create_conversation(title="a", workspace="/srv/repo")
+    nested = store.create_conversation(title="b", workspace="/srv/repo/sub")
+    store.create_conversation(title="c")
+
+    def listed(**filters: object) -> set[str]:
+        return {c.id for c in store.list_conversations(kind=None, limit=50, **filters).data}
+
+    assert listed(workspace="/srv/repo") == {in_repo.id}
+    assert listed(workspace="/srv") == set()
+    assert listed(conversation_ids=[nested.id]) == {nested.id}
+    assert listed(conversation_ids=[]) == set()
+
+
+@pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
 def test_list_conversations_title_search_matches_every_title_field(
     store_fixture: str, request: pytest.FixtureRequest
 ) -> None:

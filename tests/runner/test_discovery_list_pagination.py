@@ -552,8 +552,10 @@ async def test_sys_session_list_include_archived_lists_archived_rows_on_every_pa
     assert received == ["true", "true", None]
     assert first["sessions"][0] == {
         "session_id": "conv_0000",
+        "handle": None,
         "agent_name": "claude",
         "title": "GitHub acme/app#0",
+        "workspace": None,
         "status": "idle",
         "runner_id": None,
         "runner_online": None,
@@ -923,3 +925,119 @@ async def test_discovery_list_rejects_invalid_windows(
         )
 
     assert error in result["error"]
+
+
+def _role_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "conv_arch",
+            "agent_id": "ag_1",
+            "agent_name": "claude",
+            "title": "Architect",
+            "workspace": "/srv/repo",
+            "status": "idle",
+            "runner_id": "run_1",
+            "parent_session_id": None,
+            "updated_at": 1700000000,
+            "labels": {"omnigent.alias": "Architect"},
+        }
+    ]
+
+
+async def _list_with(
+    args: dict[str, object], seen: list[httpx.Request]
+) -> tuple[dict[str, object], str]:
+    """Run ``sys_session_list`` against a server stub, recording its list requests."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/sessions/conv_caller/child_sessions":
+            return httpx.Response(200, json={"data": [{"id": "conv_kid", "title": "a:b"}]})
+        if path == "/v1/sessions/conv_caller":
+            return httpx.Response(200, json={"id": "conv_caller", "parent_session_id": None})
+        if path == "/v1/sessions":
+            seen.append(request)
+            return _server_page(request, _role_rows())
+        if path == "/v1/sessions/aliases":
+            entries = [{"session_id": "conv_arch", "handle": "omnigent/Architect"}]
+            return httpx.Response(200, json={"data": entries})
+        if path == "/v1/runners/run_1/status":
+            return httpx.Response(200, json={"online": True})
+        raise AssertionError(f"unexpected path {path}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        raw = await execute_tool(
+            tool_name="sys_session_list",
+            arguments=json.dumps(args),
+            server_client=client,
+            conversation_id="conv_caller",
+        )
+    return json.loads(raw), raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("handle", "Architect"),
+        ("title", "Architect"),
+        ("title_contains", "arch"),
+        ("workspace", "/srv/repo"),
+    ],
+)
+async def test_sys_session_list_forwards_each_match_filter(key: str, value: str) -> None:
+    """Each filter reaches the server; only a handle carries the caller as its source."""
+    seen: list[httpx.Request] = []
+
+    await _list_with({key: value}, seen)
+
+    assert seen[0].url.params.get(key) == value
+    source = seen[0].headers.get(tool_dispatch.ORCHESTRATION_SOURCE_HEADER)
+    assert source == ("conv_caller" if key == "handle" else None)
+
+
+@pytest.mark.asyncio
+async def test_sys_session_list_compact_keeps_only_addressing_fields() -> None:
+    """Compact rows drop sub_agents, runner ids and the rest; a role lookup stays small."""
+    seen: list[httpx.Request] = []
+
+    compact, raw = await _list_with({"handle": "Architect", "compact": True}, seen)
+
+    assert "sub_agents" not in compact
+    assert compact["sessions"] == [
+        {
+            "session_id": "conv_arch",
+            "title": "Architect",
+            "workspace": "/srv/repo",
+            "handle": "omnigent/Architect",
+            "runner_online": True,
+            "last_activity_at": 1700000000,
+        }
+    ]
+    assert len(raw) < 2000
+
+
+@pytest.mark.asyncio
+async def test_sys_session_list_default_output_is_unchanged() -> None:
+    """Without the new arguments, rows keep their fields and no filter is sent."""
+    seen: list[httpx.Request] = []
+
+    plain, _ = await _list_with({}, seen)
+
+    assert plain["sub_agents"] == [{"agent": None, "title": None, "conversation_id": "conv_kid"}]
+    assert set(plain["sessions"][0]) == {
+        "session_id",
+        "handle",
+        "agent_name",
+        "title",
+        "workspace",
+        "status",
+        "runner_id",
+        "runner_online",
+        "parent_session_id",
+        "family",
+        "created_by_session_id",
+    }
+    assert not {"handle", "title", "title_contains", "workspace"} & set(seen[0].url.params)

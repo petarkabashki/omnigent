@@ -1179,6 +1179,8 @@ class ConversationStore(ABC):
         project_id: str | None = None,
         title_search: str | None = None,
         title_search_label: str | None = None,
+        workspace: str | None = None,
+        conversation_ids: list[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1303,6 +1305,10 @@ class ConversationStore(ABC):
             superset: callers needing the exact fallback re-check the rows.
         :param title_search_label: Label key whose value ``title_search`` also
             matches, e.g. ``"omnigent.claude_native.description"``.
+        :param workspace: When set, only return sessions whose working
+            directory is exactly this path. ``None`` disables the filter.
+        :param conversation_ids: When set, only return these sessions; an
+            empty list returns none. ``None`` disables the filter.
         :param has_label: When set, restrict to sessions carrying this label
             key (any value), e.g. ``"omnigent.alias"``. ``None`` disables it.
         :param pinned_owner: The user whose pins ``pinned=True`` filters to

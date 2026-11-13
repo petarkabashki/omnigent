@@ -2636,6 +2636,25 @@ def register_core_routes(
             workspace=workspace if isinstance(workspace, str) else None,
         )
 
+    def _handle_session_ids(request: Request, user_id: str | None, handle: str) -> list[str]:
+        """The session holding ``handle`` as a one-id filter; none for an unknown role."""
+        from omnigent.server.session_aliases import resolve_session_address
+
+        try:
+            session_id = resolve_session_address(
+                conversation_store,
+                project_store,
+                address=handle,
+                user_id=user_id,
+                source=None,
+                default_namespace=_default_alias_namespace(request, user_id, None, None),
+            )
+        except OmnigentError as error:
+            if error.code == ErrorCode.NOT_FOUND:
+                return []
+            raise
+        return [session_id]
+
     def _resolve_one_alias(
         address: str, user_id: str | None, default_namespace: Namespace
     ) -> dict[str, Any]:
@@ -3185,6 +3204,10 @@ def register_core_routes(
         pinned: bool = Query(default=False),
         expand_families: bool = Query(default=False),
         visibility: str = Query(default="all", pattern="^(all|mine|shared|archived)$"),
+        title: str | None = Query(default=None),
+        title_contains: str | None = Query(default=None),
+        workspace: str | None = Query(default=None),
+        handle: str | None = Query(default=None),
     ) -> dict[str, Any]:
         """
         List sessions with cursor-based pagination.
@@ -3253,6 +3276,13 @@ def register_core_routes(
             project names resolve within the caller's projects.
             ``"all"`` (default) returns all accessible non-archived
             sessions, matching the legacy behaviour.
+        :param title: Only sessions whose title is exactly this.
+        :param title_contains: Only sessions whose display title contains this,
+            case-insensitively.
+        :param workspace: Only sessions whose working directory is exactly this path.
+        :param handle: Only the session holding this role, e.g. ``"Architect"`` or
+            ``"omnigent/Architect"``; a bare role is relative to the orchestration
+            source's project. An unknown or vacant role lists nothing.
         :returns: A :class:`PaginatedList` of
             :class:`SessionListItem`.
         """
@@ -3276,6 +3306,9 @@ def register_core_routes(
                     "project_id must be a UUID", code=ErrorCode.INVALID_INPUT
                 ) from error
         normalized_query = search_query if search_query else None
+        handle_ids: list[str] | None = None
+        if handle:
+            handle_ids = await asyncio.to_thread(_handle_session_ids, request, user_id, handle)
         # Map the visibility filter to store-level ACL params.
         # "mine": only sessions the caller owns — no accessible_by needed
         #   because owner-level implies access.
@@ -3350,6 +3383,10 @@ def register_core_routes(
             pinned=pinned,
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,
+            title=title or None,
+            title_search=title_contains or None,
+            workspace=workspace or None,
+            conversation_ids=handle_ids,
         )
         # Side chats surface only as Workspace-rail tabs, so drop any
         # side-chat-labeled fork from the sidebar list (it is still a normal

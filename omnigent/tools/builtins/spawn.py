@@ -553,7 +553,10 @@ class SysSessionListTool(Tool):
             "the complete result while it fits the tool-output budget; "
             "larger global session lists return a page with has_more "
             "metadata and an opaque next_cursor. Pass that cursor to continue; sub_agents stays "
-            "complete."
+            "complete. To find one session cheaply, filter by handle (e.g. "
+            "'Architect' or 'py-qwant/Architect'), title, title_contains or workspace, "
+            "and pass compact=true for just id, title, workspace, handle, runner_online "
+            "and last_activity_at per session, without sub_agents."
         )
 
     def get_schema(self) -> dict[str, Any]:
@@ -579,6 +582,38 @@ class SysSessionListTool(Tool):
                                 "list to sessions whose bound agent has "
                                 "this name, e.g. 'researcher'. Does not "
                                 "affect the 'sub_agents' view."
+                            ),
+                        },
+                        "handle": {
+                            "type": "string",
+                            "description": (
+                                "Optional: only the session holding this role, e.g. "
+                                "'Architect' (your project) or 'py-qwant/Architect'."
+                            ),
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Optional: only sessions with exactly this title.",
+                        },
+                        "title_contains": {
+                            "type": "string",
+                            "description": (
+                                "Optional: only sessions whose title contains this, ignoring case."
+                            ),
+                        },
+                        "workspace": {
+                            "type": "string",
+                            "description": (
+                                "Optional: only sessions whose working directory is "
+                                "exactly this absolute path."
+                            ),
+                        },
+                        "compact": {
+                            "type": "boolean",
+                            "description": (
+                                "Optional: return only 'sessions' rows of session_id, "
+                                "title, workspace, handle, runner_online and "
+                                "last_activity_at; omits sub_agents. Defaults to false."
                             ),
                         },
                         "include_archived": {
