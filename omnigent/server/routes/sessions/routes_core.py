@@ -324,6 +324,15 @@ def _changes_project(body: UpdateSessionRequest, set_project: bool, current: Con
     )
 
 
+def _refuse_closed_title(title: str) -> None:
+    """Refuse an automatic rename that would make the session read as closed."""
+    if has_closed_title_marker(title):
+        raise OmnigentError(
+            "A rename can't close a session; close it with sys_session_close instead.",
+            code=ErrorCode.CONFLICT,
+        )
+
+
 async def _refuse_agent_role_release(
     request: Request,
     body: UpdateSessionRequest,
@@ -4181,6 +4190,7 @@ def register_core_routes(
                 "title must be a single non-empty line",
                 code=ErrorCode.INVALID_INPUT,
             )
+        _refuse_closed_title(title)
         if background_title_coordinator is not None:
             title = await background_title_coordinator.format_agent_title(
                 BackgroundTitleRequest(
@@ -4234,6 +4244,7 @@ def register_core_routes(
                 "title must be a single non-empty line",
                 code=ErrorCode.INVALID_INPUT,
             )
+        _refuse_closed_title(title)
 
         page = await asyncio.to_thread(
             conversation_store.list_items,

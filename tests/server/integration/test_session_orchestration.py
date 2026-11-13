@@ -3934,6 +3934,21 @@ async def test_an_agent_cannot_release_its_role_by_closing_its_session(
     )
 
 
+@pytest.mark.parametrize("route", ["agent-title", "auto-title"])
+async def test_a_rename_cannot_close_a_role_holder(auth_client, peers, db_uri, route):
+    source, _, _ = peers
+    store = SqlAlchemyConversationStore(db_uri)
+    await _hold(auth_client, source, "Keeper")
+    before = store.get_conversation(source["id"]).title
+    response = await auth_client.post(
+        f"/v1/sessions/{source['id']}/{route}", json={"title": "keeper:guard:closed:x"}
+    )
+    assert response.status_code == 409, response.text
+    assert "sys_session_close" in response.text
+    assert store.get_conversation(source["id"]).title == before
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
+
+
 async def test_an_agent_may_refile_its_session_where_it_already_is(auth_client, peers, db_uri):
     source, _, _ = peers
     await _hold(auth_client, source, "Keeper")

@@ -18,6 +18,7 @@ from omnigent.harness_aliases import canonicalize_harness
 from omnigent.harness_plugins import background_title_generators
 from omnigent.runner.background_titles.service import FOLLOW_USER_LANGUAGE_TITLE_INSTRUCTION
 from omnigent.stores.conversation_store import ConversationStore
+from omnigent.util.session_lifecycle import has_closed_title_marker
 
 if TYPE_CHECKING:
     from omnigent.entities.conversation import Conversation
@@ -89,7 +90,8 @@ def normalize_background_title(
         if not truncate_overflow:
             return None
         title = title[: max_chars - 1].rstrip() + "…"
-    if len(title) < 2:
+    # A generated title must never read as a closed session.
+    if len(title) < 2 or has_closed_title_marker(title):
         return None
     return title
 
