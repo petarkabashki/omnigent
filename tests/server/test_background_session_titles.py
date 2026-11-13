@@ -330,6 +330,7 @@ async def test_title_normalizer_rejects_empty_and_oversized_output() -> None:
     assert normalize_background_title(None) is None
     assert normalize_background_title("   \n  ") is None
     assert normalize_background_title("x" * (BACKGROUND_TITLE_MAX_CHARS + 1)) is None
+    assert normalize_background_title("guard:closed:x") is None
 
 
 async def test_custom_title_instructions_allow_longer_output(db_uri: str) -> None:

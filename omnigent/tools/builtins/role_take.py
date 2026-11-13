@@ -62,7 +62,8 @@ class SysRoleReleaseTool(Tool):
             "With no arguments, release the role handle this session holds, leaving the role "
             "vacant. With role and force=true, free a role another session holds (for example "
             "one whose runner is offline), optionally handing it to give_to. The owner is "
-            "asked to approve every call; nothing changes unless they approve."
+            "asked to approve every call; nothing changes unless they approve. A permanent "
+            "role (shown by sys_role_list) needs a second owner confirmation to force-release."
         )
 
     def get_schema(self) -> dict[str, Any]:

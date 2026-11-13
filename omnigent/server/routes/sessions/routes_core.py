@@ -43,6 +43,7 @@ from omnigent.entities import (
     Agent,
     CommentsFingerprint,
     Conversation,
+    Role,
     StoredFile,
     synthesize_conversation_title,
 )
@@ -256,7 +257,11 @@ from omnigent.server.schemas import (
     ThreadNoteRequest,
     UpdateSessionRequest,
 )
-from omnigent.server.session_aliases import Namespace, release_role_after_lifecycle
+from omnigent.server.session_aliases import (
+    Namespace,
+    held_role_names,
+    release_role_after_lifecycle,
+)
 from omnigent.server.session_orchestration import require_orchestration_source
 from omnigent.server.shadow_routing import shadow_route_created_session
 from omnigent.spec.types import DEFAULT_ASK_TIMEOUT, Phase
@@ -305,6 +310,69 @@ ClearSessionIntoFreshSession = Callable[
     [Request, Conversation, Callable[[], Awaitable[None]]], Awaitable[str]
 ]
 _SESSION_LIST_BATCH_SIZE = 1000
+# Owner questions in one role request end this long before the caller's one-day
+# read timeout, so an approval can't land after the caller has given up.
+_ROLE_ASK_MARGIN_S = 600.0
+
+
+def _changes_project(body: UpdateSessionRequest, set_project: bool, current: Conversation) -> bool:
+    """Whether the PATCH files the session somewhere other than where it is."""
+    if set_project and normalize_uuid(body.project_id or None) != current.project_id:
+        return True
+    labels = body.labels or {}
+    return PROJECT_LABEL_KEY in labels and (labels[PROJECT_LABEL_KEY] or None) != (
+        current.labels.get(PROJECT_LABEL_KEY) or None
+    )
+
+
+def _refuse_closed_title(title: str) -> None:
+    """Refuse an automatic rename that would make the session read as closed."""
+    if has_closed_title_marker(title):
+        raise OmnigentError(
+            "A rename can't close a session. If it holds a role, release the role with "
+            "sys_role_release first, or ask the owner to close it.",
+            code=ErrorCode.CONFLICT,
+        )
+
+
+async def _refuse_agent_role_release(
+    request: Request,
+    body: UpdateSessionRequest,
+    set_project: bool,
+    session_id: str,
+    project_store: ProjectStore | None,
+    conversation_store: ConversationStore,
+) -> None:
+    """Refuse an agent PATCH that would release a role its session holds.
+
+    Closing, archiving or moving a session releases its roles; only the owner
+    may do that implicitly. Agent calls carry a runner token or an orchestration
+    source header.
+    """
+    agent_call = (
+        bool((request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip())
+        or ORCHESTRATION_SOURCE_HEADER in request.headers
+    )
+    labels = body.labels or {}
+    closes = (
+        body.archived is not None
+        or labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+        or has_closed_title_marker(body.title)
+    )
+    may_move = set_project or PROJECT_LABEL_KEY in labels
+    if not agent_call or not (closes or may_move):
+        return
+    if not closes:
+        current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if current is not None and not _changes_project(body, set_project, current):
+            return
+    held = await asyncio.to_thread(held_role_names, project_store, session_id)
+    if held:
+        raise OmnigentError(
+            f"Session {session_id!r} holds {', '.join(held)}; closing, archiving or "
+            "moving it would release the role. Release it first with sys_role_release.",
+            code=ErrorCode.CONFLICT,
+        )
 
 
 def _require_attachment_compatible_history(
@@ -2725,10 +2793,13 @@ def register_core_routes(
         await _ask_owner_on(request, source, question)
         return source
 
-    async def _ask_owner_on(request: Request, source: Conversation, question: str) -> None:
+    async def _ask_owner_on(
+        request: Request, source: Conversation, question: str, *, timeout_s: float | None = None
+    ) -> None:
         """Park on the owner's answer in ``source``; raises unless they accept.
 
         Never consults the messaging policy: only the owner can approve.
+        ``timeout_s`` defaults to ``DEFAULT_ASK_TIMEOUT``.
         """
         session_id = source.id
         verdict = await _publish_and_wait_for_harness_elicitation(
@@ -2742,7 +2813,7 @@ def register_core_routes(
                 policy_name="role_change",
                 content_preview=question,
             ),
-            timeout_s=float(DEFAULT_ASK_TIMEOUT),
+            timeout_s=float(DEFAULT_ASK_TIMEOUT) if timeout_s is None else timeout_s,
             conversation_store=conversation_store,
         )
         if verdict is None or verdict.action != "accept":
@@ -2827,7 +2898,11 @@ def register_core_routes(
 
         An agent call (orchestration header) parks on an owner approval first.
         """
-        from omnigent.server.session_aliases import clear_session_alias, session_handle
+        from omnigent.server.session_aliases import (
+            clear_session_alias,
+            holds_permanent_role,
+            session_handle,
+        )
 
         user_id = _require_user(request, auth_provider)
         if request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None:
@@ -2838,12 +2913,14 @@ def register_core_routes(
             handle = session_handle(current, project_store, user_id)
             if source.id == session_id and handle is None:
                 raise OmnigentError("This session holds no role", code=ErrorCode.INVALID_INPUT)
+            permanent = await asyncio.to_thread(holds_permanent_role, project_store, source.id)
+            kind = "PERMANENT role" if permanent else "role handle"
             await _approve_agent_alias_change(
                 request,
                 user_id,
                 session_id,
                 f"Session '{source.title or source.id}' ({source.id}) asks to release the "
-                f"role handle '{handle}'. Approve?",
+                f"{kind} '{handle}'. Approve?",
             )
         else:
             await _require_access_and_level(
@@ -2853,21 +2930,76 @@ def register_core_routes(
         await asyncio.to_thread(clear_session_alias, conversation_store, project_store, session_id)
         return Response(status_code=204)
 
+    def _role_route_namespace(
+        source: Conversation | None, user_id: str | None, payload: dict[str, Any]
+    ) -> Namespace:
+        """An agent's own namespace, else the ``namespace`` path the owner names (root by default)."""
+        from omnigent.server.session_aliases import namespace_for_session, source_namespace
+
+        if source is not None:
+            return namespace_for_session(source, project_store, user_id)
+        view = payload.get("namespace")
+        return source_namespace(
+            conversation_store,
+            project_store,
+            user_id=user_id,
+            view=view if isinstance(view, str) else "/",
+        )
+
+    @router.put("/sessions/aliases/roles/{name}/permanent")
+    async def put_role_permanent(request: Request, name: str) -> dict[str, Any]:
+        """Set or clear a role's owner-approved permanent flag.
+
+        Body: ``{"permanent": bool, "namespace": <path>?}``. An agent call
+        (orchestration header) acts in its own namespace and parks on the
+        owner's approval; a direct owner call is its own approval. The write is
+        a CAS on the generation shown in the question.
+        """
+        from omnigent.server.session_aliases import (
+            apply_role_permanent,
+            plan_role_permanent,
+            role_handle,
+        )
+
+        user_id = _require_user(request, auth_provider)
+        payload = await request.json() if await request.body() else {}
+        permanent = payload.get("permanent") if isinstance(payload, dict) else None
+        if not isinstance(permanent, bool):
+            raise OmnigentError("permanent must be true or false", code=ErrorCode.INVALID_INPUT)
+        source = _alias_resolution_source(request, user_id)
+
+        def _plan() -> tuple[Role, str]:
+            namespace = _role_route_namespace(source, user_id, payload)
+            role = plan_role_permanent(
+                project_store, namespace=namespace, user_id=user_id, name=name
+            )
+            return role, role_handle(namespace.path, role.name)
+
+        role, handle = await asyncio.to_thread(_plan)
+        if source is not None and role.permanent != permanent:
+            change = "mark" if permanent else "UNMARK"
+            await _ask_owner_on(
+                request,
+                source,
+                f"Session '{source.title or source.id}' ({source.id}) asks to {change} the "
+                f"role '{handle}' (generation {role.generation}) as permanent. Approve?",
+            )
+        if role.permanent != permanent:
+            role = await asyncio.to_thread(apply_role_permanent, project_store, role, permanent)
+        return {"role": handle, "permanent": role.permanent, "generation": role.generation}
+
     @router.post("/sessions/aliases/roles/{name}/release")
     async def force_release_role(request: Request, name: str) -> dict[str, Any]:
         """Force-release a role whoever holds it, optionally handing it to ``give_to``.
 
-        Body: ``{"force": true, "give_to": <session id or role>?, "namespace": <path>?}``.
-        An agent call (orchestration header) acts in its own namespace and always
-        parks on the owner's approval; a direct owner call is its own approval.
-        The write is a CAS on the generation shown in the question.
+        Body: ``{"force": true, "give_to": <session id or role>?, "namespace": <path>?,
+        "confirm_permanent": true?}``. An agent call (orchestration header) acts in
+        its own namespace and always parks on the owner's approval; a direct owner
+        call is its own approval. A permanent role needs a second owner
+        confirmation: a second question for an agent call, ``confirm_permanent``
+        for a direct one. The write is a CAS on the generation shown in the question.
         """
-        from omnigent.server.session_aliases import (
-            apply_force_release,
-            namespace_for_session,
-            plan_force_release,
-            source_namespace,
-        )
+        from omnigent.server.session_aliases import apply_force_release, plan_force_release
 
         user_id = _require_user(request, auth_provider)
         payload = await request.json() if await request.body() else {}
@@ -2879,31 +3011,29 @@ def register_core_routes(
         source = _alias_resolution_source(request, user_id)
 
         def _plan() -> Any:
-            if source is not None:
-                namespace = namespace_for_session(source, project_store, user_id)
-            else:
-                view = payload.get("namespace")
-                namespace = source_namespace(
-                    conversation_store,
-                    project_store,
-                    user_id=user_id,
-                    view=view if isinstance(view, str) else "/",
-                )
             return plan_force_release(
                 conversation_store,
                 project_store,
-                namespace=namespace,
+                namespace=_role_route_namespace(source, user_id, payload),
                 user_id=user_id,
                 name=name,
                 give_to=give_to,
             )
 
         plan = await asyncio.to_thread(_plan)
+        if plan.role.permanent and source is None and payload.get("confirm_permanent") is not True:
+            raise OmnigentError(
+                f"Role '{plan.handle}' is permanent; force-releasing it needs a second, "
+                "explicit confirmation (confirm_permanent=true)",
+                code=ErrorCode.INVALID_INPUT,
+            )
         if plan.target is not None:
             await _require_access_and_level(
                 user_id, plan.target.id, LEVEL_OWNER, permission_store, conversation_store
             )
         if source is not None:
+            # Both questions share the runner's one request timeout, less a margin.
+            deadline = time.monotonic() + DEFAULT_ASK_TIMEOUT - _ROLE_ASK_MARGIN_S
             holder = plan.holder
             holder_text = (
                 f"session '{holder.title or holder.id}' ({holder.id})"
@@ -2932,7 +3062,31 @@ def register_core_routes(
                 f"Session '{source.title or source.id}' ({source.id}) asks to FORCE-RELEASE "
                 f"the role '{plan.handle}' (generation {plan.role.generation}) from "
                 f"{holder_text}{state}{then}. Approve?",
+                timeout_s=deadline - time.monotonic(),
             )
+            if plan.role.permanent:
+                remaining = deadline - time.monotonic()
+                if remaining < _ROLE_ASK_MARGIN_S:
+                    raise OmnigentError(
+                        f"Too little time is left to confirm the permanent role '{plan.handle}' "
+                        "before this request times out; nothing was changed. Ask again.",
+                        code=ErrorCode.CONFLICT,
+                    )
+                await _ask_owner_on(
+                    request,
+                    source,
+                    f"SECOND CONFIRMATION: '{plan.handle}' is a PERMANENT role. Really "
+                    f"force-release it (generation {plan.role.generation}) from {holder_text}"
+                    f"{then}? Approve only if you mean to unseat a permanent role.",
+                    timeout_s=remaining,
+                )
+            # An answer past the deadline or after the caller left must not apply.
+            if time.monotonic() > deadline or await request.is_disconnected():
+                raise OmnigentError(
+                    f"The owner's answer for '{plan.handle}' came after this request's "
+                    "deadline or after the caller left; nothing was changed. Ask again.",
+                    code=ErrorCode.CONFLICT,
+                )
 
         def _apply() -> dict[str, Any]:
             role = apply_force_release(
@@ -4078,6 +4232,7 @@ def register_core_routes(
                 "title must be a single non-empty line",
                 code=ErrorCode.INVALID_INPUT,
             )
+        _refuse_closed_title(title)
         if background_title_coordinator is not None:
             title = await background_title_coordinator.format_agent_title(
                 BackgroundTitleRequest(
@@ -4131,6 +4286,7 @@ def register_core_routes(
                 "title must be a single non-empty line",
                 code=ErrorCode.INVALID_INPUT,
             )
+        _refuse_closed_title(title)
 
         page = await asyncio.to_thread(
             conversation_store.list_items,
@@ -4296,6 +4452,9 @@ def register_core_routes(
             required_level = LEVEL_EDIT
         await _require_access(
             user_id, session_id, required_level, permission_store, conversation_store
+        )
+        await _refuse_agent_role_release(
+            request, body, set_project, session_id, project_store, conversation_store
         )
         if body.runner_id is not None and permission_store is not None:
             if not check_session_access(
