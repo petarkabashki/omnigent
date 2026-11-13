@@ -1147,6 +1147,8 @@ async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
 
     from omnigent.host.frames import HostHelloFrame
     from omnigent.server import session_live_state
+    import asyncio
+
     from omnigent.server.routes._sessions.helpers import _publish_status
     from omnigent.server.startup_inputs import STARTUP_LABEL
 
@@ -1170,13 +1172,18 @@ async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
     assert len(store.list_pending_inputs(target["id"])) == 2
     info = (await auth_client.get("/v1/info")).json()
     assert info["durable_initial_input"] is False
-    # Held fyi neither block a reset nor fall to an interrupt.
+    # Held fyi neither block a reset nor fall to an interrupt, even one that
+    # drops an ordinary queued input next to them.
     assert await startup.has_droppable(target["id"]) is False
+    store.set_session_live_status(target["id"], "running")
+    await _send(auth_client, source, target, message="queued action")
+    assert await startup.has_droppable(target["id"]) is True
     interrupted = await auth_client.post(
         f"/v1/sessions/{target['id']}/events", json={"type": "interrupt"}
     )
     assert interrupted.status_code < 300, interrupted.text
     assert len(store.list_pending_inputs(target["id"])) == 2
+    assert await startup.has_droppable(target["id"]) is False
     assert store.get_conversation(target["id"]).labels.get(STARTUP_LABEL) != "cancelled"
     captured.get("posts", []).clear()
 
@@ -1191,11 +1198,15 @@ async def test_fyi_messages_merge_on_a_hub_without_managed_sandboxes(
     )
     _publish_status(target["id"], "idle")
     _publish_status(target["id"], "running")
-    [row] = store.list_pending_inputs(target["id"])
-    await startup._deliver(auth_app, target["id"], row)
+    assert len(store.list_pending_inputs(target["id"])) == 1
+    # The startup worker, not a direct call, picks up the released row.
+    connection = auth_app.state.host_registry.get(host_id)
+    assert await startup._recover_session(auth_app, target["id"], connection) is True
+    await asyncio.gather(*startup._deliveries.values())
     delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
     assert len(delivered) == 1
     assert all(note in json.dumps(delivered) for note in notes)
+    assert "queued action" not in json.dumps(delivered)
 
 
 @pytest.mark.parametrize("two_replica_stack", ["authenticated"], indirect=True)

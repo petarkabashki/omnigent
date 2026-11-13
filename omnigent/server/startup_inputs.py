@@ -547,12 +547,14 @@ class ManagedStartupInputs:
         if state == "failed":
             return False
         items = await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
-        if state == "cancelled":
-            if not items:
-                await self._finish(session_id)
-            return False
         from omnigent.server.role_mail import input_role_id, is_parked
 
+        if state == "cancelled":
+            # Held fyi and parked role mail outlive an interrupt; once nothing
+            # else is left, _finish re-arms the session so they still get delivered.
+            if not any(not awaits_turn(item) and not is_parked(item, conv) for item in items):
+                await self._finish(session_id)
+            return False
         if any(
             input_role_id(item) is not None for item in items
         ) and await self.relocate_role_mail(app, session_id):
@@ -891,6 +893,13 @@ class ManagedStartupInputs:
                     expected=item.status,
                     status=None,
                 )
+        # Survivors (held fyi, parked role mail) need the session re-armed, or a
+        # later release would find it still cancelled and never deliver them.
+        _, left = await self._droppable(session_id)
+        if not left and await asyncio.to_thread(
+            self.conversations.list_pending_inputs, session_id
+        ):
+            await self._finish(session_id)
 
     async def _report_failure(self, session_id: str, failure_id: str, message: str) -> None:
         """Record a startup failure in the transcript and the session's status."""
