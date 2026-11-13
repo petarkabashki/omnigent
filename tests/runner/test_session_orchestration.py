@@ -767,7 +767,7 @@ async def test_managed_message_resolves_host_after_wrong_replica(target_kind):
         assert request.headers[ORCHESTRATION_SOURCE_HEADER] == parent
         assert json.loads(request.content) == {
             "type": "session_message",
-            "data": {"message": "Work"},
+            "data": {"message": "Work", "address": destination},
         }
 
 
