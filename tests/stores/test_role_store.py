@@ -269,6 +269,23 @@ def test_release_loses_to_a_take_at_its_generation(roles: SqlAlchemyRoleStore) -
     assert roles.get(role.id, user_id=OWNER) == repaired
 
 
+def test_set_permanent_bumps_the_generation_without_an_event(
+    roles: SqlAlchemyRoleStore,
+) -> None:
+    """The flag change is a CAS, so a release decided before it loses."""
+    held = _take(roles, roles.create("Bench", user_id=OWNER, project_id=None), _id())
+    events_before = len(roles.events(held.id))
+
+    marked = roles.set_permanent(held, True)
+
+    assert marked is not None and marked.permanent
+    assert marked.generation == held.generation + 1
+    assert len(roles.events(held.id)) == events_before
+    assert roles.set_permanent(held, False) is None
+    assert _release(roles, held) is None
+    assert roles.get(held.id, user_id=OWNER) == marked
+
+
 def test_take_in_a_deleted_project_is_refused(roles: SqlAlchemyRoleStore, db_uri: str) -> None:
     """The take re-checks under a lock, so a delete it raced cannot strand a holder."""
     projects = SqlAlchemyProjectStore(db_uri)

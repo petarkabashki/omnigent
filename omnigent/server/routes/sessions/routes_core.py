@@ -43,6 +43,7 @@ from omnigent.entities import (
     Agent,
     CommentsFingerprint,
     Conversation,
+    Role,
     StoredFile,
     synthesize_conversation_title,
 )
@@ -2833,21 +2834,76 @@ def register_core_routes(
         await asyncio.to_thread(clear_session_alias, conversation_store, project_store, session_id)
         return Response(status_code=204)
 
+    def _role_route_namespace(
+        source: Conversation | None, user_id: str | None, payload: dict[str, Any]
+    ) -> Namespace:
+        """An agent's own namespace, else the ``namespace`` path the owner names (root by default)."""
+        from omnigent.server.session_aliases import namespace_for_session, source_namespace
+
+        if source is not None:
+            return namespace_for_session(source, project_store, user_id)
+        view = payload.get("namespace")
+        return source_namespace(
+            conversation_store,
+            project_store,
+            user_id=user_id,
+            view=view if isinstance(view, str) else "/",
+        )
+
+    @router.put("/sessions/aliases/roles/{name}/permanent")
+    async def put_role_permanent(request: Request, name: str) -> dict[str, Any]:
+        """Set or clear a role's owner-approved permanent flag.
+
+        Body: ``{"permanent": bool, "namespace": <path>?}``. An agent call
+        (orchestration header) acts in its own namespace and parks on the
+        owner's approval; a direct owner call is its own approval. The write is
+        a CAS on the generation shown in the question.
+        """
+        from omnigent.server.session_aliases import (
+            apply_role_permanent,
+            plan_role_permanent,
+            role_handle,
+        )
+
+        user_id = _require_user(request, auth_provider)
+        payload = await request.json() if await request.body() else {}
+        permanent = payload.get("permanent") if isinstance(payload, dict) else None
+        if not isinstance(permanent, bool):
+            raise OmnigentError("permanent must be true or false", code=ErrorCode.INVALID_INPUT)
+        source = _alias_resolution_source(request, user_id)
+
+        def _plan() -> tuple[Role, str]:
+            namespace = _role_route_namespace(source, user_id, payload)
+            role = plan_role_permanent(
+                project_store, namespace=namespace, user_id=user_id, name=name
+            )
+            return role, role_handle(namespace.path, role.name)
+
+        role, handle = await asyncio.to_thread(_plan)
+        if source is not None and role.permanent != permanent:
+            change = "mark" if permanent else "UNMARK"
+            await _ask_owner_on(
+                request,
+                source,
+                f"Session '{source.title or source.id}' ({source.id}) asks to {change} the "
+                f"role '{handle}' (generation {role.generation}) as permanent. Approve?",
+            )
+        if role.permanent != permanent:
+            role = await asyncio.to_thread(apply_role_permanent, project_store, role, permanent)
+        return {"role": handle, "permanent": role.permanent, "generation": role.generation}
+
     @router.post("/sessions/aliases/roles/{name}/release")
     async def force_release_role(request: Request, name: str) -> dict[str, Any]:
         """Force-release a role whoever holds it, optionally handing it to ``give_to``.
 
-        Body: ``{"force": true, "give_to": <session id or role>?, "namespace": <path>?}``.
-        An agent call (orchestration header) acts in its own namespace and always
-        parks on the owner's approval; a direct owner call is its own approval.
-        The write is a CAS on the generation shown in the question.
+        Body: ``{"force": true, "give_to": <session id or role>?, "namespace": <path>?,
+        "confirm_permanent": true?}``. An agent call (orchestration header) acts in
+        its own namespace and always parks on the owner's approval; a direct owner
+        call is its own approval. A permanent role needs a second owner
+        confirmation: a second question for an agent call, ``confirm_permanent``
+        for a direct one. The write is a CAS on the generation shown in the question.
         """
-        from omnigent.server.session_aliases import (
-            apply_force_release,
-            namespace_for_session,
-            plan_force_release,
-            source_namespace,
-        )
+        from omnigent.server.session_aliases import apply_force_release, plan_force_release
 
         user_id = _require_user(request, auth_provider)
         payload = await request.json() if await request.body() else {}
@@ -2859,26 +2915,22 @@ def register_core_routes(
         source = _alias_resolution_source(request, user_id)
 
         def _plan() -> Any:
-            if source is not None:
-                namespace = namespace_for_session(source, project_store, user_id)
-            else:
-                view = payload.get("namespace")
-                namespace = source_namespace(
-                    conversation_store,
-                    project_store,
-                    user_id=user_id,
-                    view=view if isinstance(view, str) else "/",
-                )
             return plan_force_release(
                 conversation_store,
                 project_store,
-                namespace=namespace,
+                namespace=_role_route_namespace(source, user_id, payload),
                 user_id=user_id,
                 name=name,
                 give_to=give_to,
             )
 
         plan = await asyncio.to_thread(_plan)
+        if plan.role.permanent and source is None and payload.get("confirm_permanent") is not True:
+            raise OmnigentError(
+                f"Role '{plan.handle}' is permanent; force-releasing it needs a second, "
+                "explicit confirmation (confirm_permanent=true)",
+                code=ErrorCode.INVALID_INPUT,
+            )
         if plan.target is not None:
             await _require_access_and_level(
                 user_id, plan.target.id, LEVEL_OWNER, permission_store, conversation_store
@@ -2913,6 +2965,14 @@ def register_core_routes(
                 f"the role '{plan.handle}' (generation {plan.role.generation}) from "
                 f"{holder_text}{state}{then}. Approve?",
             )
+            if plan.role.permanent:
+                await _ask_owner_on(
+                    request,
+                    source,
+                    f"SECOND CONFIRMATION: '{plan.handle}' is a PERMANENT role. Really "
+                    f"force-release it (generation {plan.role.generation}) from {holder_text}"
+                    f"{then}? Approve only if you mean to unseat a permanent role.",
+                )
 
         def _apply() -> dict[str, Any]:
             role = apply_force_release(

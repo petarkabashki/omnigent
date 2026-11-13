@@ -870,7 +870,7 @@ class SqlRole(OmnigentBase):
     :param name_key: Case-folded ``name``.
     :param overlay_ref: Role-file name, or NULL when it equals ``name``.
     :param defaults: Opaque pre-fill JSON, or NULL.
-    :param generation: Bumped on every take and release; the CAS token.
+    :param generation: Bumped on every take, release and permanent change; the CAS token.
     """
 
     __tablename__ = "roles"

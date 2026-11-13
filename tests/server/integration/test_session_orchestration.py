@@ -2244,6 +2244,103 @@ async def test_owner_force_release_is_its_own_approval(auth_client, peers, db_ur
     assert _labels_of(db_uri, holder)[ROLE_RELEASED_BY_LABEL_KEY] == ""
 
 
+async def _set_permanent(client, name, permanent, headers=None):
+    return await client.put(
+        f"/v1/sessions/aliases/roles/{name}/permanent",
+        json={"permanent": permanent},
+        headers=headers,
+    )
+
+
+async def test_owner_marks_a_role_permanent_and_role_list_shows_it(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    before, _ = _role_row(db_uri, "Keeper")
+
+    marked = await _set_permanent(auth_client, "Keeper", True)
+    assert marked.status_code == 200, marked.text
+    assert marked.json() == {
+        "role": "/Keeper",
+        "permanent": True,
+        "generation": before.generation + 1,
+    }
+    assert owner_verdicts["asked"] == []
+    listed = await _role_tool(auth_client, source, "sys_role_list")
+    assert {row["name"]: row for row in listed["roles"]}["Keeper"]["permanent"] is True
+
+    missing = await _set_permanent(auth_client, "Nobody", True)
+    assert missing.status_code == 404
+    invalid = await _set_permanent(auth_client, "Keeper", "yes")
+    assert invalid.status_code == 400
+
+
+@pytest.mark.parametrize("action", ["accept", "decline"])
+async def test_an_agent_marks_a_role_permanent_only_with_owner_approval(
+    auth_client, peers, db_uri, owner_verdicts, action
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    owner_verdicts["action"] = action
+
+    response = await _set_permanent(
+        auth_client, "Keeper", True, headers={ORCHESTRATION_SOURCE_HEADER: source["id"]}
+    )
+    assert response.status_code == (200 if action == "accept" else 403), response.text
+    [(asked_session, question)] = owner_verdicts["asked"]
+    assert asked_session == source["id"] and "permanent" in question
+    assert _role_row(db_uri, "Keeper")[0].permanent is (action == "accept")
+
+
+@pytest.mark.parametrize("second", ["accept", "decline"])
+async def test_force_releasing_a_permanent_role_asks_the_owner_twice(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch, second
+):
+    from omnigent.server.routes.sessions import routes_core
+    from omnigent.server.schemas import ElicitationResult
+
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    answers = iter(["accept", second])
+    asked = []
+
+    async def answer(request, *, params, **kwargs):
+        asked.append(params.message)
+        return ElicitationResult(action=next(answers))
+
+    monkeypatch.setattr(routes_core, "_publish_and_wait_for_harness_elicitation", answer)
+    result = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+
+    assert len(asked) == 2
+    assert "FORCE-RELEASE" in asked[0] and "SECOND CONFIRMATION" in asked[1]
+    assert "PERMANENT" in asked[1]
+    after, _ = _role_row(db_uri, "Keeper")
+    if second == "accept":
+        assert result["released"] is True and after.holder_session_id is None
+    else:
+        assert result["error"].endswith("returned 403")
+        assert after.holder_session_id == holder["id"]
+
+
+async def test_owner_force_release_of_a_permanent_role_needs_confirm_permanent(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    _, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    assert (await _set_permanent(auth_client, "Keeper", True)).status_code == 200
+    url = "/v1/sessions/aliases/roles/Keeper/release"
+
+    refused = await auth_client.post(url, json={"force": True})
+    assert refused.status_code == 400 and "confirm_permanent" in refused.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == holder["id"]
+    released = await auth_client.post(url, json={"force": True, "confirm_permanent": True})
+    assert released.status_code == 200, released.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
+    assert owner_verdicts["asked"] == []
+
+
 async def test_force_release_never_consults_the_messaging_policy(
     auth_client, peers, db_uri, owner_verdicts, monkeypatch
 ):

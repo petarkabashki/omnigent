@@ -130,5 +130,16 @@ class RoleStore(ABC):
         """
 
     @abstractmethod
+    def set_permanent(self, role: Role, permanent: bool) -> Role | None:
+        """
+        Set the owner's permanent flag if ``role.generation`` is still current.
+
+        The generation is bumped without an event, so a force-release planned
+        before the change loses its CAS.
+
+        :returns: The updated role, or ``None`` when the row moved on.
+        """
+
+    @abstractmethod
     def events(self, role_id: str) -> builtins.list[RoleEvent]:
         """List one role's events, oldest first."""
