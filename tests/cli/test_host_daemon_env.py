@@ -483,6 +483,19 @@ def test_host_daemon_env_preserves_idle_timeout_knobs(
     assert {name: env.get(name) for name in _IDLE_TIMEOUT_KNOBS} == _IDLE_TIMEOUT_KNOBS
 
 
+@pytest.mark.parametrize("server_url", [None, _REMOTE_SERVER_URL])
+def test_host_daemon_env_keeps_the_runtime_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    server_url: str | None,
+) -> None:
+    """A daemon started for a session keeps its bridges under the operator-set parent."""
+    monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", "/run/user/1000/og")
+
+    env = _build_host_daemon_env(server_url=server_url)
+
+    assert env.get("OMNIGENT_HARNESS_TMP_PARENT") == "/run/user/1000/og"
+
+
 def test_runner_env_preserves_idle_timeout_knobs() -> None:
     """The idle windows set on the host reach the runner that reads them."""
     # Given

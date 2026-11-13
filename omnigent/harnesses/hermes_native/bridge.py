@@ -42,7 +42,7 @@ from typing import TypeAlias
 
 from omnigent.harnesses.hermes_native.credentials import with_hermes_ci_request_tags
 from omnigent.native.input_ready import PaneSettledProbe
-from omnigent.runtime.harnesses.paths import harness_bridge_root
+from omnigent.runtime.harnesses.paths import HARNESS_TMP_PARENT_ENV_VAR, harness_bridge_root
 
 _logger = logging.getLogger(__name__)
 
@@ -400,6 +400,11 @@ def write_policy_hook_config(
                 "--bridge-dir",
                 str(bridge_dir),
             ],
+            "env": {
+                "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+                # serve-mcp must resolve the same bridge root as this runner.
+                HARNESS_TMP_PARENT_ENV_VAR: str(_BRIDGE_ROOT.parent),
+            },
         },
     }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shlex
@@ -151,3 +152,40 @@ def test_claude_sdk_cli_tmpdir_follows_the_parent(
     assert claude_sdk_executor._claude_cli_tmpdir() == Path(tempfile.gettempdir())
     # The CLI names its dir claude-<uid>; the grant must match that uid.
     assert stable_user_id() == str(os.getuid())
+
+
+def _serve_mcp_entry(harness: str, bridge_dir: Path) -> dict:
+    """The serve-mcp server entry each harness writes into its MCP config."""
+    module = importlib.import_module(f"omnigent.harnesses.{harness}_native.bridge")
+    if harness in ("claude", "cursor"):
+        (entry,) = module.build_mcp_config(bridge_dir)["mcpServers"].values()
+        return entry
+    if harness == "devin":
+        return module.build_devin_mcp_server(bridge_dir)
+    if harness == "kiro":
+        (entry,) = module.build_kiro_mcp_config(bridge_dir)["mcpServers"].values()
+        return entry
+    if harness == "qwen":
+        return module.build_mcp_server_entry(bridge_dir)
+    hermes_home = module.write_policy_hook_config(bridge_dir, "http://server.example", "sess")
+    return json.loads((hermes_home / "config.yaml").read_text())["mcp_servers"]["omnigent"]
+
+
+@pytest.mark.parametrize("harness", ["claude", "cursor", "devin", "hermes", "kiro", "qwen"])
+def test_serve_mcp_children_pin_the_runner_parent(
+    harness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # hermes copies ~/.hermes auth files
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    module = importlib.import_module(f"omnigent.harnesses.{harness}_native.bridge")
+    entry = _serve_mcp_entry(harness, bridge_dir)
+    assert "serve-mcp" in entry["args"]
+    assert entry["env"][HARNESS_TMP_PARENT_ENV_VAR] == str(module._BRIDGE_ROOT.parent)
+
+
+@pytest.mark.parametrize("harness", ["goose", "kimi"])
+def test_harnesses_without_a_serve_mcp_child_need_no_pin(harness: str) -> None:
+    # Their hook children get the concrete bridge dir, so there is no root to agree on.
+    module = importlib.import_module(f"omnigent.harnesses.{harness}_native.bridge")
+    assert "serve-mcp" not in Path(module.__file__).read_text()
