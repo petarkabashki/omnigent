@@ -211,3 +211,15 @@ def test_skill_scope_ignores_a_repository_marker_owned_by_another_user(
 def test_untrusted_reason_fails_closed_when_a_path_cannot_be_checked(tmp_path: Path) -> None:
     reason = untrusted_reason(tmp_path / "missing" / "skills")
     assert reason is not None and "cannot be checked" in reason
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership")
+@pytest.mark.parametrize("mode,trusted", [(0o1777, True), (0o777, False)], ids=["sticky", "open"])
+def test_untrusted_reason_checks_world_writable_ancestors(
+    tmp_path: Path, mode: int, trusted: bool
+) -> None:
+    shared = tmp_path / "shared"
+    skills = shared / "project" / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    shared.chmod(mode)
+    assert (untrusted_reason(skills) is None) is trusted

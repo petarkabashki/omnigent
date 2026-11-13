@@ -94,7 +94,8 @@ def untrusted_reason(path: Path) -> str | None:
 
     The resolved target and its parent must be owned by this user or root, and
     writable by nobody else: group write is allowed only for the owner's
-    user-private group. A path that cannot be checked is untrusted.
+    user-private group. No ancestor may be world-writable without the sticky
+    bit. A path that cannot be checked is untrusted.
     """
     if not hasattr(os, "getuid"):
         return None
@@ -110,6 +111,14 @@ def untrusted_reason(path: Path) -> str | None:
             return f"{candidate} is writable by other users"
         if info.st_mode & stat.S_IWGRP and not _is_private_group(info.st_gid, info.st_uid):
             return f"{candidate} is writable by a shared group"
+    # Anyone can rename entries of a world-writable, non-sticky ancestor.
+    for ancestor in target.parent.parents:
+        try:
+            mode = ancestor.stat().st_mode
+        except OSError as exc:
+            return f"{ancestor} cannot be checked ({exc.strerror})"
+        if mode & stat.S_IWOTH and not mode & stat.S_ISVTX:
+            return f"{ancestor} is writable by other users"
     return None
 
 
