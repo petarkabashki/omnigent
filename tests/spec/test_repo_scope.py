@@ -190,3 +190,24 @@ def test_is_trusted_dir_warns_once_per_dir_naming_only_the_dir_and_reason(
     message = caplog.records[0].getMessage()
     assert str(skills) in message and "writable by other users" in message
     assert "secret body" not in message and "planted" not in message
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership")
+def test_skill_scope_ignores_a_repository_marker_owned_by_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared = tmp_path / "shared"
+    workspace = shared / "app"
+    workspace.mkdir(parents=True)
+    (shared / ".git").mkdir()
+    home = tmp_path / "home"
+    assert skill_scope_dirs(workspace, home=home) == [workspace.resolve(), shared.resolve()]
+    if os.getuid() == 0:
+        pytest.skip("root owns everything it creates")
+    monkeypatch.setattr(os, "getuid", lambda: os.getgid() + 100_000)
+    assert skill_scope_dirs(workspace, home=home) == [workspace.resolve()]
+
+
+def test_untrusted_reason_fails_closed_when_a_path_cannot_be_checked(tmp_path: Path) -> None:
+    reason = untrusted_reason(tmp_path / "missing" / "skills")
+    assert reason is not None and "cannot be checked" in reason

@@ -61,9 +61,18 @@ def skill_scope_dirs(workspace: Path, *, home: Path) -> list[Path]:
     if not walked:
         return []
     top = walked[-1]
-    if (top / ".git").exists() or top.parent == Path(os.path.realpath(home)):
+    if _owned_repo_marker(top / ".git") or top.parent == Path(os.path.realpath(home)):
         return walked
     return walked[:1]
+
+
+def _owned_repo_marker(marker: Path) -> bool:
+    """Whether *marker* exists and, on POSIX, belongs to this user or root."""
+    try:
+        owner = marker.lstat().st_uid
+    except OSError:
+        return False
+    return not hasattr(os, "getuid") or owner in (os.getuid(), 0)
 
 
 def _is_private_group(gid: int, owner_uid: int) -> bool:
@@ -85,7 +94,7 @@ def untrusted_reason(path: Path) -> str | None:
 
     The resolved target and its parent must be owned by this user or root, and
     writable by nobody else: group write is allowed only for the owner's
-    user-private group. Missing paths are trusted; callers skip them anyway.
+    user-private group. A path that cannot be checked is untrusted.
     """
     if not hasattr(os, "getuid"):
         return None
@@ -93,8 +102,8 @@ def untrusted_reason(path: Path) -> str | None:
     for candidate in (target, target.parent):
         try:
             info = candidate.stat()
-        except OSError:
-            return None
+        except OSError as exc:
+            return f"{candidate} cannot be checked ({exc.strerror})"
         if info.st_uid not in (os.getuid(), 0):
             return f"{candidate} is owned by another user"
         if info.st_mode & stat.S_IWOTH:
