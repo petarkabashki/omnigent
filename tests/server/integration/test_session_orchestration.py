@@ -2084,7 +2084,7 @@ async def test_force_release_asks_the_owner_then_frees_the_role(
     notice = role_release_instruction(labels)
     assert "/Keeper" in notice and source["id"] in notice and "vacant" in notice
     # Only a holder whose runner is online is sent the notice; a dead runner is not woken.
-    assert result["holder_notified"] is holder_online
+    assert result["holder_notified"] is holder_online and result["notice_failed"] is False
     items = (await auth_client.get(f"/v1/sessions/{holder['id']}/items")).text
     assert ("force-released" in items) is holder_online
 
@@ -2208,6 +2208,25 @@ async def test_a_failed_force_release_leaves_the_holder_labelled(
     assert "error" in failed
     assert _alias_of(db_uri, holder) == "Keeper"
     assert _role_row(db_uri, "Keeper")[0].holder_session_id == holder["id"]
+
+
+async def test_a_failed_notice_still_reports_the_release(
+    auth_client, peers, db_uri, owner_verdicts, monkeypatch
+):
+    from omnigent.runtime import prompt
+
+    def broken_notice(labels):
+        raise RuntimeError("notice unavailable")
+
+    monkeypatch.setattr(prompt, "role_release_instruction", broken_notice)
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    _bind_runner(db_uri, holder["id"])
+    _mark_runner_online(db_uri, holder)
+    result = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
+    assert result["released"] is True and result["notice_failed"] is True
+    assert result["holder_notified"] is False
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
 
 
 async def test_owner_force_release_is_its_own_approval(auth_client, peers, db_uri, owner_verdicts):

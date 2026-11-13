@@ -2902,33 +2902,36 @@ def register_core_routes(
             }
 
         result = await asyncio.to_thread(_apply)
-        result["holder_notified"] = await _notify_released_holder(
-            request, plan.role.holder_session_id
-        )
+        notified = await _notify_released_holder(request, plan.role.holder_session_id)
+        result["holder_notified"] = notified is True
+        result["notice_failed"] = notified is None
         return result
 
-    async def _notify_released_holder(request: Request, holder_id: str) -> bool:
+    async def _notify_released_holder(request: Request, holder_id: str) -> bool | None:
         """Queue one plain notice to a released holder whose runner is online.
 
         An offline holder is not woken; it reads the label-based notice at its next launch.
-        Delivery is best effort: the release has already happened.
+        Delivery is best effort: the release has already happened, so a failure
+        returns ``None`` (reported as ``notice_failed``) rather than an error.
         """
         from omnigent.runtime.prompt import role_release_instruction
 
         post_event = late_handlers.post_event if late_handlers is not None else None
-        status = (await asyncio.to_thread(_holder_status, [holder_id])).get(holder_id)
-        if post_event is None or status is None or not status.runner_online:
+        if post_event is None:
             return False
-        holder = await asyncio.to_thread(conversation_store.get_conversation, holder_id)
-        notice = role_release_instruction(holder.labels if holder is not None else {})
-        if not notice:
-            return False
-        data = {"role": "user", "content": [{"type": "input_text", "text": notice}]}
         try:
+            status = (await asyncio.to_thread(_holder_status, [holder_id])).get(holder_id)
+            if status is None or not status.runner_online:
+                return False
+            holder = await asyncio.to_thread(conversation_store.get_conversation, holder_id)
+            notice = role_release_instruction(holder.labels if holder is not None else {})
+            if not notice:
+                return False
+            data = {"role": "user", "content": [{"type": "input_text", "text": notice}]}
             await post_event(request, holder_id, SessionEventInput(type="message", data=data))
         except Exception:
             _logger.warning("Could not notify session %s of its role release", holder_id)
-            return False
+            return None
         return True
 
     # ── PUT /sessions/{session_id}/read-state ─────────────────────
