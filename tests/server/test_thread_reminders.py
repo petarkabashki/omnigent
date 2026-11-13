@@ -241,3 +241,28 @@ def test_settings_read_env_and_zero_disables() -> None:
     )
     assert (settings.minutes, settings.max_nudges, settings.interval_seconds) == (0, 5, 120)
     assert ReminderSettings.from_env({}) == ReminderSettings()
+
+
+@pytest.mark.parametrize("state", ["waiting_on_owner", role_threads.NO_REPLY_STATE])
+async def test_a_new_message_restarts_the_reminder_sequence(harness: Harness, state: str) -> None:
+    harness.thread(state=state, nudges="2", nudged_at=str(OLD))
+    holder = harness.store.get_conversation(harness.holder_id)
+    assert holder is not None
+    role_threads.record_inbound(
+        harness.store, holder, "Product", "Architect", "m1", "again", 1, now=OLD
+    )
+    assert harness.row()["state"] == "waiting_on_us"
+    assert harness.row()["nudges"] == "0" and harness.row()["nudged_at"] == "0"
+    assert await harness.check() == 1
+    assert len(harness.sent) == 1  # reminded, not escalated
+    assert harness.row()["state"] == "waiting_on_us"
+
+
+@pytest.mark.parametrize("nudges", ["0", "2"])
+async def test_a_blocked_thread_is_neither_nudged_nor_escalated(
+    harness: Harness, nudges: str
+) -> None:
+    harness.thread(state="blocked", nudges=nudges, nudged_at=str(OLD))
+    assert await harness.check() == 0
+    assert harness.sent == []
+    assert harness.row()["state"] == "blocked"

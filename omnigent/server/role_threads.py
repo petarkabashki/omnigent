@@ -334,7 +334,10 @@ def record_inbound(
     if keep_state:
         updates.pop(_label(counterpart, "state"), None)
         del updates[_label(counterpart, "sum")]
-    if not count:
+    if count:
+        # A new message earns the full reminder sequence again.
+        updates.update(_reset_nudges(counterpart))
+    else:
         del updates[_label(counterpart, "unread")], updates[_label(counterpart, "n")]
     if message_id:
         updates[_label(counterpart, "last")] = message_id

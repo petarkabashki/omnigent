@@ -71,7 +71,8 @@ def reminder_text(counterpart: str, unread: int, age_minutes: int, now: int) -> 
 def _is_due(
     row: Mapping[str, Any], fields: Mapping[str, str], now: int, limit_seconds: int
 ) -> bool:
-    if row["unread"] <= 0 or row["state"] in ("done", "waiting_on_owner", NO_REPLY):
+    # A blocked thread waits on something outside the conversation; keep it as marked.
+    if row["unread"] <= 0 or row["state"] in ("done", "blocked", "waiting_on_owner", NO_REPLY):
         return False
     if now - row["updated_at"] < limit_seconds:
         return False
