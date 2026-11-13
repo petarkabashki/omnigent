@@ -5116,6 +5116,15 @@ def _failure_log_detail(error: ErrorDetail | None) -> str:
     return f"{message[:_FAILURE_LOG_DETAIL_MAX_CHARS]}… (+{dropped} chars)"
 
 
+def _schedule_turn_inputs_release(session_id: str) -> None:
+    """Queue fyi messages held for this session's next turn, off-loop."""
+    from omnigent.server.startup_inputs import release_turn_inputs
+
+    store = session_live_state.conversation_store()
+    if store is not None:
+        session_live_state.submit("turn_inputs", release_turn_inputs, store, session_id)
+
+
 def _publish_status(
     session_id: str,
     status: str,
@@ -5204,6 +5213,7 @@ def _publish_status(
         if status == "running":
             # A reply or a resolved approval set the agent going: the wait is answered.
             awaiting_input.schedule_answered(session_id, approval=previous_status == "waiting")
+            _schedule_turn_inputs_release(session_id)
         elif status == "failed":
             awaiting_input.schedule_clear(session_id)
     if status == "idle" and previous_status in ("running", "waiting") and persist_live_status:

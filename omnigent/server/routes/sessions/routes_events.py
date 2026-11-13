@@ -1613,7 +1613,12 @@ def register_events_routes(
         ack = await _dispatch_event(
             request, session_id, body, in_flight, peer_message_id=message_id
         )
-        return {**ack, "message_id": message_id}
+        result = {**ack, "message_id": message_id}
+        if body.data.get("kind") == "fyi" and not ack.get("denied"):
+            # Only a host-bound session has a durable inbox to hold an fyi in.
+            if result.setdefault("delivered_kind", "action") == "action":
+                result["delivered_kind_reason"] = "no durable inbox"
+        return result
 
     async def _record_interrupt_override(
         user_id: str | None, session_id: str, data: dict[str, Any]
@@ -1793,7 +1798,13 @@ def register_events_routes(
         peer_message = body.type == "session_message"
         # The address the sending agent used (role or session), kept on a queued message.
         sent_address: str | None = None
+        # An fyi peer message waits in the durable queue for the receiver's next turn.
+        fyi_message = False
         if peer_message:
+            kind = body.data.get("kind", "action")
+            if kind not in ("action", "fyi"):
+                raise OmnigentError("kind must be 'action' or 'fyi'", code=ErrorCode.INVALID_INPUT)
+            fyi_message = kind == "fyi"
             raw_address = body.data.get("address")
             sent_address = (
                 raw_address
@@ -2225,6 +2236,7 @@ def register_events_routes(
                 or _holds_agent_message_for_busy_session(
                     request, conv, startup, peer_message=peer_message
                 )
+                or (fyi_message and conv.host_id is not None)
             )
         ):
             if peer_message:
@@ -2259,12 +2271,14 @@ def register_events_routes(
                     if peer_message and holds_role(speaker)
                     else None
                 ),
+                deliver_at_turn=fyi_message,
             )
             if conv.host_id is not None:
                 startup.host_changed(request.app, conv.host_id)
             return {
                 "queued": True,
                 "pending_id": pending_inputs.make_pending_id(session_id, saved.id),
+                **({"delivered_kind": "fyi"} if fyi_message else {}),
             }
         # ── Policy evaluation (path-agnostic) ────────────────
         # Evaluate policies BEFORE persistence/runner forwarding so

@@ -369,6 +369,9 @@ class StartupInputOptions(BaseModel):
     sender_thread: str | None = None
     # Set once the input moved from an earlier holder to the role's current one.
     moved: bool = False
+    # An fyi peer message: held until the session's next status edge into running
+    # (a new turn, an approval resolving, or the first status after a hub restart).
+    deliver_at_turn: bool = False
 
 
 # Longest harness message phase kept, e.g. Codex ``"partial_answer"``.

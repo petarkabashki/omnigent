@@ -9,7 +9,7 @@ import re
 import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from starlette.datastructures import Headers
@@ -199,6 +199,63 @@ StartupDispatch = Callable[
 _services: weakref.WeakSet[ManagedStartupInputs] = weakref.WeakSet()
 
 
+def awaits_turn(item: ConversationItem) -> bool:
+    """Whether queued ``item`` is an fyi message held until its session's next turn."""
+    options = (
+        item.data.startup_options
+        if isinstance(item.data, (MessageData, SlashCommandData))
+        else None
+    )
+    return item.status == "in_progress" and options is not None and options.deliver_at_turn
+
+
+def _merged_content(items: list[ConversationItem]) -> list[dict[str, Any]]:
+    """One message body for several held fyi messages, each keeping its own header."""
+    blocks = [block for item in items for block in cast("MessageData", item.data).content]
+    if all(block.get("type") == "input_text" for block in blocks):
+        return [{"type": "input_text", "text": "\n\n".join(block["text"] for block in blocks)}]
+    return blocks
+
+
+def release_turn_inputs(store: ConversationStore, session_id: str) -> None:
+    """Queue the session's held fyi messages now that it is running.
+
+    Held messages for the same addressee merge into the oldest row, so one
+    running edge adds at most one delivery however many fyi were waiting.
+    """
+    groups: dict[str | None, list[ConversationItem]] = {}
+    for item in store.list_pending_inputs(session_id):
+        if awaits_turn(item) and isinstance(item.data, MessageData):
+            groups.setdefault(item.data.startup_options.role_id, []).append(item)  # type: ignore[union-attr]
+    released = False
+    for items in groups.values():
+        head = cast("MessageData", items[0].data)
+        options = cast("StartupInputOptions", head.startup_options)
+        update: dict[str, Any] = {
+            "startup_options": options.model_copy(update={"deliver_at_turn": False})
+        }
+        if len(items) > 1:
+            update["content"] = _merged_content(items)
+        if not store.transition_pending_input(
+            session_id,
+            items[0].id,
+            expected="in_progress",
+            status="in_progress",
+            data=head.model_copy(update=update),
+        ):
+            continue
+        released = True
+        # Discarded only after the merged row is saved: a crash may repeat, never lose.
+        for merged in items[1:]:
+            store.transition_pending_input(
+                session_id, merged.id, expected="in_progress", status=None
+            )
+    if released:
+        conv = store.get_conversation(session_id)
+        if conv is not None and conv.host_id is not None:
+            wake_startup_worker(conv.host_id)
+
+
 def wake_startup_worker(host_id: str) -> None:
     """Prompt a running host worker to look for the next saved input now."""
     key = (current_workspace_id(), host_id)
@@ -248,6 +305,7 @@ class ManagedStartupInputs:
         role_id: str | None = None,
         sender_id: str | None = None,
         sender_thread: str | None = None,
+        deliver_at_turn: bool = False,
     ) -> ConversationItem:
         from omnigent.server.background_session_titles import background_session_titles_enabled
         from omnigent.server.routes._sessions.helpers import (
@@ -287,6 +345,7 @@ class ManagedStartupInputs:
                     role_id=role_id,
                     sender_id=sender_id if role_id else None,
                     sender_thread=sender_thread if role_id else None,
+                    deliver_at_turn=deliver_at_turn,
                 )
             }
         )
@@ -389,7 +448,9 @@ class ManagedStartupInputs:
 
         conv = await asyncio.to_thread(self.conversations.get_conversation, session_id)
         return conv is not None and any(
-            item.status in ("in_progress", "incomplete") and not is_parked(item, conv)
+            item.status in ("in_progress", "incomplete")
+            and not is_parked(item, conv)
+            and not awaits_turn(item)
             for item in await asyncio.to_thread(self.conversations.list_pending_inputs, session_id)
         )
 
@@ -501,7 +562,11 @@ class ManagedStartupInputs:
         # transcript receipt still does: it may already have run. A parked input
         # waits for its role's next holder without blocking this session's own.
         head = next(
-            (item for item in items if item.status != "failed" and not is_parked(item, conv)),
+            (
+                item
+                for item in items
+                if item.status != "failed" and not is_parked(item, conv) and not awaits_turn(item)
+            ),
             None,
         )
         if head is not None:
@@ -538,7 +603,8 @@ class ManagedStartupInputs:
                 )
             return True
         if state is not None and not items:
-            # A runner is bound and nothing is left to deliver.
+            # A runner is bound and nothing is left to deliver. A held fyi counts
+            # as left, so it delays this until its release.
             await self._finish(session_id)
         return False
 

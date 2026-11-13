@@ -12914,6 +12914,11 @@
             "title": "Background Titles Enabled",
             "type": "boolean"
           },
+          "deliver_at_turn": {
+            "default": false,
+            "title": "Deliver At Turn",
+            "type": "boolean"
+          },
           "model_override": {
             "anyOf": [
               {

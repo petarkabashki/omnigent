@@ -34,7 +34,11 @@ class SysSessionMessageTool(Tool):
             "means accepted, not executed; destination policy may still deny it during "
             "startup replay. Check results with "
             "sys_session_get_info/sys_session_get_history. Do not automatically retry an "
-            "uncertain delivery."
+            "uncertain delivery. kind='fyi' marks news the receiver need not act on now: "
+            "it waits without waking the receiver and is delivered once the receiver is "
+            "next busy, together with any other waiting fyi; that may add one turn. A "
+            "receiver without a durable inbox gets it at once, and the result then reports "
+            "delivered_kind='action'. The default kind='action' delivers as usual."
         )
 
     def get_schema(self) -> dict[str, Any]:
@@ -53,6 +57,14 @@ class SysSessionMessageTool(Tool):
                             ),
                         },
                         "message": {"type": "string", "minLength": 1, "maxLength": 8000},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["action", "fyi"],
+                            "description": (
+                                "'action' (default) delivers now; 'fyi' waits until the "
+                                "receiver is next busy instead of waking it."
+                            ),
+                        },
                     },
                     "required": ["session_id", "message"],
                     "additionalProperties": False,

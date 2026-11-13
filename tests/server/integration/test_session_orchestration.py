@@ -71,11 +71,14 @@ async def peers(auth_client, auth_app, db_uri, monkeypatch):
     return source, target, captured
 
 
-async def _send(client, source, target, message="Please inspect the PR"):
+async def _send(client, source, target, message="Please inspect the PR", kind=None):
+    arguments = {"session_id": target["id"], "message": message}
+    if kind is not None:
+        arguments["kind"] = kind
     return json.loads(
         await execute_tool(
             tool_name="sys_session_message",
-            arguments=json.dumps({"session_id": target["id"], "message": message}),
+            arguments=json.dumps(arguments),
             server_client=client,
             conversation_id=source["id"],
         )
@@ -1056,10 +1059,23 @@ async def test_startup_queue_admission_and_replay(
         assert refusal in (await _send(auth_client, source, target))["detail"]
 
 
+async def test_an_fyi_to_a_session_without_a_durable_inbox_reports_action(
+    auth_client, peers, db_uri
+):
+    source, target, captured = peers
+    result = await _send(auth_client, source, target, kind="fyi")
+    assert result["delivered_kind"] == "action"
+    assert result["delivered_kind_reason"] == "no durable inbox"
+    assert SqlAlchemyConversationStore(db_uri).list_pending_inputs(target["id"]) == []
+    assert [path for path, _ in captured.get("posts", []) if path.endswith("/events")]
+
+
+@pytest.mark.parametrize("kind", ["action", "fyi"])
 @pytest.mark.parametrize("busy", [True, False])
 async def test_peer_message_to_a_busy_session_waits_in_the_durable_queue(
-    auth_client, auth_app, peers, db_uri, monkeypatch, busy
+    auth_client, auth_app, peers, db_uri, monkeypatch, busy, kind
 ):
+    """An action waits only while the receiver is busy; an fyi always waits for its next turn."""
     from unittest.mock import AsyncMock
 
     from omnigent.host.frames import HostHelloFrame
@@ -1078,16 +1094,38 @@ async def test_peer_message_to_a_busy_session_waits_in_the_durable_queue(
     startup = auth_app.state.startup_inputs
     monkeypatch.setattr(startup, "host_changed", lambda *_: None)
 
-    result = await _send(auth_client, source, target)
+    result = await _send(auth_client, source, target, kind=kind)
     pending = store.list_pending_inputs(target["id"])
-    if not busy:
+    if not busy and kind == "action":
         assert pending == []
         return
     assert result["queued"] is True
     assert result["pending_id"] and result["message_id"].startswith("msg_")
+    assert result.get("delivered_kind") == ("fyi" if kind == "fyi" else None)
     assert not [path for path, _ in captured.get("posts", []) if path.endswith("/events")]
     [row] = pending
     assert row.data.startup_options.address == target["id"]
+    if kind == "fyi":
+        from omnigent.server import session_live_state
+        from omnigent.server.routes._sessions.helpers import _publish_status
+
+        assert row.data.startup_options.deliver_at_turn
+        assert not await startup.has_undelivered(target["id"])
+        # The server sees the receiver start a turn, with no harness hook involved.
+        submit = session_live_state.submit
+        monkeypatch.setattr(session_live_state, "conversation_store", lambda: store)
+        monkeypatch.setattr(
+            session_live_state,
+            "submit",
+            lambda name, fn, *args, **kw: (
+                fn(*args) if name == "turn_inputs" else submit(name, fn, *args, **kw)
+            ),
+        )
+        _publish_status(target["id"], "idle")
+        _publish_status(target["id"], "running")
+        [row] = store.list_pending_inputs(target["id"])
+        assert not row.data.startup_options.deliver_at_turn
+        assert await startup.has_undelivered(target["id"])
     await startup._deliver(auth_app, target["id"], row)
     delivered = [body for path, body in captured.get("posts", []) if path.endswith("/events")]
     assert len(delivered) == 1 and result["message_id"] in json.dumps(delivered)

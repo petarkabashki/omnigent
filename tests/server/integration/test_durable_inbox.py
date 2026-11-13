@@ -9,10 +9,15 @@ from uuid import uuid4
 import pytest
 from starlette.datastructures import Headers
 
-from omnigent.harness_plugins import CODEX_NATIVE_CODING_AGENT
+from omnigent.harness_plugins import (
+    CLAUDE_NATIVE_CODING_AGENT,
+    CODEX_NATIVE_CODING_AGENT,
+    PI_NATIVE_CODING_AGENT,
+)
 from omnigent.host.frames import HostHelloFrame
 from omnigent.runtime import pending_inputs
-from omnigent.server import startup_inputs
+from omnigent.server import session_live_state, startup_inputs
+from omnigent.server.routes._sessions.helpers import _publish_status
 from omnigent.server.schemas import SessionEventInput
 from omnigent.server.startup_inputs import (
     RESENT_NOTICE,
@@ -139,3 +144,118 @@ async def test_managed_hosts_keep_an_uncertain_input_unsent_after_restart(
     restarted.dispatch = dispatch
     await _recover(restarted, env, session_id, host)
     assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [CLAUDE_NATIVE_CODING_AGENT, CODEX_NATIVE_CODING_AGENT, PI_NATIVE_CODING_AGENT],
+    ids=lambda agent: agent.agent_name,
+)
+async def test_an_fyi_waits_for_the_next_turn_across_a_restart_without_blocking_others(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch, agent: Any
+) -> None:
+    env = startup_env
+    session_id = await _create(env, name=agent.agent_name)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/inbox-workspace")
+    host = env.app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="local", runners=[]),
+        owner=None,
+    )
+    sent: list[SessionEventInput] = []
+
+    async def dispatch(context: StartupInputContext, session_id: str, event: SessionEventInput):
+        assert await context.claim(env.conv_store, session_id)
+        sent.append(event)
+        return {"queued": True, "pending_id": "pending"}
+
+    service = env.app.state.startup_inputs
+    service.dispatch = dispatch
+    await _recover(service, env, session_id, host)
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _TEXT)
+    fyi_text = "[Message from omnigent/Bench] measured, nothing to do"
+    for text, at_turn in ((fyi_text, True), (_PEER_TEXT, False)):
+        event = SessionEventInput(
+            type="message",
+            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+        )
+        await service.enqueue(
+            session_id,
+            event,
+            user_id=None,
+            headers=Headers({}),
+            first=False,
+            deliver_at_turn=at_turn,
+        )
+
+    # Still held after a restart, and the action queued behind it goes first.
+    monkeypatch.setattr(startup_inputs, "_claimed_here", set())
+    restarted = ManagedStartupInputs(env.conv_store, service.hosts)
+    restarted.dispatch = dispatch
+    await _recover(restarted, env, session_id, host)
+    assert [_text(event) for event in sent[1:]] == [_PEER_TEXT]
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _PEER_TEXT)
+    await _recover(restarted, env, session_id, host)
+    assert len(sent) == 2
+
+    # The hub's shared status path releases it; no harness-specific hook runs.
+    monkeypatch.setattr(session_live_state, "conversation_store", lambda: env.conv_store)
+    monkeypatch.setattr(
+        session_live_state,
+        "submit",
+        lambda name, fn, *args, **_kw: fn(*args) if name == "turn_inputs" else None,
+    )
+    _publish_status(session_id, "idle")
+    _publish_status(session_id, "running")
+    await _recover(restarted, env, session_id, host)
+    assert [_text(event) for event in sent[2:]] == [fyi_text]
+
+
+async def test_held_fyi_messages_release_as_one_delivery_per_running_edge(
+    startup_env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = startup_env
+    session_id = await _create(env, name=CLAUDE_NATIVE_CODING_AGENT.agent_name)
+    host_id = uuid4().hex
+    env.conv_store.set_host_id(session_id, host_id, "/tmp/inbox-workspace")
+    host = env.app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(version="test", frame_protocol_version=1, name="local", runners=[]),
+        owner=None,
+    )
+    sent: list[SessionEventInput] = []
+
+    async def dispatch(context: StartupInputContext, session_id: str, event: SessionEventInput):
+        assert await context.claim(env.conv_store, session_id)
+        sent.append(event)
+        return {"queued": True, "pending_id": "pending"}
+
+    service = env.app.state.startup_inputs
+    service.dispatch = dispatch
+    await _recover(service, env, session_id, host)
+    await _simulate_transcript_forwarder_echo(env.client, session_id, _TEXT)
+    texts = [f"[Message from omnigent/Bench] note {number}" for number in range(3)]
+    for text in texts:
+        event = SessionEventInput(
+            type="message",
+            data={"role": "user", "content": [{"type": "input_text", "text": text}]},
+        )
+        await service.enqueue(
+            session_id, event, user_id=None, headers=Headers({}), first=False, deliver_at_turn=True
+        )
+
+    monkeypatch.setattr(session_live_state, "conversation_store", lambda: env.conv_store)
+    monkeypatch.setattr(
+        session_live_state,
+        "submit",
+        lambda name, fn, *args, **_kw: fn(*args) if name == "turn_inputs" else None,
+    )
+    _publish_status(session_id, "idle")
+    _publish_status(session_id, "running")
+    assert len(env.conv_store.list_pending_inputs(session_id)) == 1
+    await _recover(service, env, session_id, host)
+    await _recover(service, env, session_id, host)
+    assert [_text(event) for event in sent[1:]] == ["\n\n".join(texts)]
