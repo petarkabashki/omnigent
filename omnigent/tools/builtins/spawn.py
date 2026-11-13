@@ -598,14 +598,16 @@ class SysSessionListTool(Tool):
                         "title_contains": {
                             "type": "string",
                             "description": (
-                                "Optional: only sessions whose title contains this, ignoring case."
+                                "Optional: only sessions whose displayed title contains "
+                                "this, ignoring case."
                             ),
                         },
                         "workspace": {
                             "type": "string",
                             "description": (
                                 "Optional: only sessions whose working directory is "
-                                "exactly this absolute path."
+                                "exactly this absolute path, as stored: no trailing "
+                                "slash, symlinks not resolved."
                             ),
                         },
                         "compact": {

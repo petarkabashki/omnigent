@@ -1006,6 +1006,12 @@ async def test_list_sessions_filters_by_title_and_workspace(
     assert await listed(title="Product") == {product["id"]}
     assert await listed(title_contains="PRODUCT") == {product["id"], lane["id"]}
     assert await listed(workspace="/srv/repo") == {lane["id"]}
+    # A Claude-native session is found by the description shown as its sidebar title.
+    native = await _create_session(client, agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_labels(
+        native["id"], {"omnigent.claude_native.description": "Fix the Product build"}
+    )
+    assert await listed(title_contains="product build") == {native["id"]}
     assert await listed(workspace="/srv") == set()
 
 

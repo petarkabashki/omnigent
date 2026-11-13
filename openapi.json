@@ -18593,7 +18593,7 @@
             }
           },
           {
-            "description": "Only sessions whose display title contains this, case-insensitively.",
+            "description": "Only sessions whose display title (title, sub-agent name or Claude-native description) contains this, ignoring case; on SQLite case folding covers ASCII only.",
             "in": "query",
             "name": "title_contains",
             "required": false,
