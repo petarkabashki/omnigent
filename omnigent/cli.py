@@ -2444,7 +2444,8 @@ def _runtime_parent_error(exc: BaseException) -> BaseException | None:
         if isinstance(current, RuntimeParentError):
             return current
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        # Explicit chaining only: a crash while handling one is still a crash.
+        current = current.__cause__
     return None
 
 

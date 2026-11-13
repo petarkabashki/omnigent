@@ -154,9 +154,11 @@ def ensure_runtime_parent(env: Mapping[str, str] | None = None) -> Path:
             ensure_shared_dir_is_sticky(parent.parent, my_uid)
         ensure_private_dir(parent, my_uid)
     except (OSError, RuntimeError) as exc:
-        raise RuntimeParentError(
-            f"{exc} (runtime parent, set by {HARNESS_TMP_PARENT_ENV_VAR})"
-        ) from exc
+        if (os.environ if env is None else env).get(HARNESS_TMP_PARENT_ENV_VAR):
+            origin = f"set by {HARNESS_TMP_PARENT_ENV_VAR}"
+        else:
+            origin = f"{parent}; set {HARNESS_TMP_PARENT_ENV_VAR} to move it"
+        raise RuntimeParentError(f"{exc} (runtime parent {origin})") from exc
     return parent
 
 

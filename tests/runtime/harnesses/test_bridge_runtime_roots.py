@@ -16,6 +16,7 @@ import pytest
 from omnigent._platform import stable_user_id
 from omnigent.harnesses.claude_native import bridge as claude_bridge
 from omnigent.inner import claude_sdk_executor
+from omnigent.runtime.harnesses import paths as paths_module
 from omnigent.runtime.harnesses.paths import (
     HARNESS_TMP_PARENT_ENV_VAR,
     RUNTIME_PARENT_MAX,
@@ -228,3 +229,30 @@ def test_parent_errors_are_configuration_errors(short_tmp_dir: Path) -> None:
     shared.chmod(0o777)  # other-writable without the sticky bit
     with pytest.raises(RuntimeParentError, match="sticky"):
         ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(shared / "rp")})
+
+
+def test_parent_error_names_the_variable_only_when_it_is_set(
+    short_tmp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocker = short_tmp_dir / "file"
+    blocker.write_text("")  # mkdir under a regular file fails
+    with pytest.raises(RuntimeParentError, match="set by OMNIGENT_HARNESS_TMP_PARENT"):
+        ensure_runtime_parent({HARNESS_TMP_PARENT_ENV_VAR: str(blocker / "a" / "rp")})
+    monkeypatch.setattr(
+        paths_module, "resolve_harness_tmp_parent", lambda env=None: blocker / "a" / "rp"
+    )
+    with pytest.raises(RuntimeParentError, match="to move it") as excinfo:
+        ensure_runtime_parent({})
+    assert "set by" not in str(excinfo.value)
+
+
+def test_only_an_explicitly_chained_parent_error_is_a_configuration_error() -> None:
+    from omnigent.cli import _runtime_parent_error
+
+    parent_error = RuntimeParentError("bad parent")
+    wrapped = RuntimeError("launch failed")
+    wrapped.__cause__ = parent_error
+    assert _runtime_parent_error(wrapped) is parent_error
+    unrelated = KeyError("crash while handling it")
+    unrelated.__context__ = parent_error
+    assert _runtime_parent_error(unrelated) is None
