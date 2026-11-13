@@ -2665,6 +2665,9 @@ class SessionResponse(BaseModel):
     # ``labels``); set/cleared via ``PATCH /v1/sessions/{id}`` and filtered on
     # ``GET /v1/sessions?project=``.
     project_id: str | None = None
+    # Whether the project or any ancestor is flagged private by the owner;
+    # ``None`` for unfiled sessions or where the response does not compute it.
+    project_private: bool | None = None
     # The session whose Workspace rail lists this one as a side chat; ``None``
     # otherwise, including side chats from before the rail was server-listed.
     side_chat_parent_id: str | None = None
@@ -3493,6 +3496,9 @@ class SessionListItem(BaseModel):
     # unfiled. Lets the sidebar group sessions by project without a follow-up
     # GET. Distinct from the legacy ``omni_project`` label in ``labels``.
     project_id: str | None = None
+    # Whether the project or any ancestor is flagged private by the owner;
+    # ``None`` for unfiled sessions or where the response does not compute it.
+    project_private: bool | None = None
     pull_request: SessionPullRequestSummary | None = None
     pull_requests_synced: bool | None = None
 
@@ -6029,6 +6035,7 @@ class ProjectObject(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     parent_id: str | None = None
     path: str | None = None
+    private: bool = False
 
 
 class ProjectList(BaseModel):
@@ -6054,6 +6061,7 @@ class SessionProjectSummary(BaseModel):
     :param name: Project name (the folder's display name; one path segment).
     :param parent_id: Parent project id for a nested first-class project, else ``None``.
     :param path: Namespace path (``a/b``); the name for roots and label-projects.
+    :param private: Owner-set private-namespace flag on this project record.
     :param icon: The project's chosen emoji icon (a unicode grapheme), read
         from its ``config``; ``None`` when unset or for a label-only folder,
         so the sidebar falls back to the default folder glyph.
@@ -6117,6 +6125,8 @@ class UpdateProjectRequest(BaseModel):
         it unchanged; an empty object ``{}`` clears the stored defaults.
     :param parent_id: Move under this project; an explicit ``null`` moves to the
         root and omitting the field leaves the parent unchanged.
+    :param private: Set or clear the private-namespace flag. Owner only: a call
+        carrying the orchestration header is refused with 403.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -6124,6 +6134,7 @@ class UpdateProjectRequest(BaseModel):
     name: str | None = None
     config: dict[str, Any] | None = None
     parent_id: str | None = None
+    private: bool | None = None
 
     @field_validator("name")
     @classmethod

@@ -819,6 +819,11 @@ class SqlProject(OmnigentBase):
     # Parent project (namespace tree); NULL = a root. No FK, like the other id
     # columns. The path is computed by walking parents, never stored.
     parent_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+    # Owner-set "private namespace" signal; descendants inherit it in session
+    # payloads. Only ``ProjectStore.set_private`` writes it.
+    private: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False
+    )
 
     __table_args__ = (
         # "list my projects" — prefix scan on (workspace_id, user_id) with

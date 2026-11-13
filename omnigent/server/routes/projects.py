@@ -24,6 +24,7 @@ from fastapi import APIRouter, Query, Request
 
 from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.runner.identity import ORCHESTRATION_SOURCE_HEADER
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import _require_access_sync, require_user
 from omnigent.server.routes._sessions.orchestration import _finish_archive
@@ -65,6 +66,7 @@ def _to_response(project: Project, path: str | None = None) -> dict[str, Any]:
         "config": project.config,
         "parent_id": project.parent_id,
         "path": path,
+        "private": project.private,
     }
 
 
@@ -318,9 +320,14 @@ def create_projects_router(
         :returns: The updated project as a serialized dict.
         :raises OmnigentError: 401 if unauthenticated, 404 if not found / not
             owned, 409 if the new name collides with another of the caller's
-            projects.
+            projects, 403 if an agent call tries to change ``private``.
         """
         user_id = require_user(request, auth_provider)
+        if body.private is not None and request.headers.get(ORCHESTRATION_SOURCE_HEADER):
+            # The private flag is the owner's call; agents never set or clear it.
+            raise OmnigentError(
+                "Only the owner can change a project's private flag", code=ErrorCode.FORBIDDEN
+            )
         project = await asyncio.to_thread(
             project_store.update,
             project_id,
@@ -329,6 +336,10 @@ def create_projects_router(
             config=body.config,
             parent_id=body.parent_id if "parent_id" in body.model_fields_set else UNSET,
         )
+        if project is not None and body.private is not None:
+            project = await asyncio.to_thread(
+                project_store.set_private, project_id, user_id=user_id, private=body.private
+            )
         if project is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         # A rename/config change is only ever seen by other connected clients

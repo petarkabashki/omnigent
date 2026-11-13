@@ -53,6 +53,24 @@ def list_projects(client: httpx.Client) -> list[dict[str, Any]]:
     return list(_checked(client.get("/v1/projects")).get("data", []))
 
 
+def find_project(rows: list[dict[str, Any]], project: str) -> dict[str, Any]:
+    """Pick the project whose id equals ``project`` or whose path matches it (any case)."""
+    by_id = [row for row in rows if row.get("id") == project]
+    if by_id:
+        return by_id[0]
+    wanted = project.strip("/").casefold()
+    matches = [row for row in rows if str(row.get("path") or "").casefold() == wanted]
+    if len(matches) != 1:
+        problem = "No project" if not matches else "Several projects"
+        raise OmnigentError(f"{problem} at {project!r}", code=ErrorCode.INVALID_INPUT)
+    return matches[0]
+
+
+def set_project_private(client: httpx.Client, project_id: str, private: bool) -> dict[str, Any]:
+    """Set or clear the project's private-namespace flag (owner only)."""
+    return dict(_checked(client.patch(f"/v1/projects/{project_id}", json={"private": private})))
+
+
 def resolve_address(client: httpx.Client, address: str) -> dict[str, Any]:
     """Resolve a session id, ``project/Role``, ``/Role`` or a bare ``Role``.
 

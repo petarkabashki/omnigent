@@ -73,6 +73,24 @@ def project_path(project: Project, by_id: dict[str, Project]) -> str:
     return "/".join(reversed(segments))
 
 
+def effective_private_ids(parents: dict[str, str | None], flagged: set[str]) -> set[str]:
+    """Return the ids in ``parents`` that are flagged or have a flagged ancestor.
+
+    The walk stops at a missing parent, at a cycle, and at :data:`MAX_PROJECT_DEPTH`.
+    """
+    result: set[str] = set()
+    for project_id in parents:
+        current: str | None = project_id
+        seen: set[str] = set()
+        while current is not None and current not in seen and len(seen) < MAX_PROJECT_DEPTH:
+            if current in flagged:
+                result.add(project_id)
+                break
+            seen.add(current)
+            current = parents.get(current)
+    return result
+
+
 def walk_project_path(projects: list[Project], segments: list[str]) -> list[Project]:
     """Tree-walk ``segments`` from the roots, matching each segment case-insensitively.
 
@@ -270,6 +288,21 @@ class ProjectStore(ABC):
             missing parent, a cycle, or a subtree that would exceed
             :data:`MAX_PROJECT_DEPTH`.
         """
+        ...
+
+    @abstractmethod
+    def set_private(
+        self, project_id: str, *, user_id: str | None, private: bool
+    ) -> Project | None:
+        """Set the owned project's private flag; the only write path for it.
+
+        :returns: The updated project, or ``None`` if not found or not owned.
+        """
+        ...
+
+    @abstractmethod
+    def private_project_ids(self, *, user_id: str | None) -> set[str]:
+        """Return owned project ids that are private themselves or through an ancestor."""
         ...
 
     @abstractmethod

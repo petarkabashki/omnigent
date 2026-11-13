@@ -7848,6 +7848,7 @@ def projects_group(ctx: click.Context) -> None:
     \b
     Examples:
       omnigent projects migrate-slashes --dry-run
+      omnigent projects private acme/research on
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -7898,6 +7899,27 @@ def projects_migrate_slashes(_dry_run: bool, server: str | None) -> None:
         parent = step.parent_path or "(root)"
         click.echo(f"  rename to {step.new_name!r} and move under {parent}")
     click.echo("Dry run only: nothing was changed.")
+
+
+@projects_group.command("private")
+@click.argument("project")
+@click.argument("state", type=click.Choice(["on", "off"]))
+@click.option("--server", default=None, help=_SERVER_OPTION_HELP)
+def projects_private(project: str, state: str, server: str | None) -> None:
+    """Mark a project namespace private (``on``) or clear the flag (``off``).
+
+    PROJECT is a project id or its path (``a/b``). Sessions in the project or
+    any project below it report ``project_private``. Owner only.
+    """
+    from omnigent.session_alias_client import find_project, list_projects, set_project_private
+
+    with _session_api_client(server) as client:
+        row = _alias_cli_call(lambda: find_project(list_projects(client), project))
+        updated = _alias_cli_call(
+            lambda: set_project_private(client, str(row["id"]), state == "on")
+        )
+    label = "private" if updated.get("private") else "not private"
+    click.echo(f"{updated.get('path') or updated.get('name')} is now {label}.")
 
 
 @session.command("alias")

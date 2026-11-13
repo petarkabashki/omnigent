@@ -35,6 +35,7 @@ from omnigent.stores.project_store import (
     ProjectOrderPreference,
     ProjectStore,
     _Unset,
+    effective_private_ids,
     lookup_project_path,
     project_path,
     validate_project_segment,
@@ -118,6 +119,7 @@ def _to_entity(row: SqlProject) -> Project:
         updated_at=row.updated_at,
         config=_decode_config(row.config),
         parent_id=row.parent_id,
+        private=bool(row.private),
     )
 
 
@@ -581,6 +583,33 @@ class SqlAlchemyProjectStore(ProjectStore):
         return run_write_transaction(
             self._session_immediate, "delete_project_with_sessions", write
         )
+
+    def set_private(
+        self, project_id: str, *, user_id: str | None, private: bool
+    ) -> Project | None:
+        """Set the owned project's private flag; ``None`` if not found."""
+        updated_at = now_epoch()
+        project_key = _canonical_id(project_id)
+
+        def write(session: Session) -> Project | None:
+            require_active_account(session, user_id)
+            row = self._owner_rows(session, user_id, lock=True).get(project_key)
+            if row is None:
+                return None
+            if bool(row.private) != private:
+                row.private = private
+                row.updated_at = updated_at
+            return _to_entity(row)
+
+        return run_write_transaction(self._session_immediate, "set_project_private", write)
+
+    def private_project_ids(self, *, user_id: str | None) -> set[str]:
+        """Return ids of owned projects that are private themselves or under a private ancestor."""
+        with self._session("select_private_projects") as session:
+            rows = self._owner_rows(session, user_id)
+            parents = {pid: row.parent_id for pid, row in rows.items()}
+            flagged = {pid for pid, row in rows.items() if row.private}
+        return effective_private_ids(parents, flagged)
 
     def get_path(self, project_id: str, *, user_id: str | None) -> str | None:
         """Return the owned project's namespace path (names joined by ``/``)."""
