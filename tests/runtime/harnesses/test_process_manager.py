@@ -27,6 +27,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -43,6 +44,7 @@ import pytest
 
 from omnigent.native.owner_claim import current_pid_namespace, read_owner_claim, write_owner_claim
 from omnigent.runtime.harnesses import _HARNESS_MODULES
+from omnigent.runtime.harnesses import paths as paths_module
 from omnigent.runtime.harnesses.paths import (
     RUNTIME_PARENT_MAX,
     UNIX_SOCKET_PATH_MAX,
@@ -377,6 +379,41 @@ def test_ensure_runtime_parent_refuses_an_unsafe_parent(
 
     with pytest.raises(RuntimeError, match="refusing to use"):
         runtime_mkdtemp("terminal-")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes.")
+@pytest.mark.parametrize(
+    ("mode", "private_group", "refused"),
+    [
+        (0o777, True, True),  # world-writable, no sticky bit
+        (0o775, False, True),  # writable by a shared group
+        (0o775, True, False),  # umask 002: the user's own private group
+        (0o1777, False, False),  # sticky, like /tmp
+        (0o755, False, False),
+    ],
+)
+def test_ensure_runtime_parent_requires_a_sticky_or_private_enclosing_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    short_tmp: Path,
+    mode: int,
+    private_group: bool,
+    refused: bool,
+) -> None:
+    enclosing = short_tmp / "shared"
+    enclosing.mkdir()
+    enclosing.chmod(mode)
+    parent = enclosing / "omnigent-runtime"
+    monkeypatch.setenv(_TMP_PARENT_ENV_VAR, str(parent))
+    monkeypatch.setattr(paths_module, "_is_private_group", lambda gid, uid: private_group)
+
+    if refused:
+        with pytest.raises(
+            RuntimeError, match=rf"{re.escape(str(enclosing))}.*lacks the sticky bit.*chmod \+t"
+        ):
+            ensure_runtime_parent()
+        assert not parent.exists()
+    else:
+        assert ensure_runtime_parent() == parent
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix socket path limit.")
