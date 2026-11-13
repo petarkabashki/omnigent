@@ -256,7 +256,11 @@ from omnigent.server.schemas import (
     ThreadNoteRequest,
     UpdateSessionRequest,
 )
-from omnigent.server.session_aliases import Namespace, release_role_after_lifecycle
+from omnigent.server.session_aliases import (
+    Namespace,
+    held_role_names,
+    release_role_after_lifecycle,
+)
 from omnigent.server.session_orchestration import require_orchestration_source
 from omnigent.server.shadow_routing import shadow_route_created_session
 from omnigent.spec.types import DEFAULT_ASK_TIMEOUT, Phase
@@ -308,6 +312,42 @@ _SESSION_LIST_BATCH_SIZE = 1000
 # Owner questions in one role request end this long before the caller's one-day
 # read timeout, so an approval can't land after the caller has given up.
 _ROLE_ASK_MARGIN_S = 600.0
+
+
+async def _refuse_agent_role_release(
+    request: Request,
+    body: UpdateSessionRequest,
+    set_project: bool,
+    session_id: str,
+    project_store: ProjectStore | None,
+) -> None:
+    """Refuse an agent PATCH that would release a role its session holds.
+
+    Closing, archiving or moving a session releases its roles; only the owner
+    may do that implicitly. Agent calls carry a runner token or an orchestration
+    source header.
+    """
+    agent_call = (
+        bool((request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip())
+        or ORCHESTRATION_SOURCE_HEADER in request.headers
+    )
+    labels = body.labels or {}
+    releases = (
+        body.archived is not None
+        or labels.get(CLOSED_LABEL_KEY) == CLOSED_LABEL_VALUE
+        or has_closed_title_marker(body.title)
+        or set_project
+        or PROJECT_LABEL_KEY in labels
+    )
+    if not (agent_call and releases):
+        return
+    held = await asyncio.to_thread(held_role_names, project_store, session_id)
+    if held:
+        raise OmnigentError(
+            f"Session {session_id!r} holds {', '.join(held)}; closing, archiving or "
+            "moving it would release the role. Release it first with sys_role_release.",
+            code=ErrorCode.CONFLICT,
+        )
 
 
 def _require_attachment_compatible_history(
@@ -4346,6 +4386,7 @@ def register_core_routes(
         await _require_access(
             user_id, session_id, required_level, permission_store, conversation_store
         )
+        await _refuse_agent_role_release(request, body, set_project, session_id, project_store)
         if body.runner_id is not None and permission_store is not None:
             if not check_session_access(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store

@@ -992,6 +992,12 @@ def plan_force_release(
     return ForceRelease(role=role, namespace=namespace, holder=holder, target=target)
 
 
+def held_role_names(projects: ProjectStore | None, session_id: str) -> list[str]:
+    """Names of the roles the session holds, in any namespace."""
+    roles = _role_store(projects)
+    return [] if roles is None else sorted(role.name for role in roles.held_by([session_id]))
+
+
 def holds_permanent_role(projects: ProjectStore | None, session_id: str) -> bool:
     """Whether the session holds a role the owner marked permanent."""
     roles = _role_store(projects)

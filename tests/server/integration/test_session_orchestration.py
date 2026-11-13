@@ -1550,6 +1550,8 @@ async def test_role_rows_follow_session_lifecycle(auth_client, peers, db_uri):
     assert refused.status_code == 403
     assert roles.get(role_id, user_id="alice").holder_session_id == target["id"]
 
+    # The owner's own calls carry no runner token.
+    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
     # Close through the labels PATCH.
     closed = await auth_client.patch(
         f"/v1/sessions/{target['id']}", json={"labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE}}
@@ -3895,3 +3897,32 @@ async def test_deleting_a_session_moves_or_drops_its_role_mail(
         return
     assert listed["dropped"] == 1
     assert sent["message_id"] in caplog.text
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [{"title": "done :closed: here"}, {"archived": True}],
+    ids=["closed_title", "archive"],
+)
+async def test_an_agent_cannot_release_its_role_by_closing_its_session(
+    auth_client, peers, db_uri, patch
+):
+    source, _, _ = peers
+    await _hold(auth_client, source, "Keeper")
+    response = await auth_client.patch(f"/v1/sessions/{source['id']}", json=patch)
+    assert response.status_code == 409, response.text
+    assert "sys_role_release" in response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id == source["id"]
+    session = SqlAlchemyConversationStore(db_uri).get_conversation(source["id"])
+    assert "omnigent.closed" not in session.labels and not session.archived
+
+
+async def test_an_owner_close_still_releases_the_role(auth_client, peers, db_uri):
+    source, _, _ = peers
+    await _hold(auth_client, source, "Keeper")
+    del auth_client.headers[RUNNER_TUNNEL_TOKEN_HEADER]
+    response = await auth_client.patch(
+        f"/v1/sessions/{source['id']}", json={"title": "done :closed: here"}
+    )
+    assert response.status_code == 200, response.text
+    assert _role_row(db_uri, "Keeper")[0].holder_session_id is None
