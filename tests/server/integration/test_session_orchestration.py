@@ -2281,6 +2281,23 @@ async def test_held_role_conflict_names_the_holder_and_ways_out(
     assert "sys_role_release(role='Keeper', force=true)" in via_tool["detail"]
 
 
+@pytest.mark.parametrize("holder_online", [False, True])
+async def test_agent_take_of_a_held_role_fails_before_asking_the_owner(
+    auth_client, peers, db_uri, owner_verdicts, holder_online
+):
+    source, holder, _ = peers
+    await _hold(auth_client, holder, "Keeper")
+    _bind_runner(db_uri, holder["id"])
+    if holder_online:
+        _mark_runner_online(db_uri, holder)
+    held = await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    assert held["error"].endswith("returned 409")
+    state = "runner online" if holder_online else "runner offline"
+    for part in (holder["id"], state, "force=true"):
+        assert part in held["detail"]
+    assert owner_verdicts["asked"] == [] and _alias_of(db_uri, source) is None
+
+
 async def test_sys_role_list_reports_holder_runner_state(auth_client, peers, db_uri):
     source, holder, _ = peers
     await _hold(auth_client, holder, "Keeper")

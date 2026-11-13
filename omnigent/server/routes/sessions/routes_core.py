@@ -2723,6 +2723,7 @@ def register_core_routes(
         from omnigent.server.role_threads import fold_session_threads
         from omnigent.server.session_aliases import (
             namespace_for_session,
+            require_role_takeable,
             role_handle,
             session_handle,
             set_session_alias,
@@ -2739,6 +2740,17 @@ def register_core_routes(
                 request, user_id, conversation_store, permission_store
             )
             handle = role_handle(namespace_for_session(source, project_store, user_id).path, name)
+            if source.id == session_id:
+                # A take that can't succeed fails now instead of asking the owner first.
+                await asyncio.to_thread(
+                    require_role_takeable,
+                    conversation_store,
+                    project_store,
+                    session=source,
+                    user_id=user_id,
+                    alias=name,
+                    holder_status=_holder_status,
+                )
             await _approve_agent_alias_change(
                 request,
                 user_id,

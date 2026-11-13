@@ -616,6 +616,50 @@ def set_session_alias(
     ).name
 
 
+def require_role_takeable(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    session: Conversation,
+    user_id: str | None,
+    alias: object,
+    holder_status: HolderStatusLookup | None = None,
+) -> None:
+    """Raise the take's conflict early, before an owner is asked to approve it.
+
+    Read-only; :func:`take_role` still decides under the store's CAS.
+    """
+    value = validate_alias(alias)
+    namespace = namespace_for_session(session, projects, user_id)
+    roles = _role_store(projects)
+    if roles is None or projects is None or not _has_roles(namespace):
+        _require_alias_free(conversations, user_id, namespace, value, holder_id=session.id)
+        return
+    role = _namespace_role(roles, namespace, value, user_id)
+    held = roles.held_by([session.id])
+    if held and (role is None or held[0].id != role.id):
+        raise OmnigentError(
+            f"Session {session.id} already holds role {held[0].name!r}; release it first",
+            code=ErrorCode.CONFLICT,
+        )
+    if role is None:
+        holders = find_aliased_sessions(
+            conversations,
+            user_id=user_id,
+            project=namespace.path,
+            alias=value,
+            namespace=namespace,
+        )
+        if len(holders) > 1:
+            raise ambiguous_alias_error(value, namespace.path, holders)
+        if holders and holders[0].id != session.id:
+            raise _held_error(value, namespace.path, holders[0].id)
+        return
+    holder_id = role.holder_session_id
+    if holder_id not in (None, session.id) and _live_holder(conversations, role) is not None:
+        raise _held_error_for(conversations, role.name, namespace.path, holder_id, holder_status)
+
+
 def clear_session_alias(
     conversations: ConversationStore, projects: ProjectStore | None, session_id: str
 ) -> None:
