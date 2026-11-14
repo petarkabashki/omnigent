@@ -751,6 +751,18 @@ class ConversationStore(ABC):
         """Count sessions mid-turn, waiting, or holding a fresh runner, keyed by host id."""
         return {}
 
+    def select_startup_candidates(
+        self,
+        conversation_ids: Sequence[str],
+        *,
+        label_key: str,  # noqa: ARG002
+    ) -> set[str]:
+        """Return the sessions among *conversation_ids* with pending input or *label_key*.
+
+        Recovery sweeps skip the rest. The default keeps every session.
+        """
+        return set(conversation_ids)
+
     def list_host_conversation_ids(
         self,
         host_id: str,  # noqa: ARG002

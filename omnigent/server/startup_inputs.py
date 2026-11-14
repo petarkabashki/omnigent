@@ -54,6 +54,19 @@ RESENT_NOTICE = "[Re-sent after a hub restart; it may be a repeat]"
 _claimed_here: WorkspaceScopedSet[tuple[str, str]] = WorkspaceScopedSet()
 
 
+# Host recovery sweep pacing: busy sweeps repeat quickly, idle ones back off.
+_SWEEP_MIN_DELAY_S = 0.25
+_SWEEP_MAX_DELAY_S = 5.0
+_SWEEP_PAGE_SIZE = 256
+
+
+async def _wait_for_wake(wake: asyncio.Event, delay: float) -> None:
+    """Wait up to *delay* seconds for a wake, then re-arm it."""
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(wake.wait(), timeout=delay)
+    wake.clear()
+
+
 def initial_input_id(session_id: str) -> str:
     """Stable identity for a create request's first input."""
     return uuid5(NAMESPACE_URL, f"initial-input:{session_id}").hex
@@ -507,26 +520,18 @@ class ManagedStartupInputs:
         wake = asyncio.Event()
 
         async def serve() -> None:
-            after = None
-            delay = 0.25
+            delay = _SWEEP_MIN_DELAY_S
             while self.hosts.get(host_id) is connection:
-                busy = False
                 try:
-                    ids = await asyncio.to_thread(
-                        self.conversations.list_host_conversation_ids, host_id, after=after
-                    )
-                    for session_id in ids:
-                        if self.hosts.get(host_id) is not connection:
-                            return
-                        busy |= await self._recover_session(app, session_id, connection)
-                    after = ids[-1] if len(ids) == 32 else None
-                    delay = 0.25 if busy or after else min(delay * 2, 30.0)
+                    busy = await self._sweep_host(app, host_id, connection)
                 except Exception:
                     _logger.exception("Unable to recover startup messages on host %s", host_id)
-                    after = None
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(wake.wait(), timeout=delay)
-                wake.clear()
+                    busy = False
+                if self.hosts.get(host_id) is not connection:
+                    return
+                # Idle sweeps back off whatever the host's size; a wake cuts the wait short.
+                delay = _SWEEP_MIN_DELAY_S if busy else min(delay * 2, _SWEEP_MAX_DELAY_S)
+                await _wait_for_wake(wake, delay)
 
         task = asyncio.create_task(serve(), name=f"startup-inputs-{host_id}")
         self._workers[key] = (connection, task, wake)
@@ -536,6 +541,33 @@ class ManagedStartupInputs:
                 self._workers.pop(key, None)
 
         task.add_done_callback(remove_worker)
+
+    async def _sweep_host(self, app: Any, host_id: str, connection: HostConnection) -> bool:
+        """Advance every session on the host that has startup work; return whether any is busy."""
+        busy = False
+        after: str | None = None
+        while True:
+            ids = await asyncio.to_thread(
+                self.conversations.list_host_conversation_ids,
+                host_id,
+                after=after,
+                limit=_SWEEP_PAGE_SIZE,
+            )
+            if not ids:
+                return busy
+            # Sessions with neither pending input nor a startup label have nothing to advance.
+            candidates = await asyncio.to_thread(
+                self.conversations.select_startup_candidates, ids, label_key=STARTUP_LABEL
+            )
+            for session_id in ids:
+                if session_id not in candidates:
+                    continue
+                if self.hosts.get(host_id) is not connection:
+                    return busy
+                busy |= await self._recover_session(app, session_id, connection)
+            if len(ids) < _SWEEP_PAGE_SIZE:
+                return busy
+            after = ids[-1]
 
     async def _recover_session(
         self, app: Any, session_id: str, connection: HostConnection

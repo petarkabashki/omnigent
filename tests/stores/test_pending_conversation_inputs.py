@@ -140,6 +140,23 @@ def test_host_pagination_and_workspace_isolation(db_uri):
     assert "ix_conversation_metadata_host_id" in str(plan)
 
 
+def test_startup_candidates_are_sessions_with_pending_input_or_the_label(db_uri):
+    store = SqlAlchemyConversationStore(db_uri)
+    pending, labelled, idle = (store.create_conversation().id for _ in range(3))
+    store.append(pending, [_input()])
+    store.set_labels(labelled, {"omnigent.startup": "ready"})
+    store.set_labels(idle, {"other": "x"})
+
+    ids = [pending, labelled, idle]
+    assert store.select_startup_candidates(ids, label_key="omnigent.startup") == {
+        pending,
+        labelled,
+    }
+    assert store.select_startup_candidates([], label_key="omnigent.startup") == set()
+    with workspace_scope(17):
+        assert store.select_startup_candidates(ids, label_key="omnigent.startup") == set()
+
+
 @pytest.mark.asyncio
 async def test_deleting_conversation_deletes_pending_input(db_uri):
     store = SqlAlchemyConversationStore(db_uri)

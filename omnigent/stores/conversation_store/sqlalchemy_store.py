@@ -28,6 +28,7 @@ from sqlalchemy import (
     select,
     text,
     tuple_,
+    union,
     update,
 )
 from sqlalchemy.orm import QueryableAttribute, Session, load_only
@@ -3043,6 +3044,30 @@ class SqlAlchemyConversationStore(ConversationStore):
             query = query.where(SqlConversationMetadata.id > after)
         with self._session("list_host_conversations") as session:
             return list(session.scalars(query.order_by(SqlConversationMetadata.id).limit(limit)))
+
+    def select_startup_candidates(
+        self,
+        conversation_ids: Sequence[str],
+        *,
+        label_key: str,
+    ) -> set[str]:
+        if not conversation_ids:
+            return set()
+        workspace_id = current_workspace_id()
+        ids = list(conversation_ids)
+        # Both arms seek per conversation: the response-id index and the label primary key.
+        pending = select(SqlConversationItem.conversation_id).where(
+            SqlConversationItem.workspace_id == workspace_id,
+            SqlConversationItem.conversation_id.in_(ids),
+            SqlConversationItem.response_id == PENDING_INPUT_RESPONSE_ID,
+        )
+        labelled = select(SqlConversationLabel.conversation_id).where(
+            SqlConversationLabel.workspace_id == workspace_id,
+            SqlConversationLabel.conversation_id.in_(ids),
+            SqlConversationLabel.key == label_key,
+        )
+        with self._conv_session("select_startup_candidates") as session:
+            return set(session.scalars(union(pending, labelled)))
 
     def count_running_sessions_by_host(self, host_ids: Sequence[str]) -> dict[str, int]:
         if not host_ids:
