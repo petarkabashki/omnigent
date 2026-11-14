@@ -54,6 +54,9 @@ _RELEASE_CAS_ATTEMPTS = 3
 _LANE_PATTERN = re.compile(r"[a-z0-9-]{1,32}")
 # ``main`` is the holder's implicit lane; ``*`` stays free for a future broadcast.
 _RESERVED_LANES = frozenset({"main"})
+# sys_role_list shows at most this many lanes per role and counts the rest.
+_LANE_LIST_CAP = 20
+_LANE_STALE_SECONDS = 24 * 3600
 _LANE_PURPOSE_MAX = 200
 _LANE_ITEM_MAX = 32
 _RELEASE_HOOK_ATTEMPTS = 3
@@ -1718,14 +1721,46 @@ def list_namespace_roles(
                     "holder_session_id": session.id,
                 }
             )
-    held_ids = sorted({e["holder_session_id"] for e in entries if e["holder_session_id"]})
+    lanes = roles.lanes_of_roles(role.id for role in rows) if roles is not None and rows else []
+    held_ids = sorted(
+        {e["holder_session_id"] for e in entries if e["holder_session_id"]}
+        | {lane.session_id for lane in lanes}
+    )
     statuses = holder_status(held_ids) if holder_status is not None and held_ids else {}
     for entry in entries:
         status = statuses.get(entry["holder_session_id"]) or HolderStatus()
         entry["runner_online"] = status.runner_online
         entry["runner_last_seen"] = status.runner_last_seen
         entry["last_activity_at"] = status.last_activity_at
+        entry["lanes"], entry["lanes_more"] = [], 0
+    by_role = {entry["role_id"]: entry for entry in entries if entry["role_id"]}
+    for lane in lanes:
+        entry = by_role.get(lane.role_id)
+        if entry is None:
+            continue
+        if len(entry["lanes"]) >= _LANE_LIST_CAP:
+            entry["lanes_more"] += 1
+            continue
+        entry["lanes"].append(_lane_entry(conversations, lane, statuses.get(lane.session_id)))
     return sorted(entries, key=lambda entry: entry["name"].casefold())
+
+
+def _lane_entry(
+    conversations: ConversationStore, lane: RoleLane, status: HolderStatus | None
+) -> dict[str, Any]:
+    """One lane in a role listing; a lane idle for a day, or whose session is gone, is stale."""
+    open_ = _live_lane_session(conversations, lane) is not None
+    last_activity = status.last_activity_at if status is not None else None
+    idle = last_activity is not None and time.time() - last_activity > _LANE_STALE_SECONDS
+    return {
+        "name": lane.name,
+        "session_id": lane.session_id,
+        "purpose": lane.purpose,
+        "item": lane.item,
+        "state": "open" if open_ else "gone",
+        "last_activity": last_activity,
+        "stale": not open_ or idle,
+    }
 
 
 def messaging_handle(

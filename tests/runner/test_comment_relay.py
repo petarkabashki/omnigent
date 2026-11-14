@@ -464,6 +464,7 @@ async def test_terminal_launch_with_bridge_inject_advertises_comment_tools(
         "sys_role_list",
         "sys_role_take",
         "sys_role_release",
+        "sys_lane_claim",
         "sys_thread_list",
         "sys_thread_history",
         "sys_thread_note",

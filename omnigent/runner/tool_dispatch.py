@@ -88,6 +88,7 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
+from omnigent.tools.builtins.role_list import compact_role_listing
 from omnigent.tools.builtins.session_message import (
     SysSessionMessageTool,
     peer_session_messaging_enabled,
@@ -5465,6 +5466,9 @@ async def _role_list_via_rest(
     namespace = args.get("namespace")
     if namespace is not None and not isinstance(namespace, str):
         return json.dumps({"error": "sys_role_list: namespace must be a string"})
+    role = args.get("role")
+    if role is not None and not isinstance(role, str):
+        return json.dumps({"error": "sys_role_list: role must be a string"})
     try:
         resp = await server_client.get(
             "/v1/sessions/aliases/roles",
@@ -5479,7 +5483,8 @@ async def _role_list_via_rest(
             {"error": f"sys_role_list returned {resp.status_code}", "detail": resp.text[:200]}
         )
     payload = resp.json()
-    return json.dumps({"namespace": payload.get("namespace"), "roles": payload.get("data", [])})
+    roles = compact_role_listing(payload.get("data", []), role)
+    return json.dumps({"namespace": payload.get("namespace"), "roles": roles})
 
 
 async def _thread_list_with_groups(

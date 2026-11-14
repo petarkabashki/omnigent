@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from omnigent.server.session_aliases import (
     AddressTarget,
     Namespace,
     claim_lane,
+    list_namespace_roles,
     messaging_route_resolver,
     release_session_role,
     resolve_address_target,
@@ -23,6 +25,7 @@ from omnigent.stores.conversation_store import LANE_NAME_LABEL_KEY, ROLE_LANE_LA
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+from omnigent.tools.builtins.role_list import compact_role_listing
 from omnigent.util.session_lifecycle import CLOSED_LABEL_KEY, CLOSED_LABEL_VALUE
 
 OWNER = "alice"
@@ -270,3 +273,59 @@ def test_the_policy_route_names_the_lane_and_its_role(stores: SimpleNamespace) -
     # Addressing the lane session by id is still a message to that lane.
     assert resolve(sender, worker, OWNER) == to_lane
     assert resolve(sender, "Architect", OWNER) == MessageRoute(to_lane.sender, "/Architect")
+
+
+def _roles(stores: SimpleNamespace) -> dict[str, dict]:
+    listed = list_namespace_roles(
+        stores.conversations, stores.projects, namespace=ROOT, user_id=OWNER
+    )
+    return {entry["name"]: entry for entry in listed}
+
+
+def test_the_role_list_shows_each_roles_lanes(stores: SimpleNamespace) -> None:
+    holder = _holder(stores)
+    _holder(stores, "Bench")
+    worker, gone = _session(stores), _session(stores)
+    _claim(stores, worker, by=holder, purpose="host flap", item="C30")
+    _claim(stores, gone, "c31", by=holder)
+    stores.conversations.set_labels(gone, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
+
+    listed = _roles(stores)
+
+    assert listed["Bench"]["lanes"] == [] and listed["Bench"]["lanes_more"] == 0
+    c30, c31 = listed["Architect"]["lanes"]
+    assert {k: c30[k] for k in ("name", "session_id", "purpose", "item", "state", "stale")} == {
+        "name": "c30",
+        "session_id": worker,
+        "purpose": "host flap",
+        "item": "C30",
+        "state": "open",
+        "stale": False,
+    }
+    assert (c31["state"], c31["stale"]) == ("gone", True)
+
+
+def test_the_role_list_caps_lanes_and_stays_small(stores: SimpleNamespace) -> None:
+    for role in [f"Role{index}" for index in range(6)]:
+        holder = _holder(stores, role)
+        for index in range(22 if role == "Role5" else 10):
+            _claim(
+                stores,
+                _session(stores),
+                f"lane-{index:02d}",
+                by=holder,
+                role=role,
+                purpose="measure the idle CPU of the hub after a restart",
+                item="C30",
+            )
+
+    listed = _roles(stores)
+
+    assert (len(listed["Role5"]["lanes"]), listed["Role5"]["lanes_more"]) == (20, 2)
+    del listed["Role5"]
+    tool_result = {"namespace": "/", "roles": compact_role_listing(list(listed.values()))}
+    assert tool_result["roles"][0]["lanes"][0] == "lane-00 open C30"
+    # Five roles of ten lanes fit the sys_role_list budget.
+    assert len(json.dumps(tool_result)) < 4000
+    (only,) = compact_role_listing(list(listed.values()), "role0")
+    assert only["lanes"][0]["purpose"].startswith("measure")
