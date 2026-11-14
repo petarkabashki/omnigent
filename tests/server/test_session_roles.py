@@ -18,6 +18,7 @@ from omnigent.db.db_models import SqlProject
 from omnigent.db.utils import get_or_create_engine
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import LEVEL_OWNER
+from omnigent.server.routes.sessions import routes_events
 from omnigent.server.session_aliases import (
     Namespace,
     claim_alias_for_new_session,
@@ -645,6 +646,25 @@ def test_lifecycle_release_retries_then_logs_without_raising(
 
     assert len(calls) == 3
     assert "Releasing the role" in caplog.text
+
+
+def test_a_close_still_releases_when_reading_the_role_fails(
+    stores: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _session(stores)
+    _put(stores, session, "Bench")
+
+    def fail(*_args: object, **_kwargs: object) -> list[str]:
+        raise RuntimeError("role read failed")
+
+    monkeypatch.setattr(routes_events, "held_role_names", fail)
+
+    routes_events._release_role_on_close(stores.conversations, stores.projects, session)
+
+    assert _role(stores, "Bench").holder_session_id is None
+    assert "Reading the roles of closed session" in caplog.text
 
 
 def test_lifecycle_release_recovers_on_a_retry(
