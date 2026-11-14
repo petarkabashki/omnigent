@@ -2522,6 +2522,38 @@ async def test_an_owner_answer_after_a_role_question_expires_is_told_it_came_too
     assert _alias_of(db_uri, source) is None
 
 
+async def test_a_repeat_answer_to_an_approved_role_question_is_not_called_too_late(
+    auth_client, peers, db_uri, monkeypatch
+):
+    from omnigent.server._elicitation_registry import _harness_elicitation_registry
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    asked_ids = []
+    register = routes_core.register_role_ask
+
+    def capture(elicitation_id, deadline):
+        asked_ids.append(elicitation_id)
+        register(elicitation_id, deadline)
+
+    monkeypatch.setattr(routes_core, "register_role_ask", capture)
+    take = asyncio.create_task(_role_tool(auth_client, source, "sys_role_take", role="Keeper"))
+    for _ in range(200):
+        if asked_ids and asked_ids[0] in _harness_elicitation_registry:
+            break
+        await asyncio.sleep(0.01)
+    [elicitation_id] = asked_ids
+    url = f"/v1/sessions/{source['id']}/elicitations/{elicitation_id}/resolve"
+
+    first = await auth_client.post(url, json={"action": "accept"})
+    assert first.json() == {"queued": False}
+    assert await take == {"taken": True, "role": "Keeper"}
+    # A second tab or a double submit answers the same card again.
+    repeat = await auth_client.post(url, json={"action": "accept"})
+    assert repeat.status_code == 202 and "expired" not in repeat.json()
+    assert _alias_of(db_uri, source) == "Keeper"
+
+
 async def test_a_holder_releasing_its_permanent_role_is_asked_once_naming_it_permanent(
     auth_client, peers, db_uri, owner_verdicts
 ):
@@ -2550,7 +2582,10 @@ async def test_a_permanent_role_stays_permanent_when_vacated_and_retaken(
     assert labels[ROLE_RELEASED_PERMANENT_LABEL_KEY] == "true"
     assert "permanent role /Keeper" in role_release_instruction(labels)
 
-    await _hold(auth_client, source, "Keeper")
+    # An agent taking the vacant role is asked about it as a PERMANENT role.
+    taken = await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    assert taken == {"taken": True, "role": "Keeper"}
+    assert "take the PERMANENT role '/Keeper'" in owner_verdicts["asked"][-1][1]
     assert _role_row(db_uri, "Keeper")[0].permanent is True
 
 

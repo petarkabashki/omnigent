@@ -77,6 +77,7 @@ from omnigent.server._elicitation_registry import (
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
     expire_role_ask,
+    forget_role_ask,
     register_role_ask,
 )
 from omnigent.server.auth import (
@@ -2836,7 +2837,7 @@ def register_core_routes(
                 "the caller left; nothing was changed. Ask again.",
                 code=ErrorCode.CONFLICT,
             )
-        expire_role_ask(elicitation_id)
+        forget_role_ask(elicitation_id)
         if verdict.action != "accept":
             raise OmnigentError(
                 "The owner did not approve the role change; nothing was changed",
@@ -2854,6 +2855,7 @@ def register_core_routes(
             namespace_for_session,
             require_role_takeable,
             role_handle,
+            role_is_permanent,
             session_handle,
             set_session_alias,
             validate_alias,
@@ -2868,7 +2870,8 @@ def register_core_routes(
             source = require_orchestration_source(
                 request, user_id, conversation_store, permission_store
             )
-            handle = role_handle(namespace_for_session(source, project_store, user_id).path, name)
+            namespace = namespace_for_session(source, project_store, user_id)
+            handle = role_handle(namespace.path, name)
             if source.id == session_id:
                 # A take that can't succeed fails now instead of asking the owner first.
                 await asyncio.to_thread(
@@ -2880,12 +2883,20 @@ def register_core_routes(
                     alias=name,
                     holder_status=_holder_status,
                 )
+            permanent = await asyncio.to_thread(
+                role_is_permanent,
+                project_store,
+                namespace=namespace,
+                user_id=user_id,
+                name=name,
+            )
+            kind = "PERMANENT role" if permanent else "role handle"
             await _approve_agent_alias_change(
                 request,
                 user_id,
                 session_id,
                 f"Session '{source.title or source.id}' ({source.id}) asks to take the "
-                f"role handle '{handle}'. Approve?",
+                f"{kind} '{handle}'. Approve?",
             )
         else:
             await _require_access_and_level(

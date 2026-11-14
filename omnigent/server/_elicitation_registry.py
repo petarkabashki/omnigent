@@ -146,6 +146,11 @@ def expire_role_ask(elicitation_id: str) -> None:
         )
 
 
+def forget_role_ask(elicitation_id: str) -> None:
+    """Drop a role question the owner answered in time; a repeat answer is a no-op."""
+    _role_ask_deadlines.pop(elicitation_id, None)
+
+
 def role_ask_expired(elicitation_id: str) -> bool:
     """Whether ``elicitation_id`` is a role question no longer taking answers."""
     deadline = _role_ask_deadlines.get(elicitation_id)
@@ -178,6 +183,7 @@ __all__ = [
     "_harness_parked_elicitations",
     "_harness_pre_resolved_elicitations",
     "expire_role_ask",
+    "forget_role_ask",
     "register_role_ask",
     "role_ask_expired",
 ]

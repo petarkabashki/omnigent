@@ -1004,6 +1004,14 @@ def holds_permanent_role(projects: ProjectStore | None, session_id: str) -> bool
     return roles is not None and any(role.permanent for role in roles.held_by([session_id]))
 
 
+def role_is_permanent(
+    projects: ProjectStore | None, *, namespace: Namespace, user_id: str | None, name: str
+) -> bool:
+    """Whether ``name`` in ``namespace`` has a role record the owner marked permanent."""
+    role = _namespace_role(_role_store(projects), namespace, name, user_id)
+    return role is not None and role.permanent
+
+
 def plan_role_permanent(
     projects: ProjectStore | None,
     *,
