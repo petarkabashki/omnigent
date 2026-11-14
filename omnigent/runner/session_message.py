@@ -15,8 +15,11 @@ from omnigent.runner.session_requests import (
 )
 from omnigent.tools.builtins.session_message import peer_session_messaging_enabled
 
-# ``Role`` or ``project/Role``; anything else that is not a session id is rejected.
-_ALIAS_ADDRESS = re.compile(r"(?:[A-Za-z][A-Za-z0-9._-]*/)?[A-Za-z][A-Za-z0-9_-]{0,31}")
+# ``Role``, ``project/Role`` or either with a ``/lane``; anything else that is not a
+# session id is rejected.
+_ALIAS_ADDRESS = re.compile(
+    r"(?:/|[A-Za-z][A-Za-z0-9._-]*/)?[A-Za-z][A-Za-z0-9_-]{0,31}(?:/[a-z0-9-]{1,32})?"
+)
 
 
 async def execute_message_tool(
@@ -28,6 +31,7 @@ async def execute_message_tool(
     except ValueError:
         target = None  # not an id; resolved as an alias below
     message = args.get("message")
+    lane_fields: dict[str, Any] = {}
     if target is None:
         if not isinstance(address, str) or not _ALIAS_ADDRESS.fullmatch(address):
             return json.dumps({"error": "Provide a valid session_id (UUID or numeric managed ID)"})
@@ -36,7 +40,8 @@ async def execute_message_tool(
         resolved = await _resolve_alias(client, source_id, address)
         if "error" in resolved:
             return json.dumps(resolved)
-        target = resolved["session_id"]
+        target = resolved.pop("session_id")
+        lane_fields = resolved
     if not isinstance(message, str) or not message.strip() or len(message) > 8000:
         return json.dumps({"error": "Provide a non-blank message of 1–8000 characters"})
     kind = args.get("kind", "action")
@@ -87,7 +92,7 @@ async def execute_message_tool(
             acknowledgement["error"] = (
                 f"Session message denied by policy: {acknowledgement.get('reason', 'Denied')}"
             )
-        return json.dumps(acknowledgement)
+        return json.dumps({**acknowledgement, **lane_fields})
     except ValueError:
         return json.dumps(
             {"error": "Delivery could not be confirmed; do not automatically resend"}
@@ -111,6 +116,11 @@ async def _resolve_alias(
         return {"error": f"Could not resolve {address!r}", "detail": response.text[:500]}
     try:
         body = response.json()
-        return {"session_id": normalize_session_id(body["session_id"])}
+        resolved: dict[str, Any] = {"session_id": normalize_session_id(body["session_id"])}
     except (ValueError, KeyError, TypeError):
         return {"error": f"Could not resolve {address!r}"}
+    # A role-lane address reports whether the lane or the holder received it.
+    for key in ("lane", "delivered_to", "reason"):
+        if isinstance(body.get(key), str):
+            resolved[key] = body[key]
+    return resolved

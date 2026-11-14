@@ -7,12 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.policies.builtins.messaging import MessageRoute
 from omnigent.server.auth import LEVEL_OWNER
 from omnigent.server.routes.sessions import routes_events
 from omnigent.server.session_aliases import (
+    AddressTarget,
     Namespace,
     claim_lane,
+    messaging_route_resolver,
     release_session_role,
+    resolve_address_target,
     set_session_alias,
 )
 from omnigent.stores.conversation_store import LANE_NAME_LABEL_KEY, ROLE_LANE_LABEL_KEY
@@ -197,3 +201,72 @@ def test_release_and_holder_change_keep_the_lanes(stores: SimpleNamespace) -> No
     with pytest.raises(OmnigentError) as caught:
         _claim(stores, _session(stores), "c32", by=holder)
     assert caught.value.code == ErrorCode.FORBIDDEN
+
+
+def _resolve(stores: SimpleNamespace, address: str, source: str) -> AddressTarget:
+    return resolve_address_target(
+        stores.conversations,
+        stores.projects,
+        address=address,
+        user_id=OWNER,
+        source=_get(stores, source),
+        default_namespace=ROOT,
+    )
+
+
+def test_a_lane_address_delivers_to_the_lane(stores: SimpleNamespace) -> None:
+    holder = _holder(stores)
+    worker, sender = _session(stores), _session(stores)
+    _claim(stores, worker, by=holder)
+
+    for address in ("Architect/c30", "/Architect/c30"):
+        assert _resolve(stores, address, sender) == AddressTarget(
+            worker, "/Architect/c30", "/Architect", "lane"
+        )
+    # Role addresses resolve exactly as before.
+    assert _resolve(stores, "Architect", sender) == AddressTarget(holder)
+
+
+def test_a_missing_or_closed_lane_falls_back_to_the_holder(stores: SimpleNamespace) -> None:
+    holder = _holder(stores)
+    worker, sender = _session(stores), _session(stores)
+    _claim(stores, worker, by=holder)
+
+    missing = _resolve(stores, "Architect/c99", sender)
+    assert (missing.session_id, missing.delivered_to, missing.reason) == (
+        holder,
+        "holder",
+        "lane c99 not found",
+    )
+    _close(stores, worker)
+    closed = _resolve(stores, "Architect/c30", sender)
+    assert (closed.session_id, closed.delivered_to) == (holder, "holder")
+
+
+def test_a_lane_of_a_vacant_role_or_unknown_role_is_not_found(stores: SimpleNamespace) -> None:
+    holder = _holder(stores)
+    sender = _session(stores)
+    release_session_role(stores.conversations, stores.projects, holder)
+
+    for address in ("Architect/c30", "Nobody/c30", "Architect/main"):
+        with pytest.raises(OmnigentError) as caught:
+            _resolve(stores, address, sender)
+        assert caught.value.code == ErrorCode.NOT_FOUND
+
+
+def test_the_policy_route_names_the_lane_and_its_role(stores: SimpleNamespace) -> None:
+    holder = _holder(stores)
+    worker, sender = _session(stores), _session(stores)
+    _claim(stores, worker, by=holder)
+    resolve = messaging_route_resolver(stores.conversations, stores.projects)
+
+    to_lane = resolve(sender, "Architect/c30", OWNER)
+    assert to_lane is not None
+    assert (to_lane.target, to_lane.role_target) == ("/Architect/c30", "/Architect")
+    # The fallback keeps the lane name, so a lane rule still applies to it.
+    assert resolve(sender, "Architect/c99", OWNER) == MessageRoute(
+        to_lane.sender, "/Architect/c99", role_target="/Architect"
+    )
+    # Addressing the lane session by id is still a message to that lane.
+    assert resolve(sender, worker, OWNER) == to_lane
+    assert resolve(sender, "Architect", OWNER) == MessageRoute(to_lane.sender, "/Architect")

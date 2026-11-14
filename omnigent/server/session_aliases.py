@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from omnigent.entities import Conversation, Role, RoleLane
 from omnigent.errors import ErrorCode, OmnigentError
@@ -1518,6 +1518,121 @@ def resolve_session_address(
     return matches[0].id
 
 
+@dataclass(frozen=True)
+class AddressTarget:
+    """Where an address delivers; the lane fields are set for a ``Role/lane`` address only."""
+
+    session_id: str
+    lane: str | None = None
+    role: str | None = None
+    delivered_to: Literal["lane", "holder"] | None = None
+    reason: str | None = None
+
+
+def resolve_address_target(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    address: object,
+    user_id: str | None,
+    source: Conversation | None,
+    default_namespace: Namespace | None = None,
+) -> AddressTarget:
+    """Resolve an address like :func:`resolve_session_address`, plus role lanes.
+
+    ``Role/lane``, ``/Role/lane`` and ``<path>/Role/lane`` are read as lanes only
+    when the existing reading fails, so every address that resolved before still
+    resolves the same way. A missing or closed lane delivers to the role's holder.
+    """
+    try:
+        return AddressTarget(
+            resolve_session_address(
+                conversations,
+                projects,
+                address=address,
+                user_id=user_id,
+                source=source,
+                default_namespace=default_namespace,
+            )
+        )
+    except OmnigentError as error:
+        if error.code not in (ErrorCode.NOT_FOUND, ErrorCode.INVALID_INPUT):
+            raise
+        target = _resolve_lane_address(
+            conversations,
+            projects,
+            text=address.strip() if isinstance(address, str) else "",
+            user_id=user_id,
+            source=source,
+            default_namespace=default_namespace,
+        )
+        if target is None:
+            raise
+        return target
+
+
+def _resolve_lane_address(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    text: str,
+    user_id: str | None,
+    source: Conversation | None,
+    default_namespace: Namespace | None,
+) -> AddressTarget | None:
+    head, _, lane = text.rpartition("/")
+    path, slash, role_name = head.rpartition("/")
+    if not _LANE_PATTERN.fullmatch(lane) or lane in _RESERVED_LANES:
+        return None
+    if not ALIAS_PATTERN.match(role_name):
+        return None
+    try:
+        namespace = (
+            resolve_namespace(conversations, projects, path, user_id)
+            if slash
+            else default_namespace or namespace_for_session(source, projects, user_id)
+        )
+    except OmnigentError:
+        return None
+    roles = _role_store(projects)
+    row = _namespace_role(roles, namespace, role_name, user_id)
+    if roles is None or row is None:
+        return None
+    lane_text = lane_handle(namespace.path, row.name, lane)
+    role_text = role_handle(namespace.path, row.name)
+    claimed = roles.find_lane(row.id, lane)
+    if claimed is not None and _live_lane_session(conversations, claimed) is not None:
+        return AddressTarget(claimed.session_id, lane_text, role_text, "lane")
+    holder = _live_holder(conversations, row)
+    if holder is None:
+        raise OmnigentError(
+            f"Lane {lane_text!r} is not open and role {role_text!r} is vacant; "
+            "sys_role_list shows the roles and their lanes",
+            code=ErrorCode.NOT_FOUND,
+        )
+    state = "closed" if claimed is not None else "not found"
+    return AddressTarget(holder.id, lane_text, role_text, "holder", f"lane {lane} {state}")
+
+
+def lane_route_handles(
+    projects: ProjectStore | None,
+    session: Conversation,
+    user_id: str | None,
+) -> tuple[str, str] | None:
+    """``(lane handle, role handle)`` for a session that works a lane, else ``None``."""
+    roles = _role_store(projects)
+    lane = roles.lane_of(session.id) if roles is not None else None
+    role = (
+        roles.get(lane.role_id, user_id=user_id)
+        if roles is not None and lane is not None
+        else None
+    )
+    if lane is None or role is None:
+        return None
+    path = session_project_name(session, projects, user_id)
+    return lane_handle(path, role.name, lane.name), role_handle(path, role.name)
+
+
 def alias_entries(
     sessions: Iterable[Conversation], projects: ProjectStore | None, user_id: str | None
 ) -> list[dict[str, Any]]:
@@ -1637,17 +1752,23 @@ def messaging_route_resolver(
         if sender is None:
             return None
         try:
-            target_id = resolve_session_address(
+            resolved = resolve_address_target(
                 conversations, projects, address=address, user_id=user_id, source=sender
             )
         except OmnigentError:
             return None
-        target = conversations.get_conversation(target_id)
+        target = conversations.get_conversation(resolved.session_id)
         if target is None:
             return None
-        return MessageRoute(
-            messaging_handle(sender, projects, user_id),
-            messaging_handle(target, projects, user_id),
+        sender_handle = messaging_handle(sender, projects, user_id)
+        # A lane address keeps its full name even when it falls back to the holder.
+        lane = (
+            (resolved.lane, resolved.role)
+            if resolved.lane is not None and resolved.role is not None
+            else lane_route_handles(projects, target, user_id)
         )
+        if lane is not None:
+            return MessageRoute(sender_handle, lane[0], role_target=lane[1])
+        return MessageRoute(sender_handle, messaging_handle(target, projects, user_id))
 
     return resolve

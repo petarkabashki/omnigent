@@ -240,3 +240,35 @@ def test_add_allow_rule_writes_atomically_and_policy_sees_it(tmp_path, routes) -
     os.utime(path, (path.stat().st_mtime + 5,) * 2)
     assert policy(_message("k"))["result"] == "ALLOW"
     assert "# keep this" in path.read_text()
+
+
+LANE_RULES = """
+default: deny
+rules:
+  - {from: "*", to: "omnigent/Architect", action: ask}
+  - {from: "*", to: "omnigent/Architect/c30", action: allow}
+"""
+
+
+def test_a_lane_rule_beats_an_earlier_role_rule() -> None:
+    lane = MessageRoute("a/X", "omnigent/Architect/c30", role_target="omnigent/Architect")
+    decision = parse_rules(LANE_RULES).match(lane, NOW)
+    assert (decision.action, decision.rule_index) == ("ALLOW", 2)
+
+
+def test_a_role_rule_covers_its_lanes_and_role_addresses_are_unchanged() -> None:
+    rules = parse_rules(LANE_RULES)
+    other = MessageRoute("a/X", "omnigent/Architect/c31", role_target="omnigent/Architect")
+    assert (rules.match(other, NOW).action, rules.match(other, NOW).rule_index) == ("ASK", 1)
+    assert rules.match(MessageRoute("a/X", "omnigent/Architect"), NOW).rule_index == 1
+    # A plain route is never read as a lane, even if a glob would match it.
+    assert rules.match(MessageRoute("a/X", "omnigent/Bench"), NOW).action == "DENY"
+
+
+def test_a_wildcard_matching_role_and_lane_alike_is_a_role_rule() -> None:
+    rules = parse_rules(
+        'default: deny\nrules:\n  - {from: "*", to: "omnigent/*", action: ask}\n'
+        '  - {from: "*", to: "omnigent/Architect/*", action: allow}\n'
+    )
+    lane = MessageRoute("a/X", "omnigent/Architect/c30", role_target="omnigent/Architect")
+    assert rules.match(lane, NOW).rule_index == 2

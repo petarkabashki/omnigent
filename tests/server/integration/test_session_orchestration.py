@@ -2164,6 +2164,54 @@ async def test_holder_assigns_a_lane_without_an_owner_ask_and_a_former_holder_ca
     assert "403" in refused["error"]
 
 
+async def test_messages_to_a_lane_reach_it_and_a_missing_lane_reaches_the_holder(
+    auth_client, peers, db_uri
+):
+    source, holder, _ = peers
+    worker = await _create_session_as(auth_client, "", "alice")
+    store, projects = SqlAlchemyConversationStore(db_uri), SqlAlchemyProjectStore(db_uri)
+    session_aliases.set_session_alias(
+        store,
+        projects,
+        session=store.get_conversation(holder["id"]),
+        user_id="alice",
+        alias="Architect",
+    )
+    owner_claim = await auth_client.put(
+        f"/v1/sessions/{worker['id']}/lane", json={"role": "Architect", "lane": "c30"}
+    )
+    assert owner_claim.status_code == 200, owner_claim.text
+
+    direct = await _send_to_address(auth_client, source, "Architect/c30", "lane work")
+    assert (direct.get("queued"), direct["delivered_to"], direct["lane"]) == (
+        True,
+        "lane",
+        "/Architect/c30",
+    )
+    assert "lane work" in (await auth_client.get(f"/v1/sessions/{worker['id']}/items")).text
+    fyi = json.loads(
+        await execute_tool(
+            tool_name="sys_session_message",
+            arguments=json.dumps(
+                {"session_id": "/Architect/c30", "message": "lane note", "kind": "fyi"}
+            ),
+            server_client=auth_client,
+            conversation_id=source["id"],
+        )
+    )
+    assert fyi["delivered_to"] == "lane" and "error" not in fyi
+
+    fallback = await _send_to_address(auth_client, source, "Architect/c99", "for the holder")
+    assert (fallback.get("queued"), fallback["delivered_to"], fallback["reason"]) == (
+        True,
+        "holder",
+        "lane c99 not found",
+    )
+    assert "for the holder" in (await auth_client.get(f"/v1/sessions/{holder['id']}/items")).text
+    plain = await _send_to_address(auth_client, source, "Architect", "role mail")
+    assert plain.get("queued") is True and "delivered_to" not in plain
+
+
 async def test_role_release_without_a_role_is_refused_before_asking(
     auth_client, peers, owner_verdicts
 ):

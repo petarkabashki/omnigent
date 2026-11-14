@@ -61,10 +61,15 @@ _ACTIONS: dict[str, MessagingAction] = {"allow": "ALLOW", "ask": "ASK", "deny": 
 
 @dataclass(frozen=True)
 class MessageRoute:
-    """Resolved sender and target of one message, as role handles."""
+    """Resolved sender and target of one message, as role handles.
+
+    For a role lane, ``target`` is the full ``path/Role/lane`` and ``role_target``
+    the role's ``path/Role``, which a rule naming no lane covers.
+    """
 
     sender: str
     target: str
+    role_target: str | None = None
 
 
 #: ``(sender_session_id, target_address, user_id) -> route``, or ``None`` when
@@ -137,14 +142,28 @@ class MessagingRules:
     def match(self, route: MessageRoute, now: datetime | None = None) -> MessagingDecision:
         """Return the decision for *route*, skipping rules expired at *now*."""
         now = now or datetime.now(UTC)
-        for index, rule in enumerate(self.rules, start=1):
-            if not rule.expired(now) and rule.matches(route):
-                return MessagingDecision(
-                    rule.action,
-                    f"messaging rule {index} ({rule.sender} -> {rule.target}: "
-                    f"{rule.action.lower()}) for {route.sender} -> {route.target}",
-                    index,
-                )
+        live = [(i, rule) for i, rule in enumerate(self.rules, start=1) if not rule.expired(now)]
+        if route.role_target is None:
+            found = next(((i, rule) for i, rule in live if rule.matches(route)), None)
+        else:
+            # A rule that names the lane beats one that covers only the role.
+            role_route = MessageRoute(route.sender, route.role_target)
+            found = next(
+                (
+                    (i, rule)
+                    for i, rule in live
+                    if rule.matches(route) and not rule.matches(role_route)
+                ),
+                None,
+            ) or next(((i, rule) for i, rule in live if rule.matches(role_route)), None)
+        if found is not None:
+            index, rule = found
+            return MessagingDecision(
+                rule.action,
+                f"messaging rule {index} ({rule.sender} -> {rule.target}: "
+                f"{rule.action.lower()}) for {route.sender} -> {route.target}",
+                index,
+            )
         return MessagingDecision(
             self.default,
             f"no messaging rule for {route.sender} -> {route.target}; "

@@ -2642,7 +2642,10 @@ def register_core_routes(
         namespace: str | None = Query(default=None),
         workspace: str | None = Query(default=None),
     ) -> dict[str, Any]:
-        """Resolve ``Role``, ``/Role``, ``path/Role`` or a UUID to one owned session.
+        """Resolve ``Role``, ``/Role``, ``path/Role``, ``[path/]Role/lane`` or a UUID to one session.
+
+        A lane address that is not open resolves to the role's holder, with
+        ``delivered_to`` and ``reason`` saying so.
 
         A bare ``Role`` is relative to the orchestration source's project when a
         runner sends the source header, else to ``namespace`` (the project a
@@ -2735,10 +2738,10 @@ def register_core_routes(
     def _resolve_one_alias(
         address: str, user_id: str | None, default_namespace: Namespace
     ) -> dict[str, Any]:
-        from omnigent.server.session_aliases import resolve_session_address
+        from omnigent.server.session_aliases import resolve_address_target
         from omnigent.server.session_orchestration import require_owned_session
 
-        session_id = resolve_session_address(
+        target = resolve_address_target(
             conversation_store,
             project_store,
             address=address,
@@ -2746,6 +2749,7 @@ def register_core_routes(
             source=None,
             default_namespace=default_namespace,
         )
+        session_id = target.session_id
         if permission_store is not None and user_id:
             session = require_owned_session(
                 session_id, user_id, conversation_store, permission_store
@@ -2754,7 +2758,13 @@ def register_core_routes(
             session = conversation_store.get_conversation(session_id)
             if session is None:
                 raise _session_not_found()
-        return _alias_entry(session, user_id)
+        entry = _alias_entry(session, user_id)
+        if target.delivered_to is not None:
+            # A role-lane address: where it lands, and why when the lane is not open.
+            entry.update(lane=target.lane, delivered_to=target.delivered_to)
+            if target.reason is not None:
+                entry["reason"] = target.reason
+        return entry
 
     def _alias_entry(session: Conversation, user_id: str | None) -> dict[str, Any]:
         """One session's alias row, whether or not its labels are current yet."""

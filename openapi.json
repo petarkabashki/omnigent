@@ -18775,7 +18775,7 @@
     },
     "/v1/sessions/aliases/resolve": {
       "get": {
-        "description": "Resolve `Role`, `/Role`, `path/Role` or a UUID to one owned session.\n\nA bare `Role` is relative to the orchestration source's project when a\nrunner sends the source header, else to `namespace` (the project a\npicker has in view), else to the project of `workspace` (the CLI's\nworking directory), else to unfiled sessions.",
+        "description": "Resolve `Role`, `/Role`, `path/Role`, `[path/]Role/lane` or a UUID to one session.\n\nA lane address that is not open resolves to the role's holder, with\n`delivered_to` and `reason` saying so.\n\nA bare `Role` is relative to the orchestration source's project when a\nrunner sends the source header, else to `namespace` (the project a\npicker has in view), else to the project of `workspace` (the CLI's\nworking directory), else to unfiled sessions.",
         "operationId": "resolve_session_alias_v1_sessions_aliases_resolve_get",
         "parameters": [
           {
