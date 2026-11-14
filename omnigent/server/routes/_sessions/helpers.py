@@ -11068,7 +11068,9 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
         CREATED_BY_SESSION_LABEL_KEY,
         EXECUTOR_LABEL_KEY,
         FAMILY_PIN_LABEL_PREFIX,
+        LANE_NAME_LABEL_KEY,
         ROLE_ID_LABEL_KEY,
+        ROLE_LANE_LABEL_KEY,
         ROLE_OVERLAY_LABEL_KEY,
         SCHEDULED_TASK_ORIGIN_LABEL_KEY,
         SCHEDULED_TASK_SOURCE_LABEL_KEY,
@@ -11079,6 +11081,13 @@ def _reject_server_reserved_label_seed(labels: dict[str, str] | None) -> None:
     if ALIAS_LABEL_KEY in labels:
         raise OmnigentError(
             "Session aliases must be changed through the session alias endpoint",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    # Mirrors of the role_lanes row: a self-set label would file a session under a role.
+    if ROLE_LANE_LABEL_KEY in labels or LANE_NAME_LABEL_KEY in labels:
+        raise OmnigentError(
+            "Role lanes are assigned by the role's holder or the owner through the lane "
+            "claim (sys_role_take with lane and session_id), not through session labels",
             code=ErrorCode.INVALID_INPUT,
         )
     if any(key.startswith(FAMILY_PIN_LABEL_PREFIX) for key in labels):

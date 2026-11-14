@@ -26,6 +26,7 @@ from omnigent.runner import create_runner_app
 from omnigent.server.routes import sessions as sessions_module
 from omnigent.spec.types import AgentSpec
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.conversation_store import LANE_NAME_LABEL_KEY, ROLE_LANE_LABEL_KEY
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -786,6 +787,31 @@ async def test_patch_rejects_client_supplied_sandbox_labels(
         conv = conv_store.get_conversation(session_id)
         assert conv is not None
         assert key not in conv.labels
+
+
+@pytest.mark.parametrize("key", [ROLE_LANE_LABEL_KEY, LANE_NAME_LABEL_KEY])
+async def test_lane_labels_are_mirror_only_on_patch_and_create(
+    client: httpx.AsyncClient,
+    session_id: str,
+    db_uri: str,
+    key: str,
+) -> None:
+    """Lane labels mirror the role_lanes row; a client write would file a session under a role."""
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    for value in ("omnigent/Product", "c30", ""):
+        resp = await client.patch(f"/v1/sessions/{session_id}", json={"labels": {key: value}})
+        assert resp.status_code == 400, resp.text
+        assert "lane claim" in resp.text
+        conv = conv_store.get_conversation(session_id)
+        assert conv is not None
+        assert key not in conv.labels
+
+    agent = await create_test_agent(client, name="lane-seed")
+    created = await client.post(
+        "/v1/sessions", json={"agent_id": agent["id"], "labels": {key: "c30"}}
+    )
+    assert created.status_code == 400, created.text
+    assert "lane claim" in created.text
 
 
 async def test_patch_rejects_client_supplied_side_chat_thread_id_label(
