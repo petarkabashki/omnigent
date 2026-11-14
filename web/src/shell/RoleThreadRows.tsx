@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, type ReactNode } from "react";
+import { useNavigate } from "@/lib/routing";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRightIcon,
@@ -49,19 +49,25 @@ import { SIDEBAR_HOVER_HIGHLIGHT, SIDEBAR_ROW } from "./sidebarStyles";
 export function RoleThreadsToggle({
   conversation,
   threads,
+  laneCount = 0,
   className,
 }: {
   conversation: Conversation;
   threads: RoleThread[];
+  laneCount?: number;
   className?: string;
 }) {
   const key = roleThreadsExpansionKey(conversation);
   const expanded = useRoleThreadsExpanded(key);
+  const parts = [
+    laneCount > 0 ? `${laneCount} ${laneCount === 1 ? "lane" : "lanes"}` : null,
+    threads.length > 0 ? `threads: ${roleThreadCountText(roleThreadCounts(threads))}` : null,
+  ].filter(Boolean);
   return (
     <button
       type="button"
       data-testid="role-threads-toggle"
-      aria-label={`${expanded ? "Hide" : "Show"} threads: ${roleThreadCountText(roleThreadCounts(threads))}`}
+      aria-label={`${expanded ? "Hide" : "Show"} ${parts.join(", ")}`}
       aria-expanded={expanded}
       onClick={(event) => {
         event.preventDefault();
@@ -98,6 +104,39 @@ export function RoleThreadCount({ threads }: { threads: RoleThread[] }) {
         </>
       )}
     </span>
+  );
+}
+
+/**
+ * A role's lane sessions under its holder's row, sharing the threads' expand state.
+ * Collapsed, only the open lane stays visible; `showAll` (a search) shows every match.
+ */
+export function RoleLaneRows<T extends Conversation>({
+  holder,
+  lanes,
+  activeConversationId,
+  showAll,
+  renderLane,
+}: {
+  holder: Conversation;
+  lanes: readonly T[];
+  activeConversationId: string | null | undefined;
+  showAll: boolean;
+  renderLane: (lane: T) => ReactNode;
+}) {
+  const expanded = useRoleThreadsExpanded(roleThreadsExpansionKey(holder));
+  const shown =
+    expanded || showAll ? lanes : lanes.filter((lane) => lane.id === activeConversationId);
+  if (shown.length === 0) return null;
+  return (
+    <li data-testid="role-lane-rows">
+      <ul
+        aria-label={`Lanes of ${holder.title || "session"}`}
+        className="flex flex-col gap-px pl-6"
+      >
+        {shown.map(renderLane)}
+      </ul>
+    </li>
   );
 }
 

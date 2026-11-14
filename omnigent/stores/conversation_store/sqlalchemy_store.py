@@ -31,7 +31,7 @@ from sqlalchemy import (
     union,
     update,
 )
-from sqlalchemy.orm import QueryableAttribute, Session, load_only
+from sqlalchemy.orm import QueryableAttribute, Session, aliased, load_only
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.sql.selectable import Subquery
 
@@ -110,12 +110,14 @@ from omnigent.stores.conversation_store import (
     FORK_DROPPED_LABEL_PREFIX,
     FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
     FORK_SOURCE_LABEL_KEY,
+    LANE_NAME_LABEL_KEY,
     MAX_PENDING_INPUTS,
     MAX_SESSION_FAMILY_MEMBERS,
     PENDING_INPUT_RESPONSE_ID,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
     PROJECT_SWEEP_SPLIT_DB_MESSAGE,
+    ROLE_LANE_LABEL_KEY,
     RUNNER_LIVENESS_TTL_S,
     SCHEDULED_TASK_ORIGIN_LABEL_KEY,
     SIDE_CHAT_COPY_ID_PREFIX_LEN,
@@ -4282,7 +4284,10 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                     .exists()
                 )
-                handle_match = self._role_handle_match(session, search_query)
+                handle_match = or_(
+                    self._role_handle_match(session, search_query),
+                    self._role_lane_match(session, search_query),
+                )
                 if search_scope == "title":
                     stmt = stmt.where(or_(title_match, handle_match))
                 elif search_scope == "content":
@@ -6194,6 +6199,60 @@ class SqlAlchemyConversationStore(ConversationStore):
                     ).scalars()
                 )
         return SqlConversation.id.in_(holder_ids)
+
+    def _role_lane_match(self, session: Session, search_query: str) -> ColumnElement[bool]:
+        """
+        Match role lanes by address, ``<project>/<alias>/<lane>``, or by their role's handle.
+
+        A query that the lane's role label contains finds every lane of that role; otherwise
+        the last path segment matches the lane name and the rest the role label.
+
+        :param session: The open conversation-DB session.
+        :param search_query: The user's search string.
+        :returns: A filter on ``SqlConversation.id``.
+        """
+        # A trailing slash, as while typing an address, still lists the role's lanes.
+        query = search_query.strip().rstrip("/")
+        role_part, _, lane_part = query.rpartition("/")
+        if not lane_part.strip():
+            return SqlConversation.id.in_([])
+        dialect = self._conv_engine.dialect.name
+        role_label = aliased(SqlConversationLabel)
+        name_label = aliased(SqlConversationLabel)
+
+        def role_label_contains(text: str) -> ColumnElement[bool]:
+            return and_(
+                role_label.workspace_id == current_workspace_id(),
+                role_label.key == ROLE_LANE_LABEL_KEY,
+                _like_any(func.lower(role_label.value), _like_contains_patterns(text, dialect)),
+            )
+
+        lane_ids = set(
+            session.execute(select(role_label.conversation_id).where(role_label_contains(query)))
+            .scalars()
+            .all()
+        )
+        # A bare name (no role part) matches the lane name of any role.
+        by_address = (
+            select(role_label.conversation_id)
+            .join(
+                name_label,
+                and_(
+                    name_label.workspace_id == role_label.workspace_id,
+                    name_label.conversation_id == role_label.conversation_id,
+                    name_label.key == LANE_NAME_LABEL_KEY,
+                ),
+            )
+            .where(
+                role_label_contains(role_part.strip()),
+                _like_any(
+                    func.lower(name_label.value),
+                    _like_contains_patterns(lane_part.strip(), dialect),
+                ),
+            )
+        )
+        lane_ids.update(session.execute(by_address).scalars().all())
+        return SqlConversation.id.in_(lane_ids)
 
     def list_conversations_by_runner_id(
         self,

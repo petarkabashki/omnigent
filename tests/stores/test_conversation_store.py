@@ -2021,6 +2021,34 @@ def test_list_conversations_search_query_matches_role_handle(
     assert matched("harbor/") == set()
 
 
+def test_list_conversations_search_query_matches_role_lane_address(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """``search_query`` finds a lane by ``<project>/<alias>/<lane>`` or by its role's handle."""
+    from omnigent.stores.conversation_store import LANE_NAME_LABEL_KEY, ROLE_LANE_LABEL_KEY
+
+    def lane(title: str, role: str, name: str) -> str:
+        row = conversation_store.create_conversation(title=title)
+        conversation_store.set_labels(
+            row.id, {ROLE_LANE_LABEL_KEY: role, LANE_NAME_LABEL_KEY: name}
+        )
+        return row.id
+
+    c30 = lane("Host flap fix", "harbor/Architect", "c30")
+    ui = lane("Sidebar polish", "harbor/Architect", "ui")
+    other = lane("Release prep", "dock/Product", "c30")
+
+    def matched(query: str) -> set[str]:
+        return {c.id for c in conversation_store.list_conversations(search_query=query).data}
+
+    assert matched("Harbor/Architect/c30") == {c30}
+    assert matched("architect/ui") == {ui}
+    assert matched("harbor/architect") == {c30, ui}
+    assert matched("c30") == {c30, other}
+    assert matched("harbor/architect/") == {c30, ui}
+    assert matched("harbor/product/c30") == set()
+
+
 def test_list_conversations_search_query_matches_same_case_non_ascii(
     conversation_store: SqlAlchemyConversationStore, db_uri: str
 ) -> None:

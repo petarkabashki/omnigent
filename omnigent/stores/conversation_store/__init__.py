@@ -130,6 +130,10 @@ PROJECT_LABEL_KEY = "omni_project"
 # project among live top-level sessions. A mirror of the role row when one
 # exists (see ``omnigent.server.session_aliases``); never client-writable.
 ALIAS_LABEL_KEY = "omnigent.alias"
+# A lane names the role it works for (``<project>/<Alias>``) and its own slug
+# within that role, so it is addressed as ``<project>/<Alias>/<lane>``.
+ROLE_LANE_LABEL_KEY = "omnigent.role_lane"
+LANE_NAME_LABEL_KEY = "omnigent.lane_name"
 # Mirrors of the role row the session holds, written only by take and release.
 ROLE_ID_LABEL_KEY = "omnigent.role_id"
 # Carries the row's ``overlay_ref`` when the role file is not the role's name.

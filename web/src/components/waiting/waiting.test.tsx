@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WaitingPage } from "@/pages/WaitingPage";
+import type * as WaitingApi from "@/lib/waitingApi";
 import type { SessionWaiting, WaitingItem } from "@/lib/waitingApi";
 import { WaitingItemRow } from "./WaitingItemRow";
 import { WaitingStatusChip, waitingChipLabel } from "./WaitingStatusChip";
@@ -21,7 +22,7 @@ vi.mock("@/lib/roleThreads", () => ({ nudgeRoleThread: mocks.nudge }));
 vi.mock("@/lib/sessionsApi", () => ({ stopSession: mocks.stop }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), info: vi.fn() } }));
 vi.mock("@/lib/waitingApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/waitingApi")>()),
+  ...(await importOriginal<typeof WaitingApi>()),
   fetchSessionWaiting: mocks.fetchSession,
   fetchAllWaiting: mocks.fetchAll,
 }));

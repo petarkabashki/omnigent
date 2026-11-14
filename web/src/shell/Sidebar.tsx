@@ -205,7 +205,8 @@ import { relativeTime } from "@/lib/relativeTime";
 import { newThreadPath } from "@/lib/groupThreads";
 import { ALIAS_LABEL_KEY, sessionRoleHandle } from "@/lib/rolesApi";
 import { OpenThreadDialog } from "./OpenThreadDialog";
-import { RoleThreadCount, RoleThreadRows, RoleThreadsToggle } from "./RoleThreadRows";
+import { RoleLaneRows, RoleThreadCount, RoleThreadRows, RoleThreadsToggle } from "./RoleThreadRows";
+import { groupRoleLanes, roleLaneName, type RoleLaneGroups } from "@/lib/roleLanes";
 import { roleThreadsFromLabels } from "@/lib/roleThreads";
 import { showToast } from "@/components/ui/toast";
 import { showArchiveUndoToast } from "./archiveUndoToast";
@@ -466,6 +467,8 @@ const SCROLLBAR_HIDE_DELAY_MS = 700;
 // ``useProjects()`` subscription. Keeps row renders O(1) and avoids spinning up
 // a query observer per row (which would also re-run on every project mutation).
 const ProjectNamesContext = createContext<Map<string, string>>(new Map());
+// True while the sidebar search is active, so nested role lanes stay visible as matches.
+const SidebarSearchingContext = createContext(false);
 // Maps a first-class project id → its chosen emoji icon (only projects that
 // have one), sharing the same list-level lookup as the names map so a row can
 // surface the real project glyph in the pinned flyout without its own query.
@@ -522,6 +525,7 @@ function SidebarRowDataProvider({
   serverInfo,
   onActivate,
   onReorder,
+  searching = false,
   children,
 }: {
   projectNamesById: Map<string, string>;
@@ -535,32 +539,35 @@ function SidebarRowDataProvider({
   serverInfo: ReturnType<typeof useServerInfo>;
   onActivate: (id: string, event: MouseEvent<HTMLAnchorElement>) => void;
   onReorder: (fromId: string, toId: string) => void;
+  searching?: boolean;
   children: ReactNode;
 }) {
   return (
-    <ProjectNamesContext.Provider value={projectNamesById}>
-      <ProjectIconsContext.Provider value={projectIconsById}>
-        <HostsByIdContext.Provider value={hostsById}>
-          <SidebarShowContext.Provider value={show}>
-            <SidebarHarnessMarkContext.Provider value={harnessMark}>
-              <SidebarMachineTagContext.Provider value={machineTag}>
-                <IsMobileContext.Provider value={isMobile}>
-                  <ViewerIdContext.Provider value={viewerId}>
-                    <ServerInfoContext.Provider value={serverInfo}>
-                      <RowActivationContext.Provider value={onActivate}>
-                        <SessionReorderContext.Provider value={onReorder}>
-                          {children}
-                        </SessionReorderContext.Provider>
-                      </RowActivationContext.Provider>
-                    </ServerInfoContext.Provider>
-                  </ViewerIdContext.Provider>
-                </IsMobileContext.Provider>
-              </SidebarMachineTagContext.Provider>
-            </SidebarHarnessMarkContext.Provider>
-          </SidebarShowContext.Provider>
-        </HostsByIdContext.Provider>
-      </ProjectIconsContext.Provider>
-    </ProjectNamesContext.Provider>
+    <SidebarSearchingContext.Provider value={searching}>
+      <ProjectNamesContext.Provider value={projectNamesById}>
+        <ProjectIconsContext.Provider value={projectIconsById}>
+          <HostsByIdContext.Provider value={hostsById}>
+            <SidebarShowContext.Provider value={show}>
+              <SidebarHarnessMarkContext.Provider value={harnessMark}>
+                <SidebarMachineTagContext.Provider value={machineTag}>
+                  <IsMobileContext.Provider value={isMobile}>
+                    <ViewerIdContext.Provider value={viewerId}>
+                      <ServerInfoContext.Provider value={serverInfo}>
+                        <RowActivationContext.Provider value={onActivate}>
+                          <SessionReorderContext.Provider value={onReorder}>
+                            {children}
+                          </SessionReorderContext.Provider>
+                        </RowActivationContext.Provider>
+                      </ServerInfoContext.Provider>
+                    </ViewerIdContext.Provider>
+                  </IsMobileContext.Provider>
+                </SidebarMachineTagContext.Provider>
+              </SidebarHarnessMarkContext.Provider>
+            </SidebarShowContext.Provider>
+          </HostsByIdContext.Provider>
+        </ProjectIconsContext.Provider>
+      </ProjectNamesContext.Provider>
+    </SidebarSearchingContext.Provider>
   );
 }
 
@@ -735,6 +742,10 @@ export function computeShiftSelectRange(
 /** Stable empty array for the pinned-conversations fallback (referential
     equality keeps dependent memos from re-firing while the query loads). */
 const EMPTY_CONVERSATIONS: Conversation[] = [];
+const EMPTY_ROLE_LANES: RoleLaneGroups<Conversation> = {
+  lanesByHolderId: new Map(),
+  laneIds: new Set(),
+};
 
 /**
  * One-time migration of localStorage pins to server-side labels.
@@ -3322,6 +3333,7 @@ function ConversationList({
       isMobile={isMobile}
       viewerId={viewerId}
       serverInfo={serverInfo}
+      searching={!!searchQuery}
       onActivate={activateRow}
       onReorder={reorderSessions}
     >
@@ -4564,7 +4576,15 @@ function ConversationSection({
     const representative = familyRepresentative(row);
     return representative !== undefined && representative.id !== row.id;
   };
-  const visibleFamilyRows = orderSessionFamilies(conversations, collapsedFamilies);
+  // Selection mode lists lanes flat so each one can be picked.
+  const projectNamesById = useContext(ProjectNamesContext);
+  const searching = useContext(SidebarSearchingContext);
+  const roleLanes = selectionMode
+    ? EMPTY_ROLE_LANES
+    : groupRoleLanes(conversations, projectNamesById);
+  const visibleFamilyRows = orderSessionFamilies(conversations, collapsedFamilies).filter(
+    (row) => !roleLanes.laneIds.has(row.id),
+  );
   const reorderRows = visibleFamilyRows.filter((row) => !isNestedFamilyRow(row));
 
   const groupingEmptyState = isFeatureEnabled(useContext(ServerInfoContext), "sidebar_grouping_ui");
@@ -4707,6 +4727,32 @@ function ConversationSection({
                     previousId={reorderNeighbour(reorderRows[reorderRows.indexOf(conv) - 1])}
                     nextId={reorderNeighbour(reorderRows[reorderRows.indexOf(conv) + 1])}
                     reorderIndex={reorderGroup ? reorderRows.indexOf(conv) : undefined}
+                    laneCount={roleLanes.lanesByHolderId.get(conv.id)?.length ?? 0}
+                  />
+                  <RoleLaneRows
+                    holder={conv}
+                    lanes={roleLanes.lanesByHolderId.get(conv.id) ?? []}
+                    activeConversationId={activeConversationId}
+                    showAll={searching}
+                    renderLane={(lane) => (
+                      <ConversationRow
+                        key={lane.id}
+                        conversation={lane}
+                        isActive={lane.id === activeConversationId}
+                        inActiveGrid={gridMembers.has(lane.id)}
+                        gridSelected={lane.id === grids?.selectedSessionId}
+                        gridsEnabled={grids?.enabled ?? false}
+                        isPinned={pinnedConversationIds.includes(lane.id)}
+                        shortcutSlot={sessionShortcutSlots?.get(lane.id)}
+                        onClick={onRowClick}
+                        onTogglePinned={onTogglePinned}
+                        selectionMode={selectionMode}
+                        isSelected={selectedIds.has(lane.id)}
+                        onToggleSelected={onToggleSelected}
+                        onProjectAssigned={onProjectAssigned}
+                        laneName={roleLaneName(lane.labels)}
+                      />
+                    )}
                   />
                   {!selectionMode && <RoleThreadRows conversation={conv} />}
                 </Fragment>
@@ -5830,6 +5876,8 @@ function ConversationRowImpl({
   previousId,
   nextId,
   reorderIndex,
+  laneCount = 0,
+  laneName = null,
 }: {
   conversation: Conversation;
   familyIndented?: boolean;
@@ -5856,6 +5904,10 @@ function ConversationRowImpl({
   previousId?: string;
   nextId?: string;
   reorderIndex?: number;
+  /** Role lanes nested under this row; they share the role's expand toggle. */
+  laneCount?: number;
+  /** Set on a row nested as a role lane: its name within the role. */
+  laneName?: string | null;
 }) {
   const atPinCap = useContext(PinCapacityContext);
   const pinSaving = useContext(PinSavingContext);
@@ -6029,7 +6081,7 @@ function ConversationRowImpl({
     () => roleThreadsFromLabels(conversation.labels),
     [conversation.labels],
   );
-  const showThreadsToggle = roleThreads.length > 0 && !selectionMode;
+  const showThreadsToggle = (roleThreads.length > 0 || laneCount > 0) && !selectionMode;
   // Subscribed so the just-recorded optimistic label flips the row
   // immediately instead of at the next conversations poll.
   const optimisticTitle = useOptimisticTitle(conversation.id);
@@ -6389,6 +6441,16 @@ function ConversationRowImpl({
               {limitMark.glyph}
             </span>
           )}
+          {laneName && (
+            <span
+              data-testid="session-row-lane-name"
+              title={`Lane ${laneName}`}
+              className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] leading-4 text-muted-foreground"
+            >
+              {laneName}
+              <span className="sr-only">:</span>
+            </span>
+          )}
           <span
             data-testid="session-row-title"
             className={cn(
@@ -6434,6 +6496,7 @@ function ConversationRowImpl({
         <RoleThreadsToggle
           conversation={conversation}
           threads={roleThreads}
+          laneCount={laneCount}
           className={familyExpanded !== undefined ? "left-7" : "left-2"}
         />
       )}
@@ -7184,6 +7247,8 @@ const ConversationRow = memo(ConversationRowImpl, (prev, next) => {
     prev.previousId === next.previousId &&
     prev.nextId === next.nextId &&
     prev.reorderIndex === next.reorderIndex &&
+    prev.laneCount === next.laneCount &&
+    prev.laneName === next.laneName &&
     conversationRenderEqual(prev.conversation, next.conversation)
   );
 });

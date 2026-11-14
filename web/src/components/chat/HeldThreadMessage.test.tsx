@@ -35,9 +35,11 @@ describe("HeldThreadMessage", () => {
     ["Discard", "discard"],
   ])("%s calls the API with %s and disables buttons meanwhile", async (label, action) => {
     let finish: (value: unknown) => void = () => {};
-    const spy = vi
-      .spyOn(roleThreadsApi, "resolveHeldThreadMessage")
-      .mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const spy = vi.spyOn(roleThreadsApi, "resolveHeldThreadMessage").mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
     renderNotice();
     fireEvent.click(screen.getByRole("button", { name: label }));
     expect(spy).toHaveBeenCalledWith("sess_product", "/Architect", action);
