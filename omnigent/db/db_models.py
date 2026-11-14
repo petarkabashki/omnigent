@@ -956,6 +956,42 @@ class SqlRoleEvent(OmnigentBase):
     )
 
 
+class SqlRoleLane(OmnigentBase):
+    """
+    SQLAlchemy model for the ``role_lanes`` table.
+
+    One open lane of a role and the session working it. The row is the source
+    of truth; the ``omnigent.role_lane`` and ``omnigent.lane_name`` labels on the
+    session mirror it. A closed lane's row is deleted, freeing the name.
+
+    :param name: Slug matching ``[a-z0-9-]{1,32}``, so already case-folded.
+    """
+
+    __tablename__ = "role_lanes"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    role_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    purpose: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    item: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        # A lost claim race must fail here, as for role names.
+        Index("uq_role_lanes_name", "workspace_id", "role_id", "name", unique=True),
+        # A session works at most one lane.
+        Index("uq_role_lanes_session", "workspace_id", "session_id", unique=True),
+    )
+
+
 def _workspace_column() -> Mapped[int]:
     return mapped_column(
         BigInteger,

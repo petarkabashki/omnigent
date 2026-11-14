@@ -82,3 +82,29 @@ class RoleEvent:
     at: int
     role_name: str
     role_path: str
+
+
+@dataclass
+class RoleLane:
+    """
+    A named lane of a role, worked by one session: ``<project>/<Alias>/<lane>``.
+
+    The row belongs to the role, not to its holder, so a release or takeover
+    leaves it in place. It is deleted when its session closes.
+
+    :param id: UUID primary key (bare 32-char hex string, no dashes).
+    :param role_id: The role the lane works for.
+    :param name: Slug unique within the role, e.g. ``"c30"``.
+    :param session_id: The top-level session working the lane.
+    :param purpose: One line on what the lane is for, or ``None``.
+    :param item: Roadmap item id, e.g. ``"C30"``, or ``None``.
+    :param created_at: Unix epoch seconds at claim.
+    """
+
+    id: str
+    role_id: str
+    name: str
+    session_id: str
+    purpose: str | None
+    item: str | None
+    created_at: int

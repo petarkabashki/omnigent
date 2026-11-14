@@ -8,12 +8,18 @@ from collections.abc import Callable, Iterable, Iterator
 from itertools import islice
 from typing import TypeVar, cast
 
-from sqlalchemy import CursorResult, Select, asc, select, update
+from sqlalchemy import CursorResult, Select, asc, delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from omnigent.db.account_authority import require_active_account
-from omnigent.db.db_models import SqlProject, SqlRole, SqlRoleEvent, current_workspace_id
+from omnigent.db.db_models import (
+    SqlProject,
+    SqlRole,
+    SqlRoleEvent,
+    SqlRoleLane,
+    current_workspace_id,
+)
 from omnigent.db.enum_codecs import (
     decode_role_event_actor,
     decode_role_event_kind,
@@ -26,7 +32,7 @@ from omnigent.db.utils import (
     now_epoch,
     run_write_transaction,
 )
-from omnigent.entities import Role, RoleEvent
+from omnigent.entities import Role, RoleEvent, RoleLane
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.stores.role_store import RoleStore
 from omnigent.util.uuid import normalize_uuid
@@ -79,6 +85,18 @@ def _event_entity(row: SqlRoleEvent) -> RoleEvent:
         at=row.at,
         role_name=row.role_name,
         role_path=row.role_path,
+    )
+
+
+def _lane_entity(row: SqlRoleLane) -> RoleLane:
+    return RoleLane(
+        id=row.id,
+        role_id=row.role_id,
+        name=row.name,
+        session_id=row.session_id,
+        purpose=row.purpose,
+        item=row.item,
+        created_at=row.created_at,
     )
 
 
@@ -439,3 +457,96 @@ class SqlAlchemyRoleStore(RoleStore):
                 .order_by(asc(SqlRoleEvent.generation), asc(SqlRoleEvent.at))
             ).all()
             return [_event_entity(row) for row in rows]
+
+    def _lanes(self) -> Select[tuple[SqlRoleLane]]:
+        return select(SqlRoleLane).where(SqlRoleLane.workspace_id == current_workspace_id())
+
+    def claim_lane(
+        self,
+        role_id: str,
+        name: str,
+        session_id: str,
+        *,
+        purpose: str | None,
+        item: str | None,
+    ) -> RoleLane:
+        """Insert an open lane; the unique indexes decide a race."""
+        lane = RoleLane(
+            id=uuid.uuid4().hex,
+            role_id=role_id,
+            name=name,
+            session_id=session_id,
+            purpose=purpose,
+            item=item,
+            created_at=now_epoch(),
+        )
+
+        def write(session: Session) -> RoleLane:
+            session.add(
+                SqlRoleLane(
+                    id=lane.id,
+                    role_id=role_id,
+                    name=name,
+                    session_id=session_id,
+                    purpose=purpose,
+                    item=item,
+                    created_at=lane.created_at,
+                )
+            )
+            return lane
+
+        self._before_write("claim_lane")
+        try:
+            return run_write_transaction(self._session_immediate, "claim_role_lane", write)
+        except IntegrityError as exc:
+            held = self.find_lane(role_id, name)
+            if held is not None:
+                message = f"Lane {name!r} is taken by session {held.session_id}"
+            else:
+                current = self.lane_of(session_id)
+                where = f" ({current.name!r})" if current is not None else ""
+                message = f"Session {session_id} already works a lane{where}; close it first"
+            raise OmnigentError(message, code=ErrorCode.CONFLICT) from exc
+
+    def find_lane(self, role_id: str, name: str) -> RoleLane | None:
+        """Return the role's open lane named ``name``, else ``None``."""
+        with self._session("find_role_lane") as session:
+            row = session.scalar(
+                self._lanes().where(SqlRoleLane.role_id == role_id, SqlRoleLane.name == name)
+            )
+            return _lane_entity(row) if row is not None else None
+
+    def lane_of(self, session_id: str) -> RoleLane | None:
+        """Return the lane ``session_id`` works, else ``None``."""
+        with self._session("select_lane_by_session") as session:
+            row = session.scalar(self._lanes().where(SqlRoleLane.session_id == session_id))
+            return _lane_entity(row) if row is not None else None
+
+    def lanes_of_roles(self, role_ids: Iterable[str]) -> builtins.list[RoleLane]:
+        """List the open lanes of these roles, by role then name."""
+        lanes: list[RoleLane] = []
+        for chunk in _chunks(dict.fromkeys(role_ids), _IN_CHUNK):
+            with self._session("list_role_lanes") as session:
+                rows = session.scalars(
+                    self._lanes()
+                    .where(SqlRoleLane.role_id.in_(chunk))
+                    .order_by(asc(SqlRoleLane.role_id), asc(SqlRoleLane.name))
+                ).all()
+                lanes.extend(_lane_entity(row) for row in rows)
+        return lanes
+
+    def close_lane(self, lane_id: str) -> bool:
+        """Delete a lane, freeing its name; ``False`` when it was already gone."""
+
+        def write(session: Session) -> bool:
+            deleted = session.execute(
+                delete(SqlRoleLane)
+                .where(
+                    SqlRoleLane.workspace_id == current_workspace_id(),
+                    SqlRoleLane.id == lane_id,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return cast("CursorResult[object]", deleted).rowcount > 0
+
+        return run_write_transaction(self._session_immediate, "close_role_lane", write)

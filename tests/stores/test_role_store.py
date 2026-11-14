@@ -376,3 +376,50 @@ def test_take_waits_for_a_project_delete_in_flight_and_is_refused(
     assert outcomes == {"refused": ErrorCode.NOT_FOUND}
     assert roles.get(role.id, user_id=OWNER).holder_session_id is None
     assert roles.events(role.id) == []
+
+
+def test_a_lane_is_claimed_found_listed_and_closed(roles: SqlAlchemyRoleStore) -> None:
+    role = roles.create("Architect", user_id=OWNER, project_id=None)
+    session = _id()
+
+    lane = roles.claim_lane(role.id, "c30", session, purpose="host flap", item="C30")
+
+    assert roles.find_lane(role.id, "c30") == lane
+    assert roles.lane_of(session) == lane
+    assert roles.lanes_of_roles([role.id]) == [lane]
+    assert roles.close_lane(lane.id) is True
+    assert roles.close_lane(lane.id) is False
+    assert roles.find_lane(role.id, "c30") is None
+    # A closed name is free again.
+    assert roles.claim_lane(role.id, "c30", _id(), purpose=None, item=None).name == "c30"
+
+
+def test_a_lane_name_and_a_lane_session_are_each_unique(roles: SqlAlchemyRoleStore) -> None:
+    role = roles.create("Architect", user_id=OWNER, project_id=None)
+    other = roles.create("Bench", user_id=OWNER, project_id=None)
+    first = _id()
+    roles.claim_lane(role.id, "c30", first, purpose=None, item=None)
+
+    with pytest.raises(OmnigentError, match=f"taken by session {first}") as taken:
+        roles.claim_lane(role.id, "c30", _id(), purpose=None, item=None)
+    assert taken.value.code == ErrorCode.CONFLICT
+    with pytest.raises(OmnigentError, match="already works a lane") as busy:
+        roles.claim_lane(other.id, "c31", first, purpose=None, item=None)
+    assert busy.value.code == ErrorCode.CONFLICT
+    # The same slug under another role is a different lane.
+    assert roles.claim_lane(other.id, "c30", _id(), purpose=None, item=None).role_id == other.id
+
+
+def test_racing_lane_claims_leave_one_lane(roles: SqlAlchemyRoleStore) -> None:
+    role = roles.create("Architect", user_id=OWNER, project_id=None)
+    _line_up(roles, 2)
+
+    results = _run_all(
+        lambda: roles.claim_lane(role.id, "c30", _id(), purpose=None, item=None),
+        lambda: roles.claim_lane(role.id, "c30", _id(), purpose=None, item=None),
+    )
+
+    errors = [r for r in results if isinstance(r, OmnigentError)]
+    assert len(errors) == 1
+    assert errors[0].code == ErrorCode.CONFLICT
+    assert len(roles.lanes_of_roles([role.id])) == 1

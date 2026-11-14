@@ -13,7 +13,7 @@ import builtins
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
-from omnigent.entities import Role, RoleEvent
+from omnigent.entities import Role, RoleEvent, RoleLane
 
 
 class RoleStore(ABC):
@@ -143,3 +143,36 @@ class RoleStore(ABC):
     @abstractmethod
     def events(self, role_id: str) -> builtins.list[RoleEvent]:
         """List one role's events, oldest first."""
+
+    @abstractmethod
+    def claim_lane(
+        self,
+        role_id: str,
+        name: str,
+        session_id: str,
+        *,
+        purpose: str | None,
+        item: str | None,
+    ) -> RoleLane:
+        """
+        Insert an open lane; the unique indexes decide a race.
+
+        :raises OmnigentError: ``CONFLICT`` when the role already has a lane of
+            that name or the session already works a lane.
+        """
+
+    @abstractmethod
+    def find_lane(self, role_id: str, name: str) -> RoleLane | None:
+        """Return the role's open lane named ``name``, else ``None``."""
+
+    @abstractmethod
+    def lane_of(self, session_id: str) -> RoleLane | None:
+        """Return the lane ``session_id`` works, else ``None``."""
+
+    @abstractmethod
+    def lanes_of_roles(self, role_ids: Iterable[str]) -> builtins.list[RoleLane]:
+        """List the open lanes of these roles, by role then name."""
+
+    @abstractmethod
+    def close_lane(self, lane_id: str) -> bool:
+        """Delete a lane, freeing its name; ``False`` when it was already gone."""
