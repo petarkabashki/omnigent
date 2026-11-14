@@ -86,6 +86,8 @@ export interface PostEventResponse {
   recovery?: "already_connected" | "native_terminal_ready" | "runner_relaunched";
   /** The session a claude-sdk `clear` continued in; absent for other events. */
   sessionId?: string;
+  /** True when an approval reached a role question that had stopped waiting. */
+  expired?: boolean;
 }
 
 /**
@@ -515,6 +517,7 @@ function postEventResponseFromWire(wire: {
   recovered?: boolean;
   recovery?: PostEventResponse["recovery"];
   session_id?: string;
+  expired?: boolean;
 }): PostEventResponse {
   return {
     queued: wire.queued,
@@ -524,6 +527,7 @@ function postEventResponseFromWire(wire: {
     recovered: wire.recovered,
     recovery: wire.recovery,
     sessionId: wire.session_id,
+    expired: wire.expired,
   };
 }
 
@@ -1758,6 +1762,6 @@ export async function approve(
     },
   );
   return postEventResponseFromWire(
-    await readJsonOrThrow<{ queued: boolean; item_id?: string }>(res),
+    await readJsonOrThrow<{ queued: boolean; item_id?: string; expired?: boolean }>(res),
   );
 }

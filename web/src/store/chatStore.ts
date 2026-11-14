@@ -3567,11 +3567,25 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     elicitationVerdictsInFlight.add(elicitationId);
     bumpElicitationVerdictRevision(sessionId, elicitationId);
     try {
-      await approveElicitation(targetSessionId, elicitationId, {
+      const resolved = await approveElicitation(targetSessionId, elicitationId, {
         action,
         ...(content === undefined ? {} : { content }),
         ...(meta === undefined ? {} : { _meta: meta }),
       });
+      if (resolved.expired) {
+        // The server refused a late answer: show that nothing was decided.
+        write((s) => ({
+          blocks: s.blocks.map((b) =>
+            b.type === "elicitation" && b.elicitationId === elicitationId
+              ? {
+                  ...b,
+                  status: "responded",
+                  response: { action: "auto_resolved", reason: "too_late" },
+                }
+              : b,
+          ),
+        }));
+      }
       acknowledgeLocalElicitationResolution(elicitationId, holdToken);
       clearAskUserQuestionDraft(elicitationId);
       if (elicitationRechecksAfterVerdict.delete(elicitationId)) {

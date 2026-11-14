@@ -76,6 +76,8 @@ from omnigent.server._elicitation_registry import (
     _harness_pre_resolved_elicitations,
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
+    expire_role_ask,
+    register_role_ask,
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
@@ -313,6 +315,11 @@ _SESSION_LIST_BATCH_SIZE = 1000
 # Owner questions in one role request end this long before the caller's one-day
 # read timeout, so an approval can't land after the caller has given up.
 _ROLE_ASK_MARGIN_S = 600.0
+
+
+def _role_ask_deadline() -> float:
+    """Monotonic time by which every owner question in one role request must be answered."""
+    return time.monotonic() + DEFAULT_ASK_TIMEOUT - _ROLE_ASK_MARGIN_S
 
 
 def _changes_project(body: UpdateSessionRequest, set_project: bool, current: Conversation) -> bool:
@@ -2782,8 +2789,8 @@ def register_core_routes(
     ) -> Conversation:
         """Park on an owner approval for one agent-initiated role change on its own session.
 
-        Raises unless the owner accepts, so the caller changes nothing on a
-        denial, a timeout or a closed prompt.
+        Raises unless the owner accepts in time, so the caller changes nothing
+        on a denial, a timeout or a closed prompt.
         """
         source = require_orchestration_source(
             request, user_id, conversation_store, permission_store
@@ -2794,14 +2801,19 @@ def register_core_routes(
         return source
 
     async def _ask_owner_on(
-        request: Request, source: Conversation, question: str, *, timeout_s: float | None = None
+        request: Request, source: Conversation, question: str, *, deadline: float | None = None
     ) -> None:
-        """Park on the owner's answer in ``source``; raises unless they accept.
+        """Park on the owner's answer in ``source``; raises unless they accept in time.
 
         Never consults the messaging policy: only the owner can approve.
-        ``timeout_s`` defaults to ``DEFAULT_ASK_TIMEOUT``.
+        ``deadline`` (monotonic) defaults to :func:`_role_ask_deadline`. No
+        answer by then, or a caller that left, is a 409; a decline is a 403.
         """
         session_id = source.id
+        if deadline is None:
+            deadline = _role_ask_deadline()
+        elicitation_id = f"elicit_{secrets.token_hex(16)}"
+        register_role_ask(elicitation_id, deadline)
         verdict = await _publish_and_wait_for_harness_elicitation(
             request,
             session_id=session_id,
@@ -2813,10 +2825,19 @@ def register_core_routes(
                 policy_name="role_change",
                 content_preview=question,
             ),
-            timeout_s=float(DEFAULT_ASK_TIMEOUT) if timeout_s is None else timeout_s,
+            timeout_s=max(deadline - time.monotonic(), 0.0),
             conversation_store=conversation_store,
+            elicitation_id=elicitation_id,
         )
-        if verdict is None or verdict.action != "accept":
+        if verdict is None or time.monotonic() > deadline or await request.is_disconnected():
+            expire_role_ask(elicitation_id)
+            raise OmnigentError(
+                "Too late: the owner did not answer before this request's deadline, or "
+                "the caller left; nothing was changed. Ask again.",
+                code=ErrorCode.CONFLICT,
+            )
+        expire_role_ask(elicitation_id)
+        if verdict.action != "accept":
             raise OmnigentError(
                 "The owner did not approve the role change; nothing was changed",
                 code=ErrorCode.FORBIDDEN,
@@ -2977,12 +2998,12 @@ def register_core_routes(
 
         role, handle = await asyncio.to_thread(_plan)
         if source is not None and role.permanent != permanent:
-            change = "mark" if permanent else "UNMARK"
+            change = "MARK" if permanent else "UNMARK"
             await _ask_owner_on(
                 request,
                 source,
                 f"Session '{source.title or source.id}' ({source.id}) asks to {change} the "
-                f"role '{handle}' (generation {role.generation}) as permanent. Approve?",
+                f"role '{handle}' (generation {role.generation}) as PERMANENT. Approve?",
             )
         if role.permanent != permanent:
             role = await asyncio.to_thread(apply_role_permanent, project_store, role, permanent)
@@ -3033,7 +3054,7 @@ def register_core_routes(
             )
         if source is not None:
             # Both questions share the runner's one request timeout, less a margin.
-            deadline = time.monotonic() + DEFAULT_ASK_TIMEOUT - _ROLE_ASK_MARGIN_S
+            deadline = _role_ask_deadline()
             holder = plan.holder
             holder_text = (
                 f"session '{holder.title or holder.id}' ({holder.id})"
@@ -3062,7 +3083,7 @@ def register_core_routes(
                 f"Session '{source.title or source.id}' ({source.id}) asks to FORCE-RELEASE "
                 f"the role '{plan.handle}' (generation {plan.role.generation}) from "
                 f"{holder_text}{state}{then}. Approve?",
-                timeout_s=deadline - time.monotonic(),
+                deadline=deadline,
             )
             if plan.role.permanent:
                 remaining = deadline - time.monotonic()
@@ -3078,14 +3099,7 @@ def register_core_routes(
                     f"SECOND CONFIRMATION: '{plan.handle}' is a PERMANENT role. Really "
                     f"force-release it (generation {plan.role.generation}) from {holder_text}"
                     f"{then}? Approve only if you mean to unseat a permanent role.",
-                    timeout_s=remaining,
-                )
-            # An answer past the deadline or after the caller left must not apply.
-            if time.monotonic() > deadline or await request.is_disconnected():
-                raise OmnigentError(
-                    f"The owner's answer for '{plan.handle}' came after this request's "
-                    "deadline or after the caller left; nothing was changed. Ask again.",
-                    code=ErrorCode.CONFLICT,
+                    deadline=deadline,
                 )
 
         def _apply() -> dict[str, Any]:

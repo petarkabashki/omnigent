@@ -691,7 +691,7 @@ export interface ElicitationBlock {
      * the prompt because the hook stopped waiting before anyone
      * answered, so the card says the prompt expired and how to resume.
      */
-    reason?: "unanswered";
+    reason?: "unanswered" | "too_late";
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
   } | null;

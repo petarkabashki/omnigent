@@ -11638,6 +11638,18 @@ describe("chatStore — submitApproval", () => {
     expect(getAskUserQuestionDraft("elic_ask", regionSignature)).toBeUndefined();
   });
 
+  it("marks the card too late when the server says the question expired", async () => {
+    useChatStore.setState({ conversationId: "conv_abc", blocks: [elicitationBlock("elic_late")] });
+    fetchMock.mockImplementationOnce(() => mockResponse({ queued: false, expired: true }));
+
+    await useChatStore.getState().submitApproval("elic_late", "accept");
+
+    expect(useChatStore.getState().blocks[0]).toMatchObject({
+      status: "responded",
+      response: { action: "auto_resolved", reason: "too_late" },
+    });
+  });
+
   it("posts the verdict to the elicitation resolve URL and optimistically marks responded", async () => {
     useChatStore.setState({
       conversationId: "conv_abc",

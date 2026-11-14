@@ -232,7 +232,7 @@ interface ApprovalCardProps {
   response: {
     action: "accept" | "decline" | "cancel" | "auto_resolved";
     /** Why an `auto_resolved` card has no verdict; see `ElicitationBlock`. */
-    reason?: "unanswered";
+    reason?: "unanswered" | "too_late";
     content?: Record<string, unknown>;
     _meta?: Record<string, unknown>;
   } | null;
@@ -789,6 +789,7 @@ export function ApprovalCard({
   if (status === "responded" && response) {
     const autoResolved = response.action === "auto_resolved";
     const promptExpired = autoResolved && response.reason === "unanswered";
+    const answeredTooLate = autoResolved && response.reason === "too_late";
     const accepted = response.action === "accept";
 
     // Distinguish three responded sub-states:
@@ -827,6 +828,10 @@ export function ApprovalCard({
       // to get the agent moving again instead of implying an answer.
       icon = <ClockIcon className="size-4 text-muted-foreground" />;
       label = "Prompt expired";
+    } else if (answeredTooLate) {
+      // The answer reached a role question after its request stopped waiting.
+      icon = <ClockIcon className="size-4 text-muted-foreground" />;
+      label = "Too late";
     } else if (autoResolved) {
       // Verdict unknown here; explain the neutral pill.
       icon = (
@@ -897,7 +902,8 @@ export function ApprovalCard({
       isCodexCommandApproval ||
       submittedAnswers !== null ||
       planRejectionFeedback !== null ||
-      promptExpired;
+      promptExpired ||
+      answeredTooLate;
 
     return (
       <Alert
@@ -962,6 +968,11 @@ export function ApprovalCard({
             {promptExpired && (
               <span className="text-muted-foreground" data-testid="prompt-expired-hint">
                 Nobody answered before the agent stopped waiting. Send a message to continue.
+              </span>
+            )}
+            {answeredTooLate && (
+              <span className="text-muted-foreground" data-testid="answered-too-late-hint">
+                The answer came after the request stopped waiting; nothing was changed.
               </span>
             )}
           </AlertDescription>

@@ -2103,16 +2103,18 @@ async def test_role_take_and_release_change_nothing_without_approval(
     await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
     owner_verdicts["action"] = action
 
+    # A decline is a 403; no answer in time is a 409 that says it came too late.
+    status, reason = ("409", "Too late") if action == "timeout" else ("403", "did not approve")
     refused_release = await _role_tool(auth_client, source, "sys_role_release")
-    assert refused_release["error"].endswith("returned 403")
-    assert "did not approve" in refused_release["detail"]
+    assert refused_release["error"].endswith(f"returned {status}")
+    assert reason in refused_release["detail"]
     assert _alias_of(db_uri, source) == "Keeper"
 
     owner_verdicts["action"] = "accept"
     await _role_tool(auth_client, source, "sys_role_release")
     owner_verdicts["action"] = action
     refused_take = await _role_tool(auth_client, source, "sys_role_take", role="Other")
-    assert refused_take["error"].endswith("returned 403")
+    assert refused_take["error"].endswith(f"returned {status}")
     assert _alias_of(db_uri, source) is None
 
 
@@ -2237,7 +2239,7 @@ async def test_force_release_without_approval_changes_nothing(
     owner_verdicts["action"] = action
 
     refused = await _role_tool(auth_client, source, "sys_role_release", role="Keeper", force=True)
-    assert refused["error"].endswith("returned 403")
+    assert refused["error"].endswith("returned 409" if action == "timeout" else "returned 403")
     after, after_events = _role_row(db_uri, "Keeper")
     assert (after.holder_session_id, after.generation) == (holder["id"], before.generation)
     assert len(after_events) == len(before_events)
@@ -2422,7 +2424,8 @@ async def test_an_agent_marks_a_role_permanent_only_with_owner_approval(
     )
     assert response.status_code == (200 if action == "accept" else 403), response.text
     [(asked_session, question)] = owner_verdicts["asked"]
-    assert asked_session == source["id"] and "permanent" in question
+    assert asked_session == source["id"] and "MARK the role '/Keeper'" in question
+    assert "as PERMANENT" in question
     assert _role_row(db_uri, "Keeper")[0].permanent is (action == "accept")
 
 
@@ -2488,6 +2491,35 @@ async def test_a_second_approval_after_the_shared_deadline_changes_nothing(
     after, after_events = _role_row(db_uri, "Keeper")
     assert (after.holder_session_id, after.generation) == (holder["id"], before.generation)
     assert len(after_events) == len(before_events)
+
+
+async def test_an_owner_answer_after_a_role_question_expires_is_told_it_came_too_late(
+    auth_client, peers, db_uri, monkeypatch
+):
+    from omnigent.server.routes.sessions import routes_core
+
+    source, _, _ = peers
+    # The single question gets the shared 0.3s budget and nobody answers in time.
+    monkeypatch.setattr(routes_core, "_ROLE_ASK_MARGIN_S", 0.1)
+    monkeypatch.setattr(routes_core, "DEFAULT_ASK_TIMEOUT", 0.4)
+    asked_ids = []
+    register = routes_core.register_role_ask
+
+    def capture(elicitation_id, deadline):
+        asked_ids.append(elicitation_id)
+        register(elicitation_id, deadline)
+
+    monkeypatch.setattr(routes_core, "register_role_ask", capture)
+    refused = await _role_tool(auth_client, source, "sys_role_take", role="Keeper")
+    assert refused["error"].endswith("returned 409") and "nothing was changed" in refused["detail"]
+
+    [elicitation_id] = asked_ids
+    late = await auth_client.post(
+        f"/v1/sessions/{source['id']}/elicitations/{elicitation_id}/resolve",
+        json={"action": "accept"},
+    )
+    assert late.status_code == 202 and late.json() == {"queued": False, "expired": True}
+    assert _alias_of(db_uri, source) is None
 
 
 async def test_a_holder_releasing_its_permanent_role_is_asked_once_naming_it_permanent(

@@ -22,6 +22,7 @@ from omnigent.server._elicitation_registry import (
     _harness_pre_resolved_elicitations,
     _ParkedHarnessElicitation,
     _PreResolvedHarnessElicitation,
+    role_ask_expired,
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
@@ -119,7 +120,8 @@ def register_elicitations_routes(
             (``"accept"`` / ``"decline"`` / ``"cancel"``) plus
             optional form ``content``.
         :returns: ``{"queued": False}`` — resolution is synchronous
-            and persists no conversation item.
+            and persists no conversation item. ``"expired": True`` is added
+            when the answer reached a role question after it stopped waiting.
         :raises OmnigentError: 404 if no session exists.
         """
         user_id = _get_user_id(request, auth_provider)
@@ -131,6 +133,9 @@ def register_elicitations_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None:
                 raise _session_not_found()
+        if role_ask_expired(elicitation_id):
+            # The role request stopped waiting; this answer must not apply.
+            return {"queued": False, "expired": True}
         _resolve_data = {"elicitation_id": elicitation_id, **body.model_dump(exclude_none=True)}
         await _resolve_elicitation(session_id, _resolve_data, runner_router, conversation_store)
         # Apply any policy writes deferred by the relay tool-call ASK gate

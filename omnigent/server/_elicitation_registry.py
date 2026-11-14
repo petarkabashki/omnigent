@@ -12,6 +12,7 @@ resolving another's parked Future.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,12 +122,41 @@ _harness_pre_resolved_elicitations: WorkspaceScopedCache[str, _PreResolvedHarnes
     WorkspaceScopedCache()
 )
 
+# Maps an owner role-question's ``elicitation_id`` to its monotonic
+# deadline. An answer after the deadline is refused as too late.
+_role_ask_deadlines: WorkspaceScopedCache[str, float] = WorkspaceScopedCache()
+# How long an expired role question is remembered so a late answer is told so.
+_ROLE_ASK_EXPIRED_TTL_S = 86400.0
+
+
+def register_role_ask(elicitation_id: str, deadline: float) -> None:
+    """Remember a role question's deadline, forgetting long-expired ones."""
+    now = time.monotonic()
+    for stale_id, stale_deadline in _role_ask_deadlines.items():
+        if stale_deadline + _ROLE_ASK_EXPIRED_TTL_S < now:
+            _role_ask_deadlines.pop(stale_id, None)
+    _role_ask_deadlines[elicitation_id] = deadline
+
+
+def expire_role_ask(elicitation_id: str) -> None:
+    """Close a role question now: its asker stopped waiting."""
+    if elicitation_id in _role_ask_deadlines:
+        _role_ask_deadlines[elicitation_id] = min(
+            _role_ask_deadlines[elicitation_id], time.monotonic()
+        )
+
+
+def role_ask_expired(elicitation_id: str) -> bool:
+    """Whether ``elicitation_id`` is a role question no longer taking answers."""
+    deadline = _role_ask_deadlines.get(elicitation_id)
+    return deadline is not None and time.monotonic() >= deadline
+
 
 def reset_for_tests() -> None:
     """
     Clear every elicitation registry. For test isolation only.
 
-    The four registries are module-global and keyed by
+    The registries are module-global and keyed by
     ``elicitation_id``, so entries left behind by one test (a severed
     long-poll, an unresolved prompt, a pre-resolved tombstone) are
     visible to every later test in the same worker process. Mirrors
@@ -137,6 +167,7 @@ def reset_for_tests() -> None:
     _harness_elicitation_owners.clear()
     _harness_parked_elicitations.clear()
     _harness_pre_resolved_elicitations.clear()
+    _role_ask_deadlines.clear()
 
 
 __all__ = [
@@ -146,4 +177,7 @@ __all__ = [
     "_harness_elicitation_registry",
     "_harness_parked_elicitations",
     "_harness_pre_resolved_elicitations",
+    "expire_role_ask",
+    "register_role_ask",
+    "role_ask_expired",
 ]

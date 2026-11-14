@@ -2380,6 +2380,27 @@ describe("ApprovalCard — prompt expired", () => {
     expect(screen.queryByText(/Resolved elsewhere/)).toBeNull();
   });
 
+  it("says a late answer to a role question changed nothing", () => {
+    render(
+      <ApprovalCard
+        elicitationId="elic_too_late"
+        message="Session asks to take the role handle '/Keeper'. Approve?"
+        phase="tool_call"
+        policyName="role_change"
+        contentPreview="Session asks to take the role handle '/Keeper'. Approve?"
+        requestedSchema={{}}
+        status="responded"
+        response={{ action: "auto_resolved", reason: "too_late" }}
+      />,
+    );
+
+    expect(screen.getByText(/Too late/)).toBeDefined();
+    expect(screen.getByTestId("answered-too-late-hint").textContent).toContain(
+      "nothing was changed",
+    );
+    expect(screen.queryByText(/Resolved elsewhere/)).toBeNull();
+  });
+
   it("keeps the neutral pill for an auto-resolve with no reason", () => {
     render(
       <TooltipProvider>
