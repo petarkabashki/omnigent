@@ -53,6 +53,7 @@ _CURSOR_AUTO_APPROVE_TOOLS = [
     "sys_call_async",
     "sys_cancel_async",
     "sys_cancel_task",
+    "sys_lane_claim",
     "sys_list_models",
     "sys_os_edit",
     "sys_os_read",

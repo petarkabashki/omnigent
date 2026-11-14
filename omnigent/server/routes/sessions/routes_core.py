@@ -2924,6 +2924,83 @@ def register_core_routes(
 
         return await asyncio.to_thread(_set)
 
+    @router.put("/sessions/{session_id}/lane")
+    async def put_session_lane(request: Request, session_id: str) -> dict[str, Any]:
+        """Assign the session to a lane of a role (C31): the role's holder or the owner only.
+
+        An agent call (orchestration header) claims for the role its source session
+        holds, without an owner ask; an owner call names ``role`` and optionally
+        ``namespace`` (default: the lane session's own namespace).
+        """
+        from omnigent.server.session_aliases import (
+            claim_lane,
+            held_role_names,
+            lane_handle,
+            namespace_for_session,
+            resolve_namespace,
+        )
+
+        user_id = _require_user(request, auth_provider)
+        by_agent = request.headers.get(ORCHESTRATION_SOURCE_HEADER) is not None
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise OmnigentError("Body must be a JSON object", code=ErrorCode.INVALID_INPUT)
+        source = None
+        if by_agent:
+            source = require_orchestration_source(
+                request, user_id, conversation_store, permission_store
+            )
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+        )
+
+        def _claim() -> dict[str, Any]:
+            lane_session = conversation_store.get_conversation(session_id)
+            if lane_session is None:
+                raise _session_not_found()
+            role_name = payload.get("role")
+            if source is not None:
+                namespace = namespace_for_session(source, project_store, user_id)
+                if role_name is None:
+                    held = held_role_names(project_store, source.id)
+                    if len(held) != 1:
+                        raise OmnigentError(
+                            "Name the role: the calling session holds "
+                            + (f"{len(held)} roles" if held else "no role"),
+                            code=ErrorCode.INVALID_INPUT,
+                        )
+                    role_name = held[0]
+            elif isinstance(payload.get("namespace"), str):
+                namespace = resolve_namespace(
+                    conversation_store, project_store, payload["namespace"], user_id
+                )
+            else:
+                namespace = namespace_for_session(lane_session, project_store, user_id)
+            if not isinstance(role_name, str):
+                raise OmnigentError("'role' is required", code=ErrorCode.INVALID_INPUT)
+            role, lane = claim_lane(
+                conversation_store,
+                project_store,
+                lane_session=lane_session,
+                namespace=namespace,
+                user_id=user_id,
+                role_name=role_name,
+                lane=payload.get("lane"),
+                purpose=payload.get("purpose"),
+                item=payload.get("item"),
+                by_holder=source,
+            )
+            return {
+                "session_id": lane.session_id,
+                "role": role.name,
+                "lane": lane.name,
+                "address": lane_handle(namespace.path, role.name, lane.name),
+                "purpose": lane.purpose,
+                "item": lane.item,
+            }
+
+        return await asyncio.to_thread(_claim)
+
     @router.delete("/sessions/{session_id}/alias", status_code=204)
     async def delete_session_alias(request: Request, session_id: str) -> Response:
         """Release the session's role; a failed release is an error, never a silent success.

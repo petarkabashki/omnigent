@@ -7,9 +7,14 @@ import pytest
 from omnigent.harnesses.antigravity_native import bridge as antigravity_bridge
 from omnigent.harnesses.cursor_native import bridge as cursor_bridge
 from omnigent.runner import tool_dispatch
-from omnigent.tools.builtins import SysRoleListTool, SysRoleReleaseTool, SysRoleTakeTool
+from omnigent.tools.builtins import (
+    SysLaneClaimTool,
+    SysRoleListTool,
+    SysRoleReleaseTool,
+    SysRoleTakeTool,
+)
 
-ROLE_TOOLS = (SysRoleTakeTool.name(), SysRoleReleaseTool.name())
+ROLE_TOOLS = (SysRoleTakeTool.name(), SysRoleReleaseTool.name(), SysLaneClaimTool.name())
 
 
 @pytest.mark.parametrize(
@@ -32,3 +37,9 @@ def test_role_take_schema_requires_only_a_role_never_a_session_id() -> None:
     # The caller is always the session itself; only a forced release names a role.
     assert set(release["properties"]) == {"role", "force", "give_to"}
     assert "required" not in release
+
+
+def test_lane_claim_schema_names_the_target_session_and_lane() -> None:
+    parameters = SysLaneClaimTool().get_schema()["function"]["parameters"]
+    assert parameters["required"] == ["session_id", "lane"]
+    assert set(parameters["properties"]) == {"session_id", "lane", "role", "purpose", "item"}

@@ -11,6 +11,7 @@ Legacy label-projects have no rows at all, so their aliases stay plain labels.
 """
 
 import logging
+import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -18,13 +19,15 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from omnigent.entities import Conversation, Role
+from omnigent.entities import Conversation, Role, RoleLane
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.session_alias_client import ALIAS_PATTERN
 from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
+    LANE_NAME_LABEL_KEY,
     PROJECT_LABEL_KEY,
     ROLE_ID_LABEL_KEY,
+    ROLE_LANE_LABEL_KEY,
     ROLE_OVERLAY_LABEL_KEY,
     ROLE_RELEASED_AT_LABEL_KEY,
     ROLE_RELEASED_BY_LABEL_KEY,
@@ -48,6 +51,11 @@ _PAGE_SIZE = 200
 _MAX_PAGES = 50
 _MIRROR_LABEL_KEYS = (ALIAS_LABEL_KEY, ROLE_ID_LABEL_KEY, ROLE_OVERLAY_LABEL_KEY)
 _RELEASE_CAS_ATTEMPTS = 3
+_LANE_PATTERN = re.compile(r"[a-z0-9-]{1,32}")
+# ``main`` is the holder's implicit lane; ``*`` stays free for a future broadcast.
+_RESERVED_LANES = frozenset({"main"})
+_LANE_PURPOSE_MAX = 200
+_LANE_ITEM_MAX = 32
 _RELEASE_HOOK_ATTEMPTS = 3
 _RELEASE_HOOK_BACKOFF_S = 0.05
 
@@ -990,6 +998,146 @@ def plan_force_release(
         target = conversations.get_conversation(target_id)
         _require_fit_target(roles, projects, role, target, target_id, namespace, user_id)
     return ForceRelease(role=role, namespace=namespace, holder=holder, target=target)
+
+
+def validate_lane(lane: object) -> str:
+    """Return a lane slug, or raise ``INVALID_INPUT``."""
+    if not isinstance(lane, str) or not _LANE_PATTERN.fullmatch(lane):
+        raise OmnigentError(
+            "A lane name is 1-32 characters of lowercase letters, digits and '-', e.g. 'c30'",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if lane in _RESERVED_LANES:
+        raise OmnigentError(
+            f"Lane name {lane!r} is reserved: the role's holder is its main lane",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return lane
+
+
+def _optional_text(value: object, field: str, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.strip()) > limit or "\n" in value:
+        raise OmnigentError(
+            f"{field} must be one line of at most {limit} characters",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return value.strip() or None
+
+
+def lane_handle(path: str, role_name: str, lane: str) -> str:
+    """``<path>/Role/lane``; the unfiled root shows a leading ``/``."""
+    return f"{role_handle(path, role_name)}/{lane}"
+
+
+def _live_lane_session(conversations: ConversationStore, lane: RoleLane) -> Conversation | None:
+    session = conversations.get_conversation(lane.session_id)
+    return session if session is not None and _is_live(session) else None
+
+
+def _clear_lane_mirror(conversations: ConversationStore, session_id: str) -> None:
+    for key in (ROLE_LANE_LABEL_KEY, LANE_NAME_LABEL_KEY):
+        conversations.delete_label(session_id, key)
+
+
+def _close_stale_lane(conversations: ConversationStore, roles: RoleStore, lane: RoleLane) -> bool:
+    """Close ``lane`` when its session is gone; ``True`` when the name is now free."""
+    if _live_lane_session(conversations, lane) is not None:
+        return False
+    roles.close_lane(lane.id)
+    try:
+        _clear_lane_mirror(conversations, lane.session_id)
+    except Exception:
+        _logger.warning(
+            "Clearing the lane labels of session %s failed", lane.session_id, exc_info=True
+        )
+    return True
+
+
+def claim_lane(
+    conversations: ConversationStore,
+    projects: ProjectStore | None,
+    *,
+    lane_session: Conversation,
+    namespace: Namespace,
+    user_id: str | None,
+    role_name: str,
+    lane: object,
+    purpose: object = None,
+    item: object = None,
+    by_holder: Conversation | None = None,
+) -> tuple[Role, RoleLane]:
+    """Assign ``lane_session`` to a new lane of the role ``role_name`` in ``namespace``.
+
+    Only the role's live holder (``by_holder``) or the owner (``None``) may
+    claim. The row is written first and the labels mirror it.
+
+    :raises OmnigentError: ``INVALID_INPUT`` for a bad name or an ineligible
+        session; ``NOT_FOUND`` for an unknown role; ``FORBIDDEN`` when the caller
+        does not hold the role; ``CONFLICT`` when the name or session is taken.
+    """
+    name = validate_lane(lane)
+    purpose_text = _optional_text(purpose, "purpose", _LANE_PURPOSE_MAX)
+    item_text = _optional_text(item, "item", _LANE_ITEM_MAX)
+    roles = _role_store(projects)
+    role = _namespace_role(roles, namespace, validate_alias(role_name), user_id)
+    if roles is None or role is None:
+        raise OmnigentError(
+            f"No role {role_name!r} in {_where(namespace.path)}; sys_role_list shows the roles",
+            code=ErrorCode.NOT_FOUND,
+        )
+    holder = _live_holder(conversations, role)
+    if by_holder is not None and (holder is None or holder.id != by_holder.id):
+        raise OmnigentError(
+            f"Only the holder of {role_handle(namespace.path, role.name)!r} or the owner "
+            "can assign its lanes",
+            code=ErrorCode.FORBIDDEN,
+        )
+    if lane_session.parent_conversation_id is not None or not _is_live(lane_session):
+        raise OmnigentError(
+            f"Session {lane_session.id} must be a live top-level session to work a lane",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    if lane_session.labels.get(ALIAS_LABEL_KEY) or roles.held_by([lane_session.id]):
+        raise OmnigentError(
+            f"Session {lane_session.id} holds a role; a lane session holds none",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    current = roles.lane_of(lane_session.id)
+    if current is not None and current.role_id == role.id and current.name == name:
+        _write_lane_mirror(conversations, lane_session.id, namespace.path, role, name)
+        return role, current
+    existing = roles.find_lane(role.id, name)
+    if existing is not None:
+        _close_stale_lane(conversations, roles, existing)
+    _require_in_namespace(conversations, projects, lane_session, namespace, user_id)
+    claimed = roles.claim_lane(
+        role.id, name, lane_session.id, purpose=purpose_text, item=item_text
+    )
+    _write_lane_mirror(conversations, lane_session.id, namespace.path, role, name)
+    return role, claimed
+
+
+def _write_lane_mirror(
+    conversations: ConversationStore, session_id: str, path: str, role: Role, lane: str
+) -> None:
+    conversations.set_labels(
+        session_id, {ROLE_LANE_LABEL_KEY: role_handle(path, role.name), LANE_NAME_LABEL_KEY: lane}
+    )
+
+
+def close_session_lane(
+    conversations: ConversationStore, projects: ProjectStore | None, session_id: str
+) -> RoleLane | None:
+    """Close the lane ``session_id`` works, freeing its name; ``None`` when it works none."""
+    roles = _role_store(projects)
+    lane = roles.lane_of(session_id) if roles is not None else None
+    if roles is None or lane is None:
+        return None
+    roles.close_lane(lane.id)
+    _clear_lane_mirror(conversations, session_id)
+    return lane
 
 
 def held_role_names(projects: ProjectStore | None, session_id: str) -> list[str]:

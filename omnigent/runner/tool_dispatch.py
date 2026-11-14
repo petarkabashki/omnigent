@@ -330,6 +330,7 @@ _SESSION_QUERY_TOOLS = frozenset(
         "sys_role_list",
         "sys_role_take",
         "sys_role_release",
+        "sys_lane_claim",
         "sys_thread_list",
         "sys_thread_history",
         "sys_thread_note",
@@ -577,7 +578,11 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     )
     from omnigent.tools.builtins.list_comments import ListCommentsTool
     from omnigent.tools.builtins.role_list import SysRoleListTool
-    from omnigent.tools.builtins.role_take import SysRoleReleaseTool, SysRoleTakeTool
+    from omnigent.tools.builtins.role_take import (
+        SysLaneClaimTool,
+        SysRoleReleaseTool,
+        SysRoleTakeTool,
+    )
     from omnigent.tools.builtins.spawn import (
         SysSessionGetHistoryTool,
         SysSessionGetInfoTool,
@@ -629,6 +634,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysRoleListTool,
             SysRoleTakeTool,
             SysRoleReleaseTool,
+            SysLaneClaimTool,
             SysThreadListTool,
             SysThreadHistoryTool,
             SysThreadNoteTool,
@@ -5443,6 +5449,10 @@ async def _execute_session_query_tool(
         return await _group_thread_via_rest(tool_name, args, conversation_id, server_client)
     if tool_name in ("sys_thread_list", "sys_thread_history", "sys_thread_note"):
         return await _thread_via_rest(tool_name, args, conversation_id, server_client)
+    if tool_name == "sys_lane_claim":
+        return await _lane_claim_via_rest(
+            args, {ORCHESTRATION_SOURCE_HEADER: conversation_id}, server_client
+        )
     if tool_name in ("sys_role_take", "sys_role_release"):
         return await _role_change_via_rest(tool_name, args, conversation_id, server_client)
     return await _session_close_via_rest(args, conversation_id, server_client)
@@ -5603,6 +5613,30 @@ async def _role_change_via_rest(
     if tool_name == "sys_role_release":
         return json.dumps({"released": True})
     return json.dumps({"taken": True, "role": resp.json().get("alias")})
+
+
+async def _lane_claim_via_rest(
+    args: _JsonObject, headers: dict[str, str], server_client: httpx.AsyncClient
+) -> str:
+    """Assign another session to a lane of the caller's role; the server checks the holder."""
+    lane, target = args.get("lane"), args.get("session_id")
+    if not isinstance(lane, str) or not isinstance(target, str) or not target.strip():
+        return json.dumps({"error": "sys_lane_claim: lane and session_id are required strings"})
+    body: _JsonObject = {"lane": lane.strip()}
+    for key in ("role", "purpose", "item"):
+        if isinstance(args.get(key), str):
+            body[key] = args[key]
+    try:
+        resp = await server_client.put(
+            f"{_session_url(target.strip())}/lane", json=body, headers=headers
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"sys_lane_claim failed: {exc}"})
+    if resp.status_code != 200:
+        return json.dumps(
+            {"error": f"sys_lane_claim returned {resp.status_code}", "detail": resp.text[:600]}
+        )
+    return json.dumps({"lane_claimed": True, **resp.json()})
 
 
 async def _role_force_release_via_rest(

@@ -95,3 +95,61 @@ class SysRoleReleaseTool(Tool):
                 },
             },
         }
+
+
+class SysLaneClaimTool(Tool):
+    """Schema-only tool the runner forwards to ``PUT /v1/sessions/{id}/lane``."""
+
+    @classmethod
+    def name(cls) -> str:
+        """Return the tool name."""
+        return "sys_lane_claim"
+
+    @classmethod
+    def description(cls) -> str:
+        """Return the LLM-facing description."""
+        return (
+            "As the holder of a role, assign another session to a named lane of that role so "
+            "it can be addressed as Role/lane (e.g. 'Architect/c30'). No owner ask: the holder "
+            "decides. The session must be live, top-level and hold no role; the lane name "
+            "frees when that session closes. Releasing the role keeps its lanes."
+        )
+
+    def get_schema(self) -> dict[str, Any]:
+        """Return the OpenAI-format schema."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": self.description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "The session that will work the lane.",
+                        },
+                        "lane": {
+                            "type": "string",
+                            "description": "Lane name: 1-32 lowercase letters, digits or '-', "
+                            "e.g. 'c30'; 'main' is reserved for the holder.",
+                        },
+                        "role": {
+                            "type": "string",
+                            "description": "The role this session holds; optional when it "
+                            "holds exactly one.",
+                        },
+                        "purpose": {
+                            "type": "string",
+                            "description": "Optional one-line purpose, at most 200 characters.",
+                        },
+                        "item": {
+                            "type": "string",
+                            "description": "Optional tracker item, e.g. 'C30'.",
+                        },
+                    },
+                    "required": ["session_id", "lane"],
+                    "additionalProperties": False,
+                },
+            },
+        }

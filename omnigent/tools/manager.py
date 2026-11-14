@@ -28,6 +28,7 @@ from omnigent.tools.builtins import (
     SysAgentListTool,
     SysCallAsyncTool,
     SysCancelAsyncTool,
+    SysLaneClaimTool,
     SysListModelsTool,
     SysReadInboxTool,
     SysRoleListTool,
@@ -480,6 +481,7 @@ class ToolManager:
         self._tools[SysThreadPostTool.name()] = SysThreadPostTool()
         self._tools[SysRoleTakeTool.name()] = SysRoleTakeTool()
         self._tools[SysRoleReleaseTool.name()] = SysRoleReleaseTool()
+        self._tools[SysLaneClaimTool.name()] = SysLaneClaimTool()
 
         # Session sharing: opt-in via the dedicated
         # ``agent_session_sharing`` flag, independent of spawn / declared

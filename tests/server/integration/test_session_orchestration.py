@@ -25,6 +25,7 @@ from omnigent.stores.conversation_store import (
     ALIAS_LABEL_KEY,
     CREATED_BY_SESSION_LABEL_KEY,
     EXECUTOR_LABEL_KEY,
+    LANE_NAME_LABEL_KEY,
     PROJECT_LABEL_KEY,
     ROLE_ID_LABEL_KEY,
     ROLE_OVERLAY_LABEL_KEY,
@@ -2132,6 +2133,35 @@ async def test_role_take_conflicts_and_one_role_rules_hold_after_approval(
     second = await _role_tool(auth_client, source, "sys_role_take", role="Second")
     assert second["error"].endswith("returned 409") and "release it first" in second["detail"]
     assert _alias_of(db_uri, source) == "First"
+
+
+async def test_holder_assigns_a_lane_without_an_owner_ask_and_a_former_holder_cannot(
+    auth_client, peers, db_uri, owner_verdicts
+):
+    holder, worker, _ = peers
+    assert (await _role_tool(auth_client, holder, "sys_role_take", role="Architect"))["taken"]
+    asks = len(owner_verdicts["asked"])
+
+    claimed = await _role_tool(
+        auth_client, holder, "sys_lane_claim", lane="c30", session_id=worker["id"], item="C30"
+    )
+
+    assert claimed["lane_claimed"] and claimed["address"] == "/Architect/c30"
+    assert claimed["session_id"] == worker["id"] and claimed["item"] == "C30"
+    assert len(owner_verdicts["asked"]) == asks  # decision A: the holder needs no ask
+    labels = SqlAlchemyConversationStore(db_uri).get_conversation(worker["id"]).labels
+    assert labels[LANE_NAME_LABEL_KEY] == "c30"
+
+    assert await _role_tool(auth_client, holder, "sys_role_release") == {"released": True}
+    refused = await _role_tool(
+        auth_client,
+        holder,
+        "sys_lane_claim",
+        role="Architect",
+        lane="c31",
+        session_id=worker["id"],
+    )
+    assert "403" in refused["error"]
 
 
 async def test_role_release_without_a_role_is_refused_before_asking(

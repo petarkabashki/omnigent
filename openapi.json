@@ -21193,6 +21193,51 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/lane": {
+      "put": {
+        "description": "Assign the session to a lane of a role (C31): the role's holder or the owner only.\n\nAn agent call (orchestration header) claims for the role its source session\nholds, without an owner ask; an owner call names `role` and optionally\n`namespace` (default: the lane session's own namespace).",
+        "operationId": "put_session_lane_v1_sessions__session_id__lane_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Session Lane V1 Sessions  Session Id  Lane Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Session Lane",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/model-override/reset": {
       "post": {
         "description": "Retire a rejected pick after fallback without replacing a newer selection.",

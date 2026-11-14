@@ -50,7 +50,7 @@ from omnigent.tools.builtins.read_skill_file import (
     ReadSkillFileTool,
 )
 from omnigent.tools.builtins.role_list import SysRoleListTool
-from omnigent.tools.builtins.role_take import SysRoleReleaseTool, SysRoleTakeTool
+from omnigent.tools.builtins.role_take import SysLaneClaimTool, SysRoleReleaseTool, SysRoleTakeTool
 from omnigent.tools.builtins.scheduled_tasks import (
     SysScheduledTaskCreateTool,
     SysScheduledTaskDeleteTool,
@@ -95,6 +95,7 @@ __all__ = [
     "SysAgentListTool",
     "SysCallAsyncTool",
     "SysCancelAsyncTool",
+    "SysLaneClaimTool",
     "SysListModelsTool",
     "SysReadInboxTool",
     "SysRoleListTool",

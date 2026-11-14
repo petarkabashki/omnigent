@@ -339,7 +339,11 @@ from omnigent.server.schemas import (
     ThreadHeldRequest,
     ThreadPostRequest,
 )
-from omnigent.server.session_aliases import held_role_names, release_role_after_lifecycle
+from omnigent.server.session_aliases import (
+    close_session_lane,
+    held_role_names,
+    release_role_after_lifecycle,
+)
 from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
@@ -446,6 +450,11 @@ def _release_role_on_close(
         holds_role = True
     if holds_role:
         release_role_after_lifecycle(conversation_store, project_store, session_id, reason="close")
+    # A closed lane session frees its lane name; the role and its holder are untouched.
+    try:
+        close_session_lane(conversation_store, project_store, session_id)
+    except Exception:
+        _logger.warning("Closing the lane of session %s failed", session_id, exc_info=True)
 
 
 def _compaction_model_for(
