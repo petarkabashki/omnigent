@@ -3114,6 +3114,8 @@ def register_core_routes(
                 )
 
         def _apply() -> dict[str, Any]:
+            # A plan only exists for a role found in the project store.
+            assert project_store is not None
             role = apply_force_release(
                 conversation_store,
                 project_store,

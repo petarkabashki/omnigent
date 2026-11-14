@@ -26,7 +26,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 from pydantic import TypeAdapter
@@ -1344,7 +1344,10 @@ class SessionsNamespace:
                         page = PaginatedList(
                             data=kept,
                             has_more=first.has_more or len(first.data) > limit,
-                            last_id=last.get("id") if last is not None else None,
+                            # Session ids are strings in the API's list responses.
+                            last_id=cast("str | None", last.get("id"))
+                            if last is not None
+                            else None,
                         )
                     else:
                         page = await self.child_sessions(parent_id, limit=limit, after=after)

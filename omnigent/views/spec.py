@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -182,26 +182,31 @@ class Column(_Strict):
     badges: list[Badge] = Field(default_factory=list, max_length=8)
 
 
-class _View(_Strict):
-    source: Source
+SourceT = TypeVar("SourceT")
+
+
+class _View(_Strict, Generic[SourceT]):
+    source: SourceT
     marks: list[Mark] = Field(default_factory=list, max_length=8)
     empty: str | None = Field(default=None, max_length=200, description="Text when no rows match.")
 
 
-class ListView(_View):
+class ListView(_View[Source]):
     type: Literal["List"]
     item: Item
 
 
-class TableView(_View):
+class TableView(_View[Source]):
     type: Literal["Table"]
     columns: list[Column] = Field(min_length=1, max_length=12)
 
 
-class TreeView(_View):
+# spawned_by links sessions, so a tree reads only session rows.
+TreeSource = Annotated[SessionsSource | SubagentsSource, Field(discriminator="name")]
+
+
+class TreeView(_View[TreeSource]):
     type: Literal["Tree"]
-    # spawned_by links sessions, so a tree reads only session rows.
-    source: Annotated[SessionsSource | SubagentsSource, Field(discriminator="name")]
     edge: Literal["spawned_by"] = "spawned_by"
     item: Item
 

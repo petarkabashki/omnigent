@@ -7053,6 +7053,7 @@ def _claude_terminal_request(
     # command/args to wrap the same fully-augmented Claude launch. Identity by
     # default. See omnigent.claude_launcher.
     command, args = resolve_claude_launch(command, args)
+    launch_cwd = str(Path.cwd().resolve())
     spec: _JsonObject = {
         "command": command,
         "args": args,
@@ -7072,12 +7073,12 @@ def _claude_terminal_request(
         # deployments; ``omnigent claude`` is a local-only
         # single-user wrapper, so taking the explicit-cwd path
         # short-circuits it safely.
-        "cwd": str(Path.cwd().resolve()),
+        "cwd": launch_cwd,
         "scrollback": _CLAUDE_TERMINAL_SCROLLBACK_LINES,
     }
     # This wrapper is the CLI; don't trust a surface inherited from a session's shell.
     spec["env"] = build_native_claude_terminal_env(
-        claude_config, client_surface="cli", workspace=Path(spec["cwd"])
+        claude_config, client_surface="cli", workspace=Path(launch_cwd)
     )
     if claude_config is not None:
         # The runner's terminal layer inherits the parent process env.

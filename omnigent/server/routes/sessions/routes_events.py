@@ -1815,6 +1815,11 @@ def register_events_routes(
         sent_address: str | None = None
         # An fyi peer message waits in the durable queue for the receiver's next turn.
         fyi_message = False
+        # Set only for a peer message: who it speaks as and the receiver's role handle.
+        speaker: Conversation | None = None
+        target_handle: str | None = None
+        from omnigent.server.role_threads import holds_role
+
         if peer_message:
             kind = body.data.get("kind", "action")
             if kind not in ("action", "fyi"):
@@ -1844,7 +1849,6 @@ def register_events_routes(
                 fold_session_thread,
                 guard_outbound,
                 hold_message,
-                holds_role,
                 inbound_thread_key,
                 loop_guard_error,
                 record_inbound,
@@ -1873,7 +1877,6 @@ def register_events_routes(
             )
             peer_text = body.data.get("message")
             thread_key = None
-            target_handle: str | None = None
             hops = 0
             verdict = None
             if holds_role(speaker) or holds_role(conv):
@@ -2280,10 +2283,10 @@ def register_events_routes(
                     if peer_message and addressed_to_role(sent_address)
                     else None
                 ),
-                sender_id=speaker.id if peer_message else None,
+                sender_id=speaker.id if speaker is not None else None,
                 sender_thread=(
                     (target_handle or f"session:{conv.id}")
-                    if peer_message and holds_role(speaker)
+                    if speaker is not None and holds_role(speaker)
                     else None
                 ),
                 deliver_at_turn=fyi_message,

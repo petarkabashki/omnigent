@@ -40,7 +40,9 @@ RESOLVE_TIMEOUT_SECONDS = 10.0
 # Skill directories a project fills itself; a copy there counts as the project layer.
 PROJECT_SKILL_DIRS = ((".claude", "skills"), (".agents", "skills"))
 
+# custom-lint: disable-next=workspace-scoped-cache -- log dedupe keyed by a fallback cause
 _warned: set[str] = set()
+# custom-lint: disable-next=workspace-scoped-cache -- keyed by host command and project path
 _cache: dict[tuple[tuple[str, ...], str, str | None], tuple[str, LibraryResolution]] = {}
 _cache_lock = threading.Lock()
 

@@ -170,6 +170,7 @@ def find_role_sources(
     return sources
 
 
+# custom-lint: disable-next=workspace-scoped-cache -- log dedupe keyed by a host path
 _warned_untrusted_role_dirs: set[Path] = set()
 
 

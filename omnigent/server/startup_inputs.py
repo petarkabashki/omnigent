@@ -15,6 +15,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from starlette.datastructures import Headers
 
 from omnigent.db.db_models import current_workspace_id
+from omnigent.db.workspace_cache import WorkspaceScopedSet
 from omnigent.entities.conversation import (
     Conversation,
     ConversationItem,
@@ -50,7 +51,7 @@ _logger = logging.getLogger(__name__)
 STARTUP_LABEL = "omnigent.startup"
 RESENT_NOTICE = "[Re-sent after a hub restart; it may be a repeat]"
 # Inputs this process submitted; any other submitted input predates a restart.
-_claimed_here: set[tuple[int, str, str]] = set()
+_claimed_here: WorkspaceScopedSet[tuple[str, str]] = WorkspaceScopedSet()
 
 
 def initial_input_id(session_id: str) -> str:
@@ -186,7 +187,7 @@ class StartupInputContext:
             status="incomplete",
         )
         if self.submitted:
-            _claimed_here.add((current_workspace_id(), session_id, self.input_id))
+            _claimed_here.add((session_id, self.input_id))
             start_fire_stage("prompt_send", session_id=session_id)
         return self.submitted
 
@@ -637,7 +638,7 @@ class ManagedStartupInputs:
 
         A surviving runner drops it by its unchanged pending id; a lost one runs it.
         """
-        if (current_workspace_id(), session_id, item.id) in _claimed_here:
+        if (session_id, item.id) in _claimed_here:
             return item
         data = item.data
         if isinstance(data, (MessageData, SlashCommandData)):

@@ -137,18 +137,20 @@ class HubSources:
         return self._hosts[host_id]
 
     def _owned_roles(self) -> list[Any]:
-        if self.projects is None or getattr(self.projects, "roles", None) is None:
+        roles = getattr(self.projects, "roles", None)
+        if roles is None:
             return []
-        return self.projects.roles.list_owned(user_id=self.user_id)
+        return roles.list_owned(user_id=self.user_id)
 
     def _role_handle(self, role: Any) -> str:
         return role_handle(self._project_path(role.project_id) or "", role.name)
 
     def _roles_by_session(self, session_ids: Iterable[str]) -> dict[str, list[str]]:
         held: dict[str, list[str]] = {}
-        if self.projects is None or getattr(self.projects, "roles", None) is None:
+        roles = getattr(self.projects, "roles", None)
+        if roles is None:
             return held
-        for role in self.projects.roles.held_by(list(session_ids)):
+        for role in roles.held_by(list(session_ids)):
             if role.holder_session_id:
                 held.setdefault(role.holder_session_id, []).append(self._role_handle(role))
         return {session_id: sorted(handles) for session_id, handles in held.items()}
