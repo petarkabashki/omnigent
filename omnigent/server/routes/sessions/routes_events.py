@@ -339,7 +339,7 @@ from omnigent.server.schemas import (
     ThreadHeldRequest,
     ThreadPostRequest,
 )
-from omnigent.server.session_aliases import release_role_after_lifecycle
+from omnigent.server.session_aliases import held_role_names, release_role_after_lifecycle
 from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
@@ -432,6 +432,20 @@ _METADATA_OBSERVATION_EVENT_TYPES = frozenset(
 _TURN_INPUT_TYPES = frozenset({"message", "session_message", _SLASH_COMMAND_TYPE})
 
 _ACKNOWLEDGED_RELAUNCH_CONNECT_FACTOR = 2.0
+
+
+def _release_role_on_close(
+    conversation_store: ConversationStore, project_store: Any, session_id: str
+) -> None:
+    """Release a closed session's role, skipping the retries when it holds none."""
+    # Side-chat children never hold a role. A failed read still releases, so a close never raises.
+    try:
+        holds_role = bool(held_role_names(project_store, session_id))
+    except Exception:
+        _logger.warning("Reading the roles of closed session %s failed", session_id, exc_info=True)
+        holds_role = True
+    if holds_role:
+        release_role_after_lifecycle(conversation_store, project_store, session_id, reason="close")
 
 
 def _compaction_model_for(
@@ -1066,7 +1080,7 @@ def register_events_routes(
 
     def _mark_closed(session_id: str) -> None:
         conversation_store.set_labels(session_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
-        release_role_after_lifecycle(conversation_store, project_store, session_id, reason="close")
+        _release_role_on_close(conversation_store, project_store, session_id)
 
     def _has_bound_runner_authority(
         request: Request | _RunnerEventContext | StartupInputContext, conv: Any

@@ -2021,6 +2021,43 @@ def test_list_conversations_search_query_matches_role_handle(
     assert matched("harbor/") == set()
 
 
+def test_list_conversations_search_query_matches_same_case_non_ascii(
+    conversation_store: SqlAlchemyConversationStore, db_uri: str
+) -> None:
+    """Sidebar search finds non-ASCII titles, content and role handles on SQLite too."""
+    from omnigent.stores.conversation_store import ALIAS_LABEL_KEY
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    by_title = conversation_store.create_conversation(title="Ärger im Build")
+    by_content = conversation_store.create_conversation(title="General chat")
+    conversation_store.append(
+        by_content.id,
+        [
+            NewConversationItem(
+                type="message",
+                response_id="resp_nonascii",
+                data=MessageData(
+                    role="user", content=[{"type": "input_text", "text": "ÄRGER mit dem Deploy"}]
+                ),
+            ),
+        ],
+    )
+    project = SqlAlchemyProjectStore(db_uri).create("d" * 32, "Übung", None)
+    holder = conversation_store.create_conversation(title="Holder")
+    conversation_store.set_labels(holder.id, {ALIAS_LABEL_KEY: "Prüfer"})
+    conversation_store.set_conversation_project(holder.id, project.id)
+
+    def matched(query: str) -> dict[str, str | None]:
+        page = conversation_store.list_conversations(search_query=query)
+        return {c.id: c.search_snippet for c in page.data}
+
+    found = matched("ÄRG")
+    assert set(found) == {by_title.id, by_content.id}
+    assert found[by_content.id] is not None and "ÄRGER" in found[by_content.id]
+    assert set(matched("Prü")) == set(matched("PRÜ")) == {holder.id}
+    assert set(matched("ÜBUNG/PRÜ")) == set(matched("Übung/prü")) == {holder.id}
+
+
 @pytest.mark.parametrize("store_fixture", ["conversation_store", "split_db_conversation_store"])
 def test_list_conversations_filters_by_workspace_and_ids(
     store_fixture: str, request: pytest.FixtureRequest

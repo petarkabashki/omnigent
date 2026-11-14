@@ -257,6 +257,19 @@ def _like_contains_patterns(query: str, dialect_name: str) -> list[str]:
     return patterns
 
 
+def _like_any(expression: Any, patterns: list[str], *, ilike: bool = False) -> ColumnElement[bool]:
+    """
+    OR one escaped ``LIKE`` per pattern; a single pattern stays a plain clause.
+
+    :param expression: Column or expression, e.g. ``func.lower(SqlConversation.title)``.
+    :param patterns: From :func:`_like_contains_patterns`.
+    :param ilike: Use ``ILIKE`` on ``expression`` instead of ``LIKE``.
+    :returns: The combined clause.
+    """
+    method = expression.ilike if ilike else expression.like
+    return or_(*(method(pattern, escape=_LIKE_ESCAPE) for pattern in patterns))
+
+
 # Upper bound on rows fetched per SQL statement when listing conversation
 # items. A deployed managed-Postgres backend failed one oversized read of a
 # large conversation (multi-megabyte pages 500'd at limit>=500 while limit<=400
@@ -833,7 +846,7 @@ def _fetch_search_snippets(
     """
     if not conversation_ids or not query:
         return {}
-    pattern = _like_contains_pattern(query)
+    patterns = _like_contains_patterns(query, session.get_bind().dialect.name)
     workspace_id = current_workspace_id()
     # workspace_id leads the (workspace_id, conversation_id, position) index.
     # Both the aggregate and the join-back below must include it or Postgres
@@ -845,7 +858,7 @@ def _fetch_search_snippets(
     match_pred = and_(
         SqlConversationItem.workspace_id == workspace_id,
         SqlConversationItem.conversation_id.in_(conversation_ids),
-        SqlConversationItem.search_text.ilike(pattern, escape=_LIKE_ESCAPE),
+        _like_any(SqlConversationItem.search_text, patterns, ilike=True),
     )
     # Earliest matching position per conversation — a small (conv_id, position)
     # aggregate, no bodies materialized.
@@ -4219,8 +4232,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             if title is not None:
                 stmt = stmt.where(SqlConversation.title == title)
             if search_query:
-                pattern = _like_contains_pattern(search_query)
-                title_match = func.lower(SqlConversation.title).like(pattern, escape=_LIKE_ESCAPE)
+                patterns = _like_contains_patterns(search_query, self._conv_engine.dialect.name)
+                title_match = _like_any(func.lower(SqlConversation.title), patterns)
                 # Correlated EXISTS rather than ``id IN (SELECT ...)``: the IN
                 # form is uncorrelated, so the match set is built for the WHOLE
                 # workspace before the outer query discards every row the caller
@@ -4240,7 +4253,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     .where(
                         SqlConversationItem.workspace_id == current_workspace_id(),
                         SqlConversationItem.conversation_id == SqlConversation.id,
-                        SqlConversationItem.search_text.ilike(pattern, escape=_LIKE_ESCAPE),
+                        _like_any(SqlConversationItem.search_text, patterns, ilike=True),
                     )
                     .exists()
                 )
@@ -6065,10 +6078,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         patterns = _like_contains_patterns(query, self._conv_engine.dialect.name)
         meta_patterns = _like_contains_patterns(query, self._engine.dialect.name)
 
-        def like_any(column: Any, candidates: list[str]) -> ColumnElement[bool]:
-            return or_(*(column.ilike(candidate, escape=_LIKE_ESCAPE) for candidate in candidates))
-
-        matches: list[ColumnElement[bool]] = [like_any(SqlConversation.title, patterns)]
+        matches: list[ColumnElement[bool]] = [
+            _like_any(SqlConversation.title, patterns, ilike=True)
+        ]
         if label_key:
             matches.append(
                 select(SqlConversationLabel.conversation_id)
@@ -6076,13 +6088,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                     SqlConversationLabel.workspace_id == current_workspace_id(),
                     SqlConversationLabel.conversation_id == SqlConversation.id,
                     SqlConversationLabel.key == label_key,
-                    like_any(SqlConversationLabel.value, patterns),
+                    _like_any(SqlConversationLabel.value, patterns, ilike=True),
                 )
                 .exists()
             )
         named = select(SqlConversationMetadata.id).where(
             SqlConversationMetadata.workspace_id == current_workspace_id(),
-            like_any(SqlConversationMetadata.sub_agent_name, meta_patterns),
+            _like_any(SqlConversationMetadata.sub_agent_name, meta_patterns, ilike=True),
         )
         if self._conv_engine is self._engine:
             matches.append(SqlConversation.id.in_(named))
@@ -6132,8 +6144,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                 select(SqlConversationLabel.conversation_id).where(
                     SqlConversationLabel.workspace_id == current_workspace_id(),
                     SqlConversationLabel.key == ALIAS_LABEL_KEY,
-                    func.lower(SqlConversationLabel.value).like(
-                        _like_contains_pattern(alias_part), escape=_LIKE_ESCAPE
+                    _like_any(
+                        func.lower(SqlConversationLabel.value),
+                        _like_contains_patterns(alias_part, self._conv_engine.dialect.name),
                     ),
                 )
             ).scalars()
@@ -6148,8 +6161,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                         .where(
                             SqlConversationMetadata.workspace_id == current_workspace_id(),
                             SqlConversationMetadata.id.in_(holder_ids),
-                            func.lower(SqlProject.name).like(
-                                _like_contains_pattern(project_name), escape=_LIKE_ESCAPE
+                            _like_any(
+                                func.lower(SqlProject.name),
+                                _like_contains_patterns(project_name, self._engine.dialect.name),
                             ),
                         )
                     ).scalars()

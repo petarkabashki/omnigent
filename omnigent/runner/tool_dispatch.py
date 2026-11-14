@@ -780,31 +780,46 @@ class _DiscoveryPage:
     has_more: bool
     next_after: str | None = None
     failed: bool = False
+    # Why a failed read failed, e.g. "403: Access denied"; shown in ``errors``.
+    error: str | None = None
+
+
+_MALFORMED_DISCOVERY_PAGE = _DiscoveryPage(
+    [], False, failed=True, error="the server returned a malformed page"
+)
+
+
+def _failed_discovery_page(resp: httpx.Response | None) -> _DiscoveryPage:
+    """A failed source read, carrying the server's reason (or that it was unreachable)."""
+    if resp is None:
+        return _DiscoveryPage([], False, failed=True, error="the server could not be reached")
+    reason = _omnigent_error_message(resp) or "request failed"
+    return _DiscoveryPage([], False, failed=True, error=f"{resp.status_code}: {reason}")
 
 
 def _parse_discovery_page(body: object) -> _DiscoveryPage:
     """Validate the server envelope before trusting its continuation state."""
     if not isinstance(body, dict):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     data = body.get("data")
     if not isinstance(data, list):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     rows: list[_JsonObject] = []
     for row in data:
         if not isinstance(row, dict):
-            return _DiscoveryPage([], False, failed=True)
+            return _MALFORMED_DISCOVERY_PAGE
         row_id = row.get("id")
         if not isinstance(row_id, str) or not row_id:
-            return _DiscoveryPage([], False, failed=True)
+            return _MALFORMED_DISCOVERY_PAGE
         rows.append(row)
     has_more = body.get("has_more", False)
     last_id = body.get("last_id")
     if not isinstance(has_more, bool):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     if last_id is not None and (not isinstance(last_id, str) or not last_id):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     if has_more and last_id is None:
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     return _DiscoveryPage(rows, has_more, cast(str | None, last_id))
 
 
@@ -832,6 +847,12 @@ def _bounded_discovery_result(
 
     requested_limit = limit or _DISCOVERY_LIST_MAX_LIMIT
     paged = page_sections or tuple(sections)
+    # A source the caller can't read is reported, never shown as zero rows.
+    errors = {
+        name: source_page.error or "lookup failed"
+        for name, source_page in source_pages.items()
+        if source_page.failed
+    }
 
     def _candidate(candidate_limit: int) -> str | None:
         page = dict(sections)
@@ -869,7 +890,7 @@ def _bounded_discovery_result(
             if cursor is None:
                 return None
             metadata["next_cursor"] = cursor
-        return json.dumps({**page, "page": metadata})
+        return json.dumps({**page, "page": metadata, **({"errors": errors} if errors else {})})
 
     # Cursor size depends on the last returned row, so serialized page size is
     # not monotonic in the row limit. Check the bounded public range directly.
@@ -6196,13 +6217,13 @@ async def _agent_list_fetch(
             params["after"] = after
         resp = await server_client.get(path, params=params, timeout=30.0)
     except Exception:  # noqa: BLE001
-        return _DiscoveryPage([], False, failed=True)
+        return _failed_discovery_page(None)
     if resp.status_code != 200:
-        return _DiscoveryPage([], False, failed=True)
+        return _failed_discovery_page(resp)
     try:
         body = resp.json()
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     return _parse_discovery_page(body)
 
 
@@ -6654,6 +6675,7 @@ async def _session_list_via_rest(
             sessions_page.has_more,
             sessions_page.next_after,
             failed=sessions_page.failed,
+            error=sessions_page.error,
         )
     sections: dict[str, list[_JsonObject]] = {"sessions": sessions_page.rows}
     if not compact:
@@ -7021,13 +7043,13 @@ async def _collect_global_sessions(
             "/v1/sessions", params=params, headers=headers, timeout=30.0
         )
     except Exception:  # noqa: BLE001
-        return _DiscoveryPage([], False, failed=True)
+        return _failed_discovery_page(None)
     if resp.status_code != 200:
-        return _DiscoveryPage([], False, failed=True)
+        return _failed_discovery_page(resp)
     try:
         body = resp.json()
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-        return _DiscoveryPage([], False, failed=True)
+        return _MALFORMED_DISCOVERY_PAGE
     page = _parse_discovery_page(body)
     if page.failed:
         return page
