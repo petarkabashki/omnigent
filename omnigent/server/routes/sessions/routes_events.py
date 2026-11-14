@@ -339,7 +339,7 @@ from omnigent.server.schemas import (
     ThreadHeldRequest,
     ThreadPostRequest,
 )
-from omnigent.server.session_aliases import release_role_after_lifecycle
+from omnigent.server.session_aliases import held_role_names, release_role_after_lifecycle
 from omnigent.server.session_live_state import handoff_count, last_liveness_stamp
 from omnigent.server.session_metadata_logging import log_session_metadata
 from omnigent.server.session_orchestration import require_orchestration_source
@@ -1066,7 +1066,11 @@ def register_events_routes(
 
     def _mark_closed(session_id: str) -> None:
         conversation_store.set_labels(session_id, {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE})
-        release_role_after_lifecycle(conversation_store, project_store, session_id, reason="close")
+        # Side-chat children never hold a role; skip the release retries for them.
+        if held_role_names(project_store, session_id):
+            release_role_after_lifecycle(
+                conversation_store, project_store, session_id, reason="close"
+            )
 
     def _has_bound_runner_authority(
         request: Request | _RunnerEventContext | StartupInputContext, conv: Any

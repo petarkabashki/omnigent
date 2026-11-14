@@ -890,7 +890,36 @@ async def test_unusable_server_envelope_remains_retryable(
 
     assert failed["builtins"] == []
     assert failed["page"]["has_more"]["builtins"] is True
+    assert failed["errors"]["builtins"] in {
+        "503: request failed",
+        "the server returned a malformed page",
+    }
+    assert "errors" not in retried
     assert [row["agent_id"] for row in retried["builtins"]] == ["ag_03", "ag_04", "ag_05"]
+
+
+@pytest.mark.asyncio
+async def test_sys_session_list_reports_a_refused_lookup_instead_of_no_rows() -> None:
+    """A lookup the caller may not make names the server's reason, not an empty list."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/sessions":
+            refusal = {"code": "forbidden", "message": "Namespace '/Private' is private"}
+            return httpx.Response(403, json={"error": refusal})
+        if path == "/v1/sessions/conv_caller/child_sessions":
+            return httpx.Response(200, json={"data": []})
+        if path == "/v1/sessions/conv_caller":
+            return httpx.Response(200, json={"id": "conv_caller", "parent_session_id": None})
+        raise AssertionError(f"unexpected path {path}")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://server"
+    ) as client:
+        refused = await _call_session(client, {"handle": "/Private/Keeper", "compact": True})
+
+    assert refused["sessions"] == []
+    assert refused["errors"] == {"sessions": "403: Namespace '/Private' is private"}
 
 
 @pytest.mark.parametrize(
